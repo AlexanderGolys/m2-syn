@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["m2-syn-macros"]
+
+[package]
+name = "m2-syn"
+version = "0.1.0"
+edition = "2024"
+description = "Typed syntax trees, traversal, and parser adapters for Macaulay2"
+license = "GPL-3.0-only"
+repository = "https://github.com/AlexanderGolys/m2-syn"
+readme = "README.md"
+keywords = ["macaulay2", "syntax", "syn", "parse", "m2"]
+categories = ["development-tools::ffi", "parser-implementations"]
+
+[features]
+default = []
+tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-macaulay2"]
+
+[dependencies]
+m2-syn-macros = { version = "0.1.0", path = "m2-syn-macros" }
+tree-sitter = { version = "0.26.9", optional = true }
+tree-sitter-macaulay2 = { version = "=5.0.0", optional = true }

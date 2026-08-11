@@ -1,0 +1,15 @@
+[package]
+name = "m2-syn-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Procedural macros for m2-syn"
+license = "GPL-3.0-only"
+repository = "https://github.com/AlexanderGolys/m2-syn"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full"] }

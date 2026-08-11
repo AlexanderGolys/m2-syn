@@ -1,0 +1,2 @@
+- Add quote aliases for M2 spellings that Rust cannot tokenize directly.
+- Preserve optional trivia when a parser adapter provides it.

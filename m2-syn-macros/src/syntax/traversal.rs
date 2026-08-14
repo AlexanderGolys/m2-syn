@@ -8,13 +8,13 @@ pub(super) enum Traversal {
 }
 
 impl Traversal {
-    pub(super) fn empty_walker(self, name: &Ident) -> TokenStream2 {
+    pub(super) fn empty_walker(self, name: &Ident, ty: TokenStream) -> TokenStream {
         let snake = to_snake_case(&name.to_string());
         match self {
             Self::Visit => {
                 let method = format_ident!("visit_{snake}");
                 quote! {
-                    pub fn #method<'ast, V>(_visitor: &mut V, _node: &'ast #name)
+                    pub fn #method<'ast, V>(_visitor: &mut V, _node: &'ast #ty)
                     where
                         V: Visit<'ast> + ?Sized,
                     {}
@@ -23,7 +23,7 @@ impl Traversal {
             Self::VisitMut => {
                 let method = format_ident!("visit_{snake}_mut");
                 quote! {
-                    pub fn #method<V>(_visitor: &mut V, _node: &mut #name)
+                    pub fn #method<V>(_visitor: &mut V, _node: &mut #ty)
                     where
                         V: VisitMut + ?Sized,
                     {}
@@ -32,7 +32,7 @@ impl Traversal {
             Self::Fold => {
                 let method = format_ident!("fold_{snake}");
                 quote! {
-                    pub fn #method<F>(_folder: &mut F, node: #name) -> #name
+                    pub fn #method<F>(_folder: &mut F, node: #ty) -> #ty
                     where
                         F: Fold + ?Sized,
                     {
@@ -46,10 +46,9 @@ impl Traversal {
     pub(super) fn struct_walker(
         self,
         name: &Ident,
-        style: ProductStyle,
         fields: &[FieldDefinition],
         token_like: &BTreeSet<SyntaxTypeName>,
-    ) -> TokenStream2 {
+    ) -> TokenStream {
         let snake = to_snake_case(&name.to_string());
         match self {
             Self::Visit => {
@@ -90,29 +89,15 @@ impl Traversal {
             }
             Self::Fold => {
                 let method = format_ident!("fold_{snake}");
-                let folded = match style {
-                    ProductStyle::Named => {
-                        let fields = fields.iter().map(|field| {
-                            let member = &field.member;
-                            let value = field
-                                .shape
-                                .stored_shape(token_like, false)
-                                .fold(quote!(node.#member));
-                            quote!(#member: #value)
-                        });
-                        quote!(#name { #(#fields,)* })
-                    }
-                    ProductStyle::Unnamed => {
-                        let fields = fields.iter().map(|field| {
-                            let member = &field.member;
-                            field
-                                .shape
-                                .stored_shape(token_like, false)
-                                .fold(quote!(node.#member))
-                        });
-                        quote!(#name(#(#fields,)*))
-                    }
-                };
+                let fields = fields.iter().map(|field| {
+                    let member = &field.member;
+                    let value = field
+                        .shape
+                        .stored_shape(token_like, false)
+                        .fold(quote!(node.#member));
+                    quote!(#member: #value)
+                });
+                let folded = quote!(#name { #(#fields,)* span: node.span });
                 quote! {
                     pub fn #method<F>(folder: &mut F, node: #name) -> #name
                     where
@@ -125,9 +110,13 @@ impl Traversal {
         }
     }
 
-    pub(super) fn enum_walker(self, definition: &EnumDefinition) -> TokenStream2 {
+    pub(super) fn enum_walker(self, definition: &EnumDefinition) -> TokenStream {
         let name = &definition.name;
         let snake = to_snake_case(&name.to_string());
+        let borrowed_fallback = definition
+            .variants
+            .is_empty()
+            .then(|| quote!(_ => unreachable!("empty generated syntax category")));
         match self {
             Self::Visit => {
                 let method = format_ident!("visit_{snake}");
@@ -141,7 +130,7 @@ impl Traversal {
                     where
                         V: Visit<'ast> + ?Sized,
                     {
-                        match node { #(#arms,)* }
+                        match node { #(#arms,)* #borrowed_fallback }
                     }
                 }
             }
@@ -157,7 +146,7 @@ impl Traversal {
                     where
                         V: VisitMut + ?Sized,
                     {
-                        match node { #(#arms,)* }
+                        match node { #(#arms,)* #borrowed_fallback }
                     }
                 }
             }
@@ -182,7 +171,7 @@ impl Traversal {
 }
 
 impl TypeShape {
-    fn visit(&self, value: TokenStream2, stored: bool) -> TokenStream2 {
+    fn visit(&self, value: TokenStream, stored: bool) -> TokenStream {
         match self {
             Self::Base(_, ident) => {
                 let method = format_ident!("visit_{}", to_snake_case(&ident.to_string()));
@@ -192,7 +181,6 @@ impl TypeShape {
                     quote!(visitor.#method((#value).as_ref());)
                 }
             }
-            Self::Boxed(inner) => inner.visit(quote!((#value).as_ref()), true),
             Self::Optional(inner) => {
                 let visit = inner.visit(quote!(value), true);
                 quote!(if let Some(value) = (#value).as_ref() { #visit })
@@ -204,7 +192,7 @@ impl TypeShape {
         }
     }
 
-    fn visit_mut(&self, value: TokenStream2, stored: bool) -> TokenStream2 {
+    fn visit_mut(&self, value: TokenStream, stored: bool) -> TokenStream {
         match self {
             Self::Base(_, ident) => {
                 let method = format_ident!("visit_{}_mut", to_snake_case(&ident.to_string()));
@@ -214,7 +202,6 @@ impl TypeShape {
                     quote!(visitor.#method((#value).as_mut());)
                 }
             }
-            Self::Boxed(inner) => inner.visit_mut(quote!((#value).as_mut()), true),
             Self::Optional(inner) => {
                 let visit = inner.visit_mut(quote!(value), true);
                 quote!(if let Some(value) = (#value).as_mut() { #visit })
@@ -226,19 +213,15 @@ impl TypeShape {
         }
     }
 
-    fn fold(&self, value: TokenStream2, stored: bool) -> TokenStream2 {
+    fn fold(&self, value: TokenStream, stored: bool) -> TokenStream {
         match self {
             Self::Base(_, ident) => {
                 let method = format_ident!("fold_{}", to_snake_case(&ident.to_string()));
                 if stored {
                     quote!(folder.#method(#value))
                 } else {
-                    quote!(Box::new(folder.#method(*#value)))
+                    quote!(::std::boxed::Box::new(folder.#method(*#value)))
                 }
-            }
-            Self::Boxed(inner) => {
-                let folded = inner.fold(quote!(*#value), true);
-                quote!(Box::new(#folded))
             }
             Self::Optional(inner) => {
                 let folded = inner.fold(quote!(value), true);

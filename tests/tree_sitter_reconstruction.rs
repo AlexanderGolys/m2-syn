@@ -1,14 +1,16 @@
-#![cfg(feature = "tree-sitter")]
-
 use m2_syn::treesitter::TreeSitterNode;
 use m2_syn::{
-    AstNode, BinaryExpression, BinaryOperator, Expr, Reconstruct, SourceFile, SourceId, Spanned,
-    SyntaxKind, ToTokens, parse_file,
+    AnyCell, AssignmentExpr, AstNode, BinaryExpression, BinaryOperator, Cell, Collection, Expr,
+    Reconstruct, SourceFile, SourceId, Spanned, SyntaxKind, ToTokens, parse_file,
 };
+
+fn cell_kind(cell: &impl Cell) -> SyntaxKind {
+    cell.kind()
+}
 
 #[test]
 fn reconstructs_typed_nodes_from_tree_sitter() {
-    let source = b"left = right";
+    let source = b"left + right";
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_macaulay2::language())
@@ -24,13 +26,13 @@ fn reconstructs_typed_nodes_from_tree_sitter() {
     assert_eq!(expression.kind(), SyntaxKind::BinaryExpression);
     assert_eq!(expression.span().source(), Ok(SourceId(41)));
     assert!(matches!(expression.left.as_ref(), Expr::Symbol(symbol) if symbol.text == "left"));
-    assert!(matches!(expression.operator, BinaryOperator::Eql(_)));
+    assert!(matches!(expression.operator, BinaryOperator::Add(_)));
     assert!(matches!(expression.right.as_ref(), Expr::Symbol(symbol) if symbol.text == "right"));
 }
 
 #[test]
 fn reconstructs_a_complete_source_file() {
-    let source = b"x = 1\ny := x + 2\nif y then return y else 0";
+    let source = b"x + 1\ny + x * 2\nif y then return y else 0";
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_macaulay2::language())
@@ -49,8 +51,69 @@ fn reconstructs_a_complete_source_file() {
 }
 
 #[test]
+fn specializes_global_cells_without_treating_nested_muted_groups_as_cells() {
+    let source_file = parse_file("{x; y}\nx;", SourceId(45)).unwrap();
+
+    assert_eq!(
+        cell_kind(&source_file.elements[0]),
+        SyntaxKind::ExpressionCell
+    );
+    let AnyCell::ExpressionCell(expression_cell) = &source_file.elements[0] else {
+        panic!("a global expression must reconstruct as ExpressionCell");
+    };
+    assert_eq!(cell_kind(expression_cell), SyntaxKind::ExpressionCell);
+
+    let Expr::Collection(Collection::List(list)) = expression_cell.value.as_ref() else {
+        panic!("the first cell must contain a list");
+    };
+    assert_eq!(list.muted.len(), 1);
+    assert_eq!(list.muted[0].kind(), SyntaxKind::MutedGroup);
+
+    let AnyCell::MutedCell(muted_cell) = &source_file.elements[1] else {
+        panic!("a global semicolon-terminated expression must reconstruct as MutedCell");
+    };
+    assert_eq!(cell_kind(muted_cell), SyntaxKind::MutedCell);
+}
+
+#[test]
+fn bundled_parser_matches_current_assignment_and_control_nodes() {
+    let assignment = parse_file("x = 1", SourceId(46)).unwrap();
+    let AnyCell::ExpressionCell(cell) = &assignment.elements[0] else {
+        panic!("assignment must be an expression cell");
+    };
+    assert!(matches!(
+        cell.value.as_ref(),
+        Expr::AssignmentExpr(AssignmentExpr::Assignment(_))
+    ));
+
+    let for_loop = parse_file("for x in y list x", SourceId(47)).unwrap();
+    assert_eq!(for_loop.elements.len(), 1);
+    let AnyCell::ExpressionCell(cell) = &for_loop.elements[0] else {
+        panic!("for loop must be an expression cell");
+    };
+    assert!(matches!(cell.value.as_ref(), Expr::ForLoop(_)));
+}
+
+#[test]
+fn assignment_kind_is_specialized_by_its_left_child() {
+    for (source_id, source) in [
+        (SourceId(48), "(x, (y, z)) = values"),
+        (SourceId(49), "((x)) = y"),
+    ] {
+        let file = parse_file(source, source_id).unwrap();
+        let AnyCell::ExpressionCell(cell) = &file.elements[0] else {
+            panic!("structured assignment must be an expression cell");
+        };
+        assert!(matches!(
+            cell.value.as_ref(),
+            Expr::AssignmentExpr(AssignmentExpr::StructuredBinding(_))
+        ));
+    }
+}
+
+#[test]
 fn emitted_source_reparses_to_the_same_normal_form() {
-    let source = "x = 1\ny := x + 2\nif y then return y else 0";
+    let source = "x + 1\ny + x * 2\nif y then return y else 0";
     let syntax = parse_file(source, SourceId(43)).unwrap();
     let emitted = syntax.to_m2();
     let reparsed = parse_file(&emitted, SourceId(44)).unwrap();

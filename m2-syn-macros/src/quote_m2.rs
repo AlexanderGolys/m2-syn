@@ -44,16 +44,6 @@ fn expand_stream(
                     false,
                 )
             }
-            TokenTree::Ident(identifier) if identifier == "EOC" => (
-                quote!(#output.push_end_of_cell(::m2_syn::Span::detached());),
-                false,
-                true,
-            ),
-            TokenTree::Ident(identifier) if identifier == "EOF" => (
-                quote!(#output.push_end_of_file(::m2_syn::Span::detached());),
-                false,
-                true,
-            ),
             TokenTree::Ident(identifier) => {
                 let text = identifier.to_string();
                 (quote!(#output.push_synthetic(#text);), true, false)
@@ -72,9 +62,9 @@ fn expand_stream(
                 *group_index += 1;
                 let nested = expand_stream(group.stream(), &group_output, group_index)?;
                 let delimiter = match group.delimiter() {
-                    Delimiter::Parenthesis => quote!(::m2_syn::Delimiter::Parenthesis),
-                    Delimiter::Bracket => quote!(::m2_syn::Delimiter::Bracket),
-                    Delimiter::Brace => quote!(::m2_syn::Delimiter::Brace),
+                    Delimiter::Parenthesis => quote!(::m2_syn::DelimiterKind::Parenthesis),
+                    Delimiter::Bracket => quote!(::m2_syn::DelimiterKind::Bracket),
+                    Delimiter::Brace => quote!(::m2_syn::DelimiterKind::Brace),
                     Delimiter::None => {
                         statements.push(quote! {
                             let mut #group_output = ::m2_syn::TokenStream::new();

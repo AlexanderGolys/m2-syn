@@ -3,8 +3,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    CstChild, CstNode, NodeIdentity, Reconstruct, ReconstructError, SourceFile, SourceId, Span,
-    TextPoint, TextRange,
+    CstChild, CstNode, NodeIdentity, ParseInput, Parser, ReconstructError, SourceFile, SourceId,
+    Span, TextPoint, TextRange, TokenStream, reconstruct,
 };
 
 #[derive(Debug)]
@@ -49,23 +49,50 @@ impl From<ReconstructError> for ParseError {
     }
 }
 
-pub fn parse_file(source: &str, source_id: SourceId) -> Result<SourceFile, ParseError> {
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_macaulay2::language())
-        .map_err(ParseError::Language)?;
-    let tree = parser.parse(source, None).ok_or(ParseError::Cancelled)?;
-    if let Some(error) = first_error(tree.root_node()) {
-        return Err(ParseError::InvalidSyntax(
-            TreeSitterNode::new(error, source.as_bytes(), source_id).span(),
-        ));
+pub struct TreeSitterParser {
+    parser: tree_sitter::Parser,
+}
+
+impl TreeSitterParser {
+    pub fn new() -> Result<Self, ParseError> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_macaulay2::language())
+            .map_err(ParseError::Language)?;
+        Ok(Self { parser })
     }
-    SourceFile::reconstruct(TreeSitterNode::new(
-        tree.root_node(),
-        source.as_bytes(),
-        source_id,
-    ))
-    .map_err(Into::into)
+}
+
+impl Parser for TreeSitterParser {
+    type Error = ParseError;
+
+    fn parse(&mut self, input: ParseInput<'_>) -> Result<SourceFile, Self::Error> {
+        let tree = self
+            .parser
+            .parse(input.source, None)
+            .ok_or(ParseError::Cancelled)?;
+        if let Some(error) = first_error(tree.root_node()) {
+            return Err(ParseError::InvalidSyntax(
+                TreeSitterNode::new(error, input.source.as_bytes(), input.source_id).span(),
+            ));
+        }
+        reconstruct(TreeSitterNode::new(
+            tree.root_node(),
+            input.source.as_bytes(),
+            input.source_id,
+        ))
+        .map_err(Into::into)
+    }
+}
+
+pub fn parse_file(source: &str, source_id: SourceId) -> Result<SourceFile, ParseError> {
+    let mut parser = TreeSitterParser::new()?;
+    parser.parse(ParseInput::new(source, source_id))
+}
+
+/// Parses an emitted M2 token stream into the complete typed source file.
+pub fn parse_tokens(tokens: &TokenStream, source_id: SourceId) -> Result<SourceFile, ParseError> {
+    parse_file(&tokens.to_string(), source_id)
 }
 
 fn first_error(root: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -100,6 +127,22 @@ impl<'tree, 'source> TreeSitterNode<'tree, 'source> {
     pub fn raw(self) -> tree_sitter::Node<'tree> {
         self.node
     }
+
+    fn normalized_node(self) -> tree_sitter::Node<'tree> {
+        if self.node.kind() != "cell" {
+            return self.node;
+        }
+
+        // Grammar 5 represented a global muted form as `cell(muted(...))`.
+        // The current grammar exposes that `muted` node directly under the
+        // source file, so erase the obsolete adapter-only wrapper here.
+        let mut named_children = (0..self.node.named_child_count())
+            .filter_map(|index| self.node.named_child(index as u32));
+        match (named_children.next(), named_children.next()) {
+            (Some(child), None) if child.kind() == "muted" => child,
+            _ => self.node,
+        }
+    }
 }
 
 impl CstNode for TreeSitterNode<'_, '_> {
@@ -109,15 +152,17 @@ impl CstNode for TreeSitterNode<'_, '_> {
         Self: 'syntax;
 
     fn identity(&self) -> NodeIdentity<'_> {
-        NodeIdentity::new(self.node.kind(), self.node.is_named())
+        let node = self.normalized_node();
+        NodeIdentity::new(node.kind(), node.is_named())
     }
 
     fn children(&self) -> Self::Children<'_> {
-        (0..self.node.child_count())
+        let parent = self.normalized_node();
+        (0..parent.child_count())
             .filter_map(|index| {
                 let index = u32::try_from(index).expect("Tree-sitter child count fits u32");
-                self.node.child(index).map(|node| CstChild {
-                    field: self.node.field_name_for_child(index),
+                parent.child(index).map(|node| CstChild {
+                    field: parent.field_name_for_child(index),
                     node: Self::new(node, self.source, self.source_id),
                 })
             })
@@ -126,20 +171,21 @@ impl CstNode for TreeSitterNode<'_, '_> {
     }
 
     fn text(&self) -> Cow<'_, str> {
-        String::from_utf8_lossy(&self.source[self.node.byte_range()])
+        String::from_utf8_lossy(&self.source[self.normalized_node().byte_range()])
     }
 
     fn span(&self) -> Span {
+        let node = self.normalized_node();
         let range = TextRange::new(
             TextPoint::new(
-                self.node.start_position().row as u32,
-                self.node.start_position().column as u32,
-                self.node.start_byte(),
+                node.start_position().row as u32,
+                node.start_position().column as u32,
+                node.start_byte(),
             ),
             TextPoint::new(
-                self.node.end_position().row as u32,
-                self.node.end_position().column as u32,
-                self.node.end_byte(),
+                node.end_position().row as u32,
+                node.end_position().column as u32,
+                node.end_byte(),
             ),
         )
         .expect("Tree-sitter node ranges are ordered");

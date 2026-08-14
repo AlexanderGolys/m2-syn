@@ -9,6 +9,7 @@ repository = "https://github.com/AlexanderGolys/m2-syn"
 [lib]
 proc-macro = true
 
+
 [dependencies]
 proc-macro2 = "1"
 quote = "1"

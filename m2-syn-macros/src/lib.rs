@@ -2,13 +2,16 @@ extern crate proc_macro;
 
 mod quote_m2;
 mod syntax;
-mod utils;
+mod tokens;
 
 use proc_macro::TokenStream;
 
 #[proc_macro]
 pub fn syntax(input: TokenStream) -> TokenStream {
-    syntax::expand(input)
+    match syntax::generate(input.into()) {
+        Ok(expansion) => expansion.combined().into(),
+        Err(error) => error.into_compile_error().into(),
+    }
 }
 
 #[proc_macro]

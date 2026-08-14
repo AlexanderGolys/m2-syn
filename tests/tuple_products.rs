@@ -3,14 +3,14 @@ use std::borrow::Cow;
 use m2_syn::{CstChild, CstNode, NodeIdentity, Reconstruct, Span, syntax};
 
 syntax! {
-    tokens {
-        Marker [marker]
-    }
+    tokens {}
+    keywords: {}
+    markers: {}
+    punct: {}
 
-    pub struct Left;
-    pub struct Right;
-
-    pub struct Pair(pub Left, pub Right);
+    Left ::= leaf
+    Right ::= leaf
+    Pair ::= (Left, Right)
 }
 
 #[derive(Clone)]
@@ -64,6 +64,6 @@ fn tuple_product_fields_default_to_unfielded_children() {
     })
     .unwrap();
 
-    assert_eq!(pair.0.text, "left");
-    assert_eq!(pair.1.text, "right");
+    assert_eq!(pair._pair_0.text, "left");
+    assert_eq!(pair._pair_1.text, "right");
 }

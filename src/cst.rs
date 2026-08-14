@@ -43,20 +43,13 @@ pub trait CstNode: Sized {
     }
 }
 
-pub trait ConcreteNode: AstNode {
-    const NAME: &'static str;
-    const NAMED: bool;
-}
-
 pub trait AstNode: Spanned {
     type Kind: Copy + Eq;
 
     fn kind(&self) -> Self::Kind;
 }
 
-pub trait Token: ConcreteNode {
-    const SPELLING: &'static str;
-}
+pub trait Token: AstNode {}
 
 pub trait Reconstruct<N>: Sized
 where
@@ -64,30 +57,6 @@ where
 {
     fn matches(node: &N) -> bool;
     fn reconstruct(node: N) -> Result<Self, ReconstructError>;
-}
-
-pub fn matches_concrete<T, N>(node: &N) -> bool
-where
-    T: ConcreteNode,
-    N: CstNode,
-{
-    node.identity().matches(T::NAME, T::NAMED)
-}
-
-pub fn expect_concrete<T, N>(node: &N) -> Result<(), ReconstructError>
-where
-    T: ConcreteNode,
-    N: CstNode,
-{
-    if matches_concrete::<T, N>(node) {
-        Ok(())
-    } else {
-        Err(ReconstructError::wrong_node(
-            T::NAME,
-            T::NAMED,
-            node.identity(),
-        ))
-    }
 }
 
 pub struct ChildCursor<N> {

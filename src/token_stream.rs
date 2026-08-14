@@ -1,65 +1,102 @@
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Result};
 
-use crate::Span;
+use crate::{Span, Spanned, token_stream::punct::Punct};
+use delim::{Delimiter, DelimiterKind, DoubleSpan};
+
+pub mod delim;
+mod punct;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Delimiter {
-    Parenthesis,
-    Bracket,
-    Brace,
-    AngleBar,
+pub enum LiteralKind {
+    String,
+    RawString,
+    Integer,
+    Float,
 }
 
-impl Delimiter {
-    fn open(self) -> &'static str {
-        match self {
-            Self::Parenthesis => "(",
-            Self::Bracket => "[",
-            Self::Brace => "{",
-            Self::AngleBar => "<|",
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Literal {
+    pub kind: LiteralKind,
+    text: String,
+    span: Span,
+}
+
+impl Spanned for Literal {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Display for Literal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+impl Literal {
+    pub fn new(kind: LiteralKind, text: String, span: Span) -> Self {
+        Self { kind, text, span }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentToken {
+    text: String,
+    span: Span,
+}
+
+impl Spanned for IdentToken {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Display for IdentToken {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Group {
+    delimiter: Delimiter,
+    stream: Box<TokenStream>,
+}
+
+impl Spanned for Group {
+    fn span(&self) -> Span {
+        self.delimiter.span()
+    }
+}
+
+impl Group {
+    pub fn delimiter(&self) -> &Delimiter {
+        &self.delimiter
     }
 
-    fn close(self) -> &'static str {
-        match self {
-            Self::Parenthesis => ")",
-            Self::Bracket => "]",
-            Self::Brace => "}",
-            Self::AngleBar => "|>",
-        }
+    pub fn delim_kind(&self) -> DelimiterKind {
+        self.delimiter.kind
+    }
+
+    pub fn double_span(&self) -> DoubleSpan {
+        self.delimiter.span2
+    }
+}
+
+impl Display for Group {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
+        formatter.write_str(self.delim_kind().opening())?;
+        self.stream.fmt(formatter)?;
+        formatter.write_str(self.delim_kind().closing())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenTree {
-    Text {
-        text: String,
-        span: Span,
-    },
-    Group {
-        delimiter: Delimiter,
-        stream: TokenStream,
-        span: Span,
-    },
-    EndOfCell(Span),
-    EndOfFile(Span),
-}
-
-impl TokenTree {
-    fn render(&self, output: &mut String) {
-        match self {
-            Self::Text { text, .. } => output.push_str(text),
-            Self::Group {
-                delimiter, stream, ..
-            } => {
-                output.push_str(delimiter.open());
-                stream.render(output);
-                output.push_str(delimiter.close());
-            }
-            Self::EndOfCell(_) => output.push('\n'),
-            Self::EndOfFile(_) => {}
-        }
-    }
+    Group(Group),
+    Literal(Literal),
+    Punct(Punct),
+    Ident(IdentToken),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -70,11 +107,19 @@ impl TokenStream {
         Self::default()
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &TokenTree> {
+        self.0.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn push_text(&mut self, text: impl Into<String>, span: Span) {
-        self.0.push(TokenTree::Text {
+        self.0.push(TokenTree::Ident(IdentToken {
             text: text.into(),
             span,
-        });
+        }));
     }
 
     pub fn push_synthetic(&mut self, text: impl Into<String>) {
@@ -85,38 +130,31 @@ impl TokenStream {
         self.push_synthetic(" ");
     }
 
-    pub fn push_group(&mut self, delimiter: Delimiter, stream: Self, span: Span) {
-        self.0.push(TokenTree::Group {
-            delimiter,
-            stream,
-            span,
-        });
-    }
-
-    pub fn push_end_of_cell(&mut self, span: Span) {
-        self.0.push(TokenTree::EndOfCell(span));
-    }
-
-    pub fn push_end_of_file(&mut self, span: Span) {
-        self.0.push(TokenTree::EndOfFile(span));
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &TokenTree> {
-        self.0.iter()
-    }
-
-    pub fn render(&self, output: &mut String) {
-        for token in &self.0 {
-            token.render(output);
-        }
+    pub fn push_group(&mut self, kind: DelimiterKind, stream: TokenStream, span: Span) {
+        self.0.push(TokenTree::Group(Group {
+            delimiter: Delimiter::new(kind, DoubleSpan::new(span, span)),
+            stream: Box::new(stream),
+        }));
     }
 }
 
 impl Display for TokenStream {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut source = String::new();
-        self.render(&mut source);
-        formatter.write_str(&source)
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
+        for tree in &self.0 {
+            match tree {
+                TokenTree::Group(group) => group.fmt(formatter)?,
+                TokenTree::Literal(literal) => literal.fmt(formatter)?,
+                TokenTree::Punct(punct) => punct.fmt(formatter)?,
+                TokenTree::Ident(ident) => ident.fmt(formatter)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Extend<TokenTree> for TokenStream {
+    fn extend<T: IntoIterator<Item = TokenTree>>(&mut self, iter: T) {
+        self.0.extend(iter);
     }
 }
 

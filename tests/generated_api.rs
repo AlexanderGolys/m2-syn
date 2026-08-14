@@ -1,6 +1,6 @@
 use m2_syn::{
-    AstNode, BinaryExpression, BinaryOperator, Eql, Expr, Mul, PrefixOperator, SourceId, Span,
-    Spanned, Symbol, SyntaxKind, SyntaxNode, TextPoint, TextRange, ToTokens, Token, fold::Fold,
+    AstNode, BinaryExpression, BinaryOperator, Expr, PrefixOperator, SourceId, Span, Spanned,
+    Symbol, SyntaxKind, SyntaxNode, TextPoint, TextRange, ToTokens, fold::Fold, parse_tokens,
     quote_m2, visit::Visit, visit_mut::VisitMut,
 };
 
@@ -19,10 +19,14 @@ fn symbol(name: &str, start: usize) -> Symbol {
     Symbol::new(name, span(start, start + name.len()))
 }
 
+fn multiply(start: usize) -> m2_syn::Token![*] {
+    <m2_syn::Token![*]>::new(span(start, start + 1))
+}
+
 fn assignment() -> SyntaxNode {
     BinaryExpression::new(
         symbol("left", 0).into(),
-        Eql::new(span(5, 6)).into(),
+        multiply(5).into(),
         symbol("right", 7).into(),
     )
     .into()
@@ -35,7 +39,6 @@ fn constructors_hide_recursive_storage_and_preserve_public_categories() {
     assert_eq!(node.span().source(), Ok(SourceId(7)));
     assert_eq!(node.span().range().unwrap().start.byte, 0);
     assert_eq!(node.span().range().unwrap().end.byte, 12);
-    assert_eq!(<m2_syn::Token![=] as Token>::SPELLING, "=");
 }
 
 struct SymbolCollector(Vec<String>);
@@ -96,11 +99,11 @@ fn fold_reconstructs_the_owned_tree() {
 #[test]
 fn direct_and_transitive_embeddings_are_generated() {
     let expression: Expr = symbol("x", 0).into();
-    let operator: BinaryOperator = Eql::new(span(1, 2)).into();
+    let operator: BinaryOperator = multiply(1).into();
     let syntax_from_symbol: SyntaxNode = symbol("y", 2).into();
 
     assert!(matches!(expression, Expr::Symbol(_)));
-    assert!(matches!(operator, BinaryOperator::Eql(_)));
+    assert!(matches!(operator, BinaryOperator::Mul(_)));
     assert!(matches!(
         syntax_from_symbol,
         SyntaxNode::Expr(Expr::Symbol(_))
@@ -109,8 +112,8 @@ fn direct_and_transitive_embeddings_are_generated() {
 
 #[test]
 fn one_token_type_can_belong_to_multiple_operator_categories() {
-    let binary: BinaryOperator = Mul::new(span(0, 1)).into();
-    let prefix: PrefixOperator = Mul::new(span(0, 1)).into();
+    let binary: BinaryOperator = multiply(0).into();
+    let prefix: PrefixOperator = multiply(0).into();
 
     assert!(matches!(binary, BinaryOperator::Mul(_)));
     assert!(matches!(prefix, PrefixOperator::Mul(_)));
@@ -120,10 +123,22 @@ fn one_token_type_can_belong_to_multiple_operator_categories() {
 fn quote_builds_an_m2_token_stream_with_interpolation() {
     let value = symbol("value", 0);
     let tokens = quote_m2! {
-        result = $(value) + 1 EOC
-        return result EOF
+        result = $(value) + 1;
+        return result
     };
 
-    assert_eq!(tokens.to_string(), "result=value+1\nreturn result");
-    assert_eq!(tokens.to_m2(), "result=value+1\nreturn result");
+    assert_eq!(tokens.to_string(), "result=value+1;return result");
+    assert_eq!(tokens.to_m2(), "result=value+1;return result");
+}
+
+#[test]
+fn quoted_m2_loads_as_a_typed_source_file() {
+    let tokens = quote_m2! {
+        left + (right);
+        return left
+    };
+    let source_file = parse_tokens(&tokens, SourceId(8)).unwrap();
+
+    assert_eq!(source_file.elements.len(), 2);
+    assert_eq!(source_file.to_m2(), "left + (right);\nreturn left");
 }

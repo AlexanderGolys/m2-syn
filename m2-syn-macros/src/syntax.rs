@@ -1,20 +1,68 @@
-use crate::utils::err_ret;
-
-use std::collections::{BTreeMap, BTreeSet};
-
-use proc_macro::TokenStream;
-use proc_macro2::{Ident, Span, TokenStream as TokenStream2, TokenTree};
-use quote::{format_ident, quote};
-use syn::parse::{Parse, ParseStream};
-use syn::punctuated::Punctuated;
-use syn::{
-    Attribute, Error, Field, Fields, Index, Item, ItemEnum, ItemStruct, LitStr, Member, Meta,
-    PathArguments, Result, Token, Type, TypePath, Visibility, braced, bracketed, parse_macro_input,
-};
-
+#[path = "syntax/grammar.rs"]
+mod grammar;
+#[path = "syntax/traversal.rs"]
 mod traversal;
 
+use crate::tokens::{OperatorKind, TokenDefinitions};
+use proc_macro2::{Ident, TokenStream};
+use quote::{format_ident, quote};
+use std::collections::{BTreeMap, BTreeSet};
+use syn::parse::{Parse, ParseStream};
+use syn::{Attribute, Error, Member, Result, Token, Visibility};
 use traversal::Traversal;
+
+struct Syntax {
+    tokens: TokenDefinitions,
+    structs: Vec<StructDefinition>,
+    enums: Vec<EnumDefinition>,
+}
+
+pub struct GeneratedSyntax {
+    kinds: TokenStream,
+    tokens: TokenStream,
+    nodes: TokenStream,
+    visit: TokenStream,
+    visit_mut: TokenStream,
+    fold: TokenStream,
+}
+
+impl GeneratedSyntax {
+    #[allow(dead_code)]
+    pub fn files(self) -> [(&'static str, TokenStream); 6] {
+        [
+            ("kind.rs", self.kinds),
+            ("tokens.rs", self.tokens),
+            ("nodes.rs", self.nodes),
+            ("visit.rs", self.visit),
+            ("visit_mut.rs", self.visit_mut),
+            ("fold.rs", self.fold),
+        ]
+    }
+
+    #[allow(dead_code)]
+    pub fn combined(self) -> TokenStream {
+        let Self {
+            kinds,
+            tokens,
+            nodes,
+            visit,
+            visit_mut,
+            fold,
+        } = self;
+        quote! {
+            #kinds
+            #tokens
+            #nodes
+            #visit
+            #visit_mut
+            #fold
+        }
+    }
+}
+
+pub fn generate(input: TokenStream) -> Result<GeneratedSyntax> {
+    syn::parse2::<Syntax>(input)?.expand()
+}
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SyntaxTypeName(String);
@@ -25,177 +73,20 @@ impl From<&Ident> for SyntaxTypeName {
     }
 }
 
-type ConversionStep = (Ident, Ident);
-type ConversionPath = Vec<ConversionStep>;
-type ConversionGraph = BTreeMap<(SyntaxTypeName, SyntaxTypeName), Vec<ConversionPath>>;
-
-pub fn expand(input: TokenStream) -> TokenStream {
-    let syntax = parse_macro_input!(input as Syntax);
-    match syntax.expand() {
-        Ok(expansion) => expansion.into(),
-        Err(error) => error.into_compile_error().into(),
-    }
-}
-
-struct Syntax {
-    tokens: Vec<TokenDefinition>,
-    structs: Vec<StructDefinition>,
-    enums: Vec<EnumDefinition>,
-}
-
-impl Parse for Syntax {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let tokens_keyword: Ident = input.parse()?;
-        if tokens_keyword != "tokens" {
-            err_ret!(tokens_keyword.span(), "expected `tokens`");
-        }
-
-        let token_content;
-        braced!(token_content in input);
-
-        let mut tokens = Vec::new();
-        while !token_content.is_empty() {
-            tokens.push(token_content.parse()?);
-            if token_content.peek(Token![,]) {
-                token_content.parse::<Token![,]>()?;
-            }
-        }
-
-        let mut structs = Vec::new();
-        let mut enums = Vec::new();
-        while !input.is_empty() {
-            match input.parse::<Item>()? {
-                Item::Struct(item) => structs.push(StructDefinition::new(item)?),
-                Item::Enum(item) => enums.push(EnumDefinition::new(item)?),
-                item => {
-                    return Err(Error::new_spanned(
-                        item,
-                        "syntax declarations support only structs and enums",
-                    ));
-                }
-            }
-        }
-
-        Ok(Self {
-            tokens,
-            structs,
-            enums,
-        })
-    }
-}
-
-struct TokenDefinition {
-    name: Ident,
-    pattern: TokenStream2,
-    spelling: String,
-}
-
-impl Parse for TokenDefinition {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let name = input.parse()?;
-        let pattern_content;
-        bracketed!(pattern_content in input);
-        let pattern: TokenStream2 = pattern_content.parse()?;
-        let spelling = token_spelling(&pattern)?;
-        Ok(Self {
-            name,
-            pattern,
-            spelling,
-        })
-    }
-}
-
-fn token_spelling(pattern: &TokenStream2) -> Result<String> {
-    let trees = pattern.clone().into_iter().collect::<Vec<_>>();
-    if let [TokenTree::Literal(literal)] = trees.as_slice()
-        && let Ok(literal) = syn::parse_str::<LitStr>(&literal.to_string())
-    {
-        return Ok(literal.value());
-    }
-
-    let mut spelling = String::new();
-    for tree in trees {
-        match tree {
-            TokenTree::Ident(identifier) => spelling.push_str(&identifier.to_string()),
-            TokenTree::Punct(punctuation) => spelling.push(punctuation.as_char()),
-            TokenTree::Literal(literal) => spelling.push_str(&literal.to_string()),
-            TokenTree::Group(group) => {
-                return Err(Error::new(
-                    group.span(),
-                    "delimiters must be written as string literals",
-                ));
-            }
-        }
-    }
-
-    if spelling.is_empty() {
-        Err(Error::new(
-            Span::call_site(),
-            "token spelling cannot be empty",
-        ))
-    } else {
-        Ok(spelling)
-    }
-}
+type ConversionGraph = BTreeMap<(SyntaxTypeName, SyntaxTypeName), Vec<Vec<(Ident, Ident)>>>;
 
 struct StructDefinition {
     attrs: Vec<Attribute>,
     visibility: Visibility,
     name: Ident,
-    kind: String,
     fields: StructFields,
+    delimiter: Option<DelimiterKind>,
+    cst_kind: Option<String>,
 }
 
 enum StructFields {
     Leaf,
-    Product {
-        style: ProductStyle,
-        fields: Vec<FieldDefinition>,
-    },
-}
-
-#[derive(Clone, Copy)]
-enum ProductStyle {
-    Named,
-    Unnamed,
-}
-
-impl StructDefinition {
-    fn new(mut item: ItemStruct) -> Result<Self> {
-        reject_generics(&item.generics, &item.ident)?;
-        let syntax = take_syntax_attribute(&mut item.attrs)?;
-        let kind = syntax
-            .kind
-            .unwrap_or_else(|| to_snake_case(&item.ident.to_string()));
-        let fields = match item.fields {
-            Fields::Unit => StructFields::Leaf,
-            Fields::Named(fields) => StructFields::Product {
-                style: ProductStyle::Named,
-                fields: fields
-                    .named
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, field)| FieldDefinition::new(field, index))
-                    .collect::<Result<_>>()?,
-            },
-            Fields::Unnamed(fields) => StructFields::Product {
-                style: ProductStyle::Unnamed,
-                fields: fields
-                    .unnamed
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, field)| FieldDefinition::new(field, index))
-                    .collect::<Result<_>>()?,
-            },
-        };
-        Ok(Self {
-            attrs: item.attrs,
-            visibility: item.vis,
-            name: item.ident,
-            kind,
-            fields,
-        })
-    }
+    Product { fields: Vec<FieldDefinition> },
 }
 
 struct FieldDefinition {
@@ -205,6 +96,8 @@ struct FieldDefinition {
     binding: Ident,
     source: FieldSource,
     shape: TypeShape,
+    repeated_separator: &'static str,
+    attached: bool,
 }
 
 enum FieldSource {
@@ -212,37 +105,33 @@ enum FieldSource {
     Unfielded,
 }
 
-impl FieldDefinition {
-    fn new(mut field: Field, index: usize) -> Result<Self> {
-        let syntax = take_syntax_attribute(&mut field.attrs)?;
-        let member = field
-            .ident
-            .clone()
-            .map(Member::Named)
-            .unwrap_or_else(|| Member::Unnamed(Index::from(index)));
-        let binding = field
-            .ident
-            .clone()
-            .unwrap_or_else(|| format_ident!("field_{index}"));
-        let source = if syntax.unfielded {
-            FieldSource::Unfielded
-        } else if let Some(field) = syntax.field {
-            FieldSource::Named(field)
-        } else if let Member::Named(name) = &member
-            && !name.to_string().starts_with('_')
-        {
-            FieldSource::Named(name.to_string().trim_start_matches("r#").to_owned())
-        } else {
-            FieldSource::Unfielded
-        };
-        Ok(Self {
-            attrs: field.attrs,
-            visibility: field.vis,
-            member,
-            binding,
-            source,
-            shape: TypeShape::parse(field.ty)?,
-        })
+#[derive(Clone, Copy)]
+enum DelimiterKind {
+    Parenthesis,
+    Bracket,
+    Brace,
+    AngleBar,
+    String,
+    RawString,
+}
+
+impl DelimiterKind {
+    fn tokens(self) -> TokenStream {
+        match self {
+            Self::Parenthesis => quote!(::m2_syn::DelimiterKind::Parenthesis),
+            Self::Bracket => quote!(::m2_syn::DelimiterKind::Bracket),
+            Self::Brace => quote!(::m2_syn::DelimiterKind::Brace),
+            Self::AngleBar => quote!(::m2_syn::DelimiterKind::AngleBar),
+            Self::String => quote!(::m2_syn::DelimiterKind::String),
+            Self::RawString => quote!(::m2_syn::DelimiterKind::RawString),
+        }
+    }
+
+    fn field_separator(self) -> &'static str {
+        match self {
+            Self::String | Self::RawString => "",
+            Self::Parenthesis | Self::Bracket | Self::Brace | Self::AngleBar => " ",
+        }
     }
 }
 
@@ -260,219 +149,75 @@ struct VariantDefinition {
 }
 
 impl EnumDefinition {
-    fn new(mut item: ItemEnum) -> Result<Self> {
-        reject_generics(&item.generics, &item.ident)?;
-        take_syntax_attribute(&mut item.attrs)?;
-        let variants = item
-            .variants
-            .into_iter()
-            .map(|mut variant| {
-                if variant.discriminant.is_some() {
-                    return Err(Error::new_spanned(
-                        variant,
-                        "syntax coproduct variants cannot have discriminants",
-                    ));
-                }
-                take_syntax_attribute(&mut variant.attrs)?;
-                let mut fields = match variant.fields {
-                    Fields::Unnamed(fields) if fields.unnamed.len() == 1 => fields.unnamed,
-                    fields => {
-                        return Err(Error::new_spanned(
-                            fields,
-                            "syntax coproduct variants must contain exactly one unnamed value",
-                        ));
-                    }
-                };
-                let field = fields.pop().expect("one variant field");
-                let shape = TypeShape::parse(field.ty)?;
-                if !matches!(shape, TypeShape::Base(_, _)) {
-                    return Err(Error::new(
-                        variant.ident.span(),
-                        "syntax coproduct variants must directly contain a declared syntax type",
-                    ));
-                }
-                Ok(VariantDefinition {
-                    attrs: variant.attrs,
-                    name: variant.ident,
-                    shape,
-                })
+    fn operator(kind: OperatorKind, tokens: &TokenDefinitions) -> Self {
+        let variants = tokens
+            .operator_variants(kind)
+            .map(|token| VariantDefinition {
+                attrs: Vec::new(),
+                name: token.name.clone(),
+                shape: TypeShape::token(token.name.clone(), token.pattern.clone()),
             })
-            .collect::<Result<_>>()?;
-        Ok(Self {
-            attrs: item.attrs,
-            visibility: item.vis,
-            name: item.ident,
+            .collect();
+        Self {
+            attrs: Vec::new(),
+            visibility: syn::parse_quote!(pub),
+            name: kind.enum_name(),
             variants,
-        })
-    }
-}
-
-#[derive(Default)]
-struct SyntaxAttribute {
-    kind: Option<String>,
-    field: Option<String>,
-    unfielded: bool,
-}
-
-impl Parse for SyntaxAttribute {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let values = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
-        let mut result = Self::default();
-        for value in values {
-            match value {
-                Meta::Path(path) if path.is_ident("unfielded") => result.unfielded = true,
-                Meta::NameValue(value) if value.path.is_ident("kind") => {
-                    result.kind = Some(literal_string(value.value, "kind")?);
-                }
-                Meta::NameValue(value) if value.path.is_ident("field") => {
-                    result.field = Some(literal_string(value.value, "field")?);
-                }
-                value => {
-                    return Err(Error::new_spanned(
-                        value,
-                        "supported syntax options are `kind = \"...\"`, `field = \"...\"`, and `unfielded`",
-                    ));
-                }
-            }
         }
-        Ok(result)
-    }
-}
-
-fn literal_string(expression: syn::Expr, option: &str) -> Result<String> {
-    match expression {
-        syn::Expr::Lit(expression) => match expression.lit {
-            syn::Lit::Str(value) => Ok(value.value()),
-            literal => Err(Error::new_spanned(
-                literal,
-                format!("`{option}` must be a string literal"),
-            )),
-        },
-        expression => Err(Error::new_spanned(
-            expression,
-            format!("`{option}` must be a string literal"),
-        )),
-    }
-}
-
-fn take_syntax_attribute(attributes: &mut Vec<Attribute>) -> Result<SyntaxAttribute> {
-    let mut result = SyntaxAttribute::default();
-    let mut retained = Vec::new();
-    for attribute in attributes.drain(..) {
-        if attribute.path().is_ident("syntax") {
-            let parsed = attribute.parse_args::<SyntaxAttribute>()?;
-            if parsed.kind.is_some() {
-                result.kind = parsed.kind;
-            }
-            if parsed.field.is_some() {
-                result.field = parsed.field;
-            }
-            result.unfielded |= parsed.unfielded;
-        } else {
-            retained.push(attribute);
-        }
-    }
-    *attributes = retained;
-    Ok(result)
-}
-
-fn reject_generics(generics: &syn::Generics, name: &Ident) -> Result<()> {
-    if generics.params.is_empty() && generics.where_clause.is_none() {
-        Ok(())
-    } else {
-        Err(Error::new(
-            name.span(),
-            "generated syntax nodes do not support generics",
-        ))
     }
 }
 
 #[derive(Clone)]
 enum TypeShape {
-    Base(TypePath, Ident),
-    Boxed(Box<Self>),
+    Base(TokenStream, Ident),
     Optional(Box<Self>),
     Repeated(Box<Self>),
 }
 
 impl TypeShape {
-    fn parse(ty: Type) -> Result<Self> {
-        let Type::Path(path) = ty else {
-            return Err(Error::new_spanned(
-                ty,
-                "syntax fields support only named types, Box, Option, and Vec",
-            ));
-        };
-        if path.qself.is_some() {
-            return Err(Error::new_spanned(
-                path,
-                "qualified self types are not supported in syntax fields",
-            ));
-        }
-        let segment = path
-            .path
-            .segments
-            .last()
-            .ok_or_else(|| Error::new_spanned(&path, "expected a type name"))?;
-        let wrapper = match segment.ident.to_string().as_str() {
-            "Box" => Some(0),
-            "Option" => Some(1),
-            "Vec" => Some(2),
-            _ => None,
-        };
-        let Some(wrapper) = wrapper else {
-            if !matches!(segment.arguments, PathArguments::None) {
-                return Err(Error::new_spanned(
-                    &segment.arguments,
-                    "generic syntax field types must be Box, Option, or Vec",
-                ));
-            }
-            return Ok(Self::Base(path.clone(), segment.ident.clone()));
-        };
-        let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-            return Err(Error::new_spanned(
-                &segment.arguments,
-                "container syntax types require one type argument",
-            ));
-        };
-        if arguments.args.len() != 1 {
-            return Err(Error::new_spanned(
-                arguments,
-                "container syntax types require one type argument",
-            ));
-        }
-        let syn::GenericArgument::Type(inner) = arguments.args.first().expect("one argument")
-        else {
-            return Err(Error::new_spanned(
-                arguments,
-                "container syntax types require a type argument",
-            ));
-        };
-        let inner = Box::new(Self::parse(inner.clone())?);
-        Ok(match wrapper {
-            0 => Self::Boxed(inner),
-            1 => Self::Optional(inner),
-            2 => Self::Repeated(inner),
-            _ => unreachable!(),
-        })
+    fn base(ident: Ident) -> Self {
+        Self::Base(quote!(#ident), ident)
+    }
+
+    fn token(ident: Ident, pattern: TokenStream) -> Self {
+        Self::Base(quote!(Token![#pattern]), ident)
     }
 
     fn base_ident(&self) -> &Ident {
         match self {
             Self::Base(_, ident) => ident,
-            Self::Boxed(inner) | Self::Optional(inner) | Self::Repeated(inner) => {
-                inner.base_ident()
-            }
+            Self::Optional(inner) | Self::Repeated(inner) => inner.base_ident(),
         }
     }
 }
 
+impl Parse for Syntax {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let tokens: TokenDefinitions = input.parse()?;
+        let mut enums = [
+            OperatorKind::Prefix,
+            OperatorKind::Binary,
+            OperatorKind::Postfix,
+        ]
+        .into_iter()
+        .map(|kind| EnumDefinition::operator(kind, &tokens))
+        .collect::<Vec<_>>();
+        let (structs, grammar_enums) = grammar::parse(input, &tokens)?;
+        enums.extend(grammar_enums);
+
+        Ok(Self {
+            tokens,
+            structs,
+            enums,
+        })
+    }
+}
 impl Syntax {
-    fn expand(&self) -> Result<TokenStream2> {
+    fn expand(&self) -> Result<GeneratedSyntax> {
         let names = self.declared_names()?;
         self.validate_references(&names)?;
         let token_like = self.token_like_types();
-        let tokens = self.expand_tokens();
+        let tokens = self.tokens.expand();
         let structs = self
             .structs
             .iter()
@@ -485,15 +230,17 @@ impl Syntax {
         let visit_muts = self.expand_visit_mut(&token_like);
         let folds = self.expand_fold(&token_like);
 
-        Ok(quote! {
-            #node_kinds
-            #tokens
-            #(#structs)*
-            #(#enums)*
-            #conversions
-            #visits
-            #visit_muts
-            #folds
+        Ok(GeneratedSyntax {
+            kinds: node_kinds,
+            tokens,
+            nodes: quote! {
+                #(#structs)*
+                #(#enums)*
+                #conversions
+            },
+            visit: visits,
+            visit_mut: visit_muts,
+            fold: folds,
         })
     }
 
@@ -562,7 +309,7 @@ impl Syntax {
         }
     }
 
-    fn expand_node_kinds(&self) -> TokenStream2 {
+    fn expand_node_kinds(&self) -> TokenStream {
         let variants = self
             .tokens
             .iter()
@@ -576,96 +323,20 @@ impl Syntax {
         }
     }
 
-    fn expand_tokens(&self) -> TokenStream2 {
-        let definitions = self.tokens.iter().map(|definition| {
-            let name = &definition.name;
-            let spelling = &definition.spelling;
-            quote! {
-                #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-                pub struct #name {
-                    span: ::m2_syn::Span,
-                }
-
-                impl #name {
-                    pub fn new(span: ::m2_syn::Span) -> Self {
-                        Self { span }
-                    }
-                }
-
-                impl ::m2_syn::Spanned for #name {
-                    fn span(&self) -> ::m2_syn::Span {
-                        self.span
-                    }
-                }
-
-                impl ::m2_syn::AstNode for #name {
-                    type Kind = SyntaxKind;
-
-                    fn kind(&self) -> SyntaxKind {
-                        SyntaxKind::#name
-                    }
-                }
-
-                impl ::m2_syn::ConcreteNode for #name {
-                    const NAME: &'static str = #spelling;
-                    const NAMED: bool = false;
-                }
-
-                impl ::m2_syn::Token for #name {
-                    const SPELLING: &'static str = #spelling;
-                }
-
-                impl ::m2_syn::ToTokens for #name {
-                    fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-                        let span = ::m2_syn::Spanned::span(self);
-                        match <Self as ::m2_syn::Token>::SPELLING {
-                            "EOC" => output.push_end_of_cell(span),
-                            "EOF" => output.push_end_of_file(span),
-                            spelling => output.push_text(spelling, span),
-                        }
-                    }
-                }
-
-                impl<N> ::m2_syn::Reconstruct<N> for #name
-                where
-                    N: ::m2_syn::CstNode,
-                {
-                    fn matches(node: &N) -> bool {
-                        ::m2_syn::matches_concrete::<Self, N>(node)
-                    }
-
-                    fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
-                        ::m2_syn::expect_concrete::<Self, N>(&node)?;
-                        Ok(Self::new(node.span()))
-                    }
-                }
-            }
-        });
-        let arms = self.tokens.iter().map(|definition| {
-            let name = &definition.name;
-            let pattern = &definition.pattern;
-            quote! { [#pattern] => { $crate::#name }; }
-        });
-        quote! {
-            #(#definitions)*
-
-            #[macro_export]
-            macro_rules! Token {
-                #(#arms)*
-            }
-        }
-    }
-
     fn expand_struct(
         &self,
         definition: &StructDefinition,
         token_like: &BTreeSet<SyntaxTypeName>,
-    ) -> Result<TokenStream2> {
+    ) -> Result<TokenStream> {
         let attrs = &definition.attrs;
         let visibility = &definition.visibility;
         let name = &definition.name;
-        let kind = &definition.kind;
+        let kind = definition
+            .cst_kind
+            .clone()
+            .unwrap_or_else(|| to_snake_case(&name.to_string()));
         let common = quote! {
+
             impl ::m2_syn::AstNode for #name {
                 type Kind = SyntaxKind;
 
@@ -674,13 +345,10 @@ impl Syntax {
                 }
             }
 
-            impl ::m2_syn::ConcreteNode for #name {
-                const NAME: &'static str = #kind;
-                const NAMED: bool = true;
-            }
         };
         match &definition.fields {
             StructFields::Leaf => Ok(quote! {
+
                 #(#attrs)*
                 #[derive(Debug)]
                 #visibility struct #name {
@@ -713,41 +381,43 @@ impl Syntax {
                     N: ::m2_syn::CstNode,
                 {
                     fn matches(node: &N) -> bool {
-                        ::m2_syn::matches_concrete::<Self, N>(node)
+                        node.identity().matches(#kind, true)
                     }
 
                     fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
-                        ::m2_syn::expect_concrete::<Self, N>(&node)?;
+                        if !<Self as ::m2_syn::Reconstruct<N>>::matches(&node) {
+                            return Err(::m2_syn::ReconstructError::wrong_node(
+                                #kind,
+                                true,
+                                node.identity(),
+                            ));
+                        }
                         Ok(Self::new(node.text(), node.span()))
                     }
                 }
+
             }),
-            StructFields::Product { style, fields } => {
-                let struct_definition = match style {
-                    ProductStyle::Named => {
-                        let expanded_fields = fields.iter().map(|field| {
-                            let attrs = &field.attrs;
-                            let visibility = &field.visibility;
-                            let member = &field.member;
-                            let stored = field.shape.stored_type(token_like, false);
-                            quote! { #(#attrs)* #visibility #member: #stored }
-                        });
-                        quote! {
-                            #visibility struct #name {
-                                #(#expanded_fields,)*
-                            }
-                        }
-                    }
-                    ProductStyle::Unnamed => {
-                        let expanded_fields = fields.iter().map(|field| {
-                            let attrs = &field.attrs;
-                            let visibility = &field.visibility;
-                            let stored = field.shape.stored_type(token_like, false);
-                            quote! { #(#attrs)* #visibility #stored }
-                        });
-                        quote! {
-                            #visibility struct #name(#(#expanded_fields,)*);
-                        }
+
+            StructFields::Product { fields } => {
+                let structural_matches = if definition.cst_kind.is_some() {
+                    fields
+                        .iter()
+                        .filter_map(FieldDefinition::required_match)
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                let expanded_fields = fields.iter().map(|field| {
+                    let attrs = &field.attrs;
+                    let visibility = &field.visibility;
+                    let member = &field.member;
+                    let stored = field.shape.stored_type(token_like, false);
+                    quote! { #(#attrs)* #visibility #member: #stored }
+                });
+                let struct_definition = quote! {
+                    #visibility struct #name {
+                        #(#expanded_fields,)*
+                        pub(crate) span: ::m2_syn::Span,
                     }
                 };
                 let constructor_arguments = fields.iter().map(|field| {
@@ -755,45 +425,54 @@ impl Syntax {
                     let ty = field.shape.source_type();
                     quote! { #binding: #ty }
                 });
-                let constructor = match style {
-                    ProductStyle::Named => {
-                        let fields = fields.iter().map(|field| {
-                            let member = &field.member;
-                            let binding = &field.binding;
-                            let value =
-                                field.shape.store_value(quote!(#binding), token_like, false);
-                            quote! { #member: #value }
-                        });
-                        quote!(Self { #(#fields,)* })
-                    }
-                    ProductStyle::Unnamed => {
-                        let fields = fields.iter().map(|field| {
-                            let binding = &field.binding;
-                            field.shape.store_value(quote!(#binding), token_like, false)
-                        });
-                        quote!(Self(#(#fields,)*))
-                    }
+                let constructor_conversions = fields
+                    .iter()
+                    .filter_map(|field| {
+                        let binding = &field.binding;
+                        let stored = field.shape.stored_shape(token_like, false);
+                        if field.shape.conversion_is_identity(&stored) {
+                            None
+                        } else {
+                            let value = field.shape.convert_value(&stored, quote!(#binding));
+                            Some(quote! { let #binding = #value; })
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let constructor_fields = fields.iter().map(|field| &field.binding);
+                let constructor_value = quote!(Self { #(#constructor_fields,)* span });
+                let constructor = if constructor_conversions.is_empty() {
+                    constructor_value
+                } else {
+                    quote!({
+                        #(#constructor_conversions)*
+                        #constructor_value
+                    })
                 };
                 let span_fields = fields.iter().map(|field| {
-                    let member = &field.member;
-                    quote! { ::m2_syn::Spanned::span(&self.#member) }
+                    let binding = &field.binding;
+                    quote! { ::m2_syn::Spanned::span(&#binding) }
                 });
                 let reconstruct_fields = fields
                     .iter()
                     .map(|field| field.reconstruct(token_like))
                     .collect::<Result<Vec<_>>>()?;
-                let reconstructed = match style {
-                    ProductStyle::Named => {
-                        let fields = fields.iter().map(|field| {
-                            let member = &field.member;
-                            let binding = &field.binding;
-                            quote!(#member: #binding)
-                        });
-                        quote!(Self { #(#fields,)* })
+                let reconstructed_fields = fields.iter().map(|field| &field.binding);
+                let reconstructed = quote!(Self { #(#reconstructed_fields,)* span });
+                let field_separator = definition
+                    .delimiter
+                    .map_or(" ", DelimiterKind::field_separator);
+                let print_fields = fields
+                    .iter()
+                    .map(|field| field.to_tokens(field_separator))
+                    .collect::<Result<Vec<_>>>()?;
+                let emit_contents = if let Some(delimiter) = definition.delimiter {
+                    let delimiter = delimiter.tokens();
+                    quote! {
+                        output.push_group(#delimiter, contents, ::m2_syn::Spanned::span(self));
                     }
-                    ProductStyle::Unnamed => {
-                        let fields = fields.iter().map(|field| &field.binding);
-                        quote!(Self(#(#fields,)*))
+                } else {
+                    quote! {
+                        ::m2_syn::ToTokens::to_tokens(&contents, output);
                     }
                 };
                 Ok(quote! {
@@ -803,12 +482,21 @@ impl Syntax {
 
                     impl #name {
                         pub fn new(#(#constructor_arguments),*) -> Self {
+                            let span = ::m2_syn::Span::join_all([#(#span_fields),*]);
                             #constructor
                         }
                     }
                    impl ::m2_syn::Spanned for #name {
                         fn span(&self) -> ::m2_syn::Span {
-                            ::m2_syn::Span::join_all([#(#span_fields),*])
+                            self.span
+                        }
+                    }
+
+                    impl ::m2_syn::ToTokens for #name {
+                        fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
+                            let mut contents = ::m2_syn::TokenStream::new();
+                            #(#print_fields)*
+                            #emit_contents
                         }
                     }
 
@@ -819,11 +507,19 @@ impl Syntax {
                         N: ::m2_syn::CstNode,
                     {
                         fn matches(node: &N) -> bool {
-                            ::m2_syn::matches_concrete::<Self, N>(node)
+                            node.identity().matches(#kind, true)
+                                #(&& #structural_matches)*
                         }
 
                         fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
-                            ::m2_syn::expect_concrete::<Self, N>(&node)?;
+                            if !<Self as ::m2_syn::Reconstruct<N>>::matches(&node) {
+                                return Err(::m2_syn::ReconstructError::wrong_node(
+                                    #kind,
+                                    true,
+                                    node.identity(),
+                                ));
+                            }
+                            let span = node.span();
                             let mut children = ::m2_syn::ChildCursor::new(&node);
                             #(#reconstruct_fields)*
                             Ok(#reconstructed)
@@ -834,7 +530,7 @@ impl Syntax {
         }
     }
 
-    fn expand_conversions(&self) -> Result<TokenStream2> {
+    fn expand_conversions(&self) -> Result<TokenStream> {
         let mut paths = ConversionGraph::new();
         for definition in &self.enums {
             for variant in &definition.variants {
@@ -878,7 +574,7 @@ impl Syntax {
             }
         }
 
-        let declarations = self.declaration_idents();
+        let declarations = self.declaration_types();
         let implementations = paths.into_iter().filter_map(|((source, target), paths)| {
             if paths.len() != 1 {
                 return None;
@@ -901,25 +597,26 @@ impl Syntax {
         Ok(quote! { #(#implementations)* })
     }
 
-    fn declaration_idents(&self) -> BTreeMap<SyntaxTypeName, Ident> {
-        self.tokens
-            .iter()
-            .map(|definition| definition.name.clone())
-            .chain(
-                self.structs
-                    .iter()
-                    .map(|definition| definition.name.clone()),
-            )
-            .chain(self.enums.iter().map(|definition| definition.name.clone()))
-            .map(|ident| (SyntaxTypeName::from(&ident), ident))
+    fn declaration_types(&self) -> BTreeMap<SyntaxTypeName, TokenStream> {
+        self.all_types()
+            .map(|name| (SyntaxTypeName::from(name), self.type_reference(name)))
             .collect()
     }
 
-    fn expand_visit(&self, token_like: &BTreeSet<SyntaxTypeName>) -> TokenStream2 {
+    fn type_reference(&self, name: &Ident) -> TokenStream {
+        if let Some(pattern) = self.tokens.pattern(name) {
+            quote!(Token![#pattern])
+        } else {
+            quote!(#name)
+        }
+    }
+
+    fn expand_visit(&self, token_like: &BTreeSet<SyntaxTypeName>) -> TokenStream {
         let methods = self.all_types().map(|name| {
             let method = format_ident!("visit_{}", to_snake_case(&name.to_string()));
+            let ty = self.type_reference(name);
             quote! {
-                fn #method(&mut self, node: &'ast #name) {
+                fn #method(&mut self, node: &'ast #ty) {
                     $crate::visit::#method(self, node);
                 }
             }
@@ -940,11 +637,12 @@ impl Syntax {
         }
     }
 
-    fn expand_visit_mut(&self, token_like: &BTreeSet<SyntaxTypeName>) -> TokenStream2 {
+    fn expand_visit_mut(&self, token_like: &BTreeSet<SyntaxTypeName>) -> TokenStream {
         let methods = self.all_types().map(|name| {
             let method = format_ident!("visit_{}_mut", to_snake_case(&name.to_string()));
+            let ty = self.type_reference(name);
             quote! {
-                fn #method(&mut self, node: &mut #name) {
+                fn #method(&mut self, node: &mut #ty) {
                     $crate::visit_mut::#method(self, node);
                 }
             }
@@ -965,11 +663,12 @@ impl Syntax {
         }
     }
 
-    fn expand_fold(&self, token_like: &BTreeSet<SyntaxTypeName>) -> TokenStream2 {
+    fn expand_fold(&self, token_like: &BTreeSet<SyntaxTypeName>) -> TokenStream {
         let methods = self.all_types().map(|name| {
             let method = format_ident!("fold_{}", to_snake_case(&name.to_string()));
+            let ty = self.type_reference(name);
             quote! {
-                fn #method(&mut self, node: #name) -> #name {
+                fn #method(&mut self, node: #ty) -> #ty {
                     $crate::fold::#method(self, node)
                 }
             }
@@ -1002,17 +701,17 @@ impl Syntax {
         &self,
         traversal: Traversal,
         token_like: &BTreeSet<SyntaxTypeName>,
-    ) -> Vec<TokenStream2> {
-        let tokens = self
-            .tokens
-            .iter()
-            .map(|definition| traversal.empty_walker(&definition.name));
+    ) -> Vec<TokenStream> {
+        let tokens = self.tokens.iter().map(|definition| {
+            let ty = self.type_reference(&definition.name);
+            traversal.empty_walker(&definition.name, ty)
+        });
         let structs = self.structs.iter().map(|definition| {
             let name = &definition.name;
             match &definition.fields {
-                StructFields::Leaf => traversal.empty_walker(name),
-                StructFields::Product { style, fields } => {
-                    traversal.struct_walker(name, *style, fields, token_like)
+                StructFields::Leaf => traversal.empty_walker(name, quote!(#name)),
+                StructFields::Product { fields } => {
+                    traversal.struct_walker(name, fields, token_like)
                 }
             }
         });
@@ -1025,10 +724,24 @@ impl Syntax {
 }
 
 impl FieldDefinition {
-    fn reconstruct(&self, token_like: &BTreeSet<SyntaxTypeName>) -> Result<TokenStream2> {
+    fn required_match(&self) -> Option<TokenStream> {
+        let (Cardinality::Required, element) = self.shape.cardinality().ok()? else {
+            return None;
+        };
+        let ty = element.source_type();
+        let field_match = match &self.source {
+            FieldSource::Named(field) => quote!(child.field == Some(#field)),
+            FieldSource::Unfielded => quote!(child.field.is_none()),
+        };
+        Some(quote!(node.children().any(|child| {
+            #field_match && <#ty as ::m2_syn::Reconstruct<N>>::matches(&child.node)
+        })))
+    }
+
+    fn reconstruct(&self, token_like: &BTreeSet<SyntaxTypeName>) -> Result<TokenStream> {
         let binding = &self.binding;
         let (cardinality, element) = self.shape.cardinality()?;
-        let base = element.base_ident();
+        let base_type = element.source_type();
         let selected = match (&self.source, cardinality) {
             (FieldSource::Named(field), Cardinality::Required) => {
                 quote!(children.required_field(#field)?)
@@ -1040,20 +753,20 @@ impl FieldDefinition {
                 quote!(children.repeated_field(#field))
             }
             (FieldSource::Unfielded, Cardinality::Required) => {
-                quote!(children.required_matching::<#base>()?)
+                quote!(children.required_matching::<#base_type>()?)
             }
             (FieldSource::Unfielded, Cardinality::Optional) => {
-                quote!(children.optional_matching::<#base>())
+                quote!(children.optional_matching::<#base_type>())
             }
             (FieldSource::Unfielded, Cardinality::Repeated) => {
-                quote!(children.repeated_matching::<#base>())
+                quote!(children.repeated_matching::<#base_type>())
             }
         };
         let stored_element = element.stored_shape(token_like, cardinality == Cardinality::Repeated);
         Ok(match cardinality {
             Cardinality::Required => {
                 let reconstructed = quote!(
-                    <#base as ::m2_syn::Reconstruct<N>>::reconstruct(#selected)?
+                    <#base_type as ::m2_syn::Reconstruct<N>>::reconstruct(#selected)?
                 );
                 let value = stored_element.wrap_value(reconstructed);
                 quote!(let #binding = #value;)
@@ -1061,17 +774,64 @@ impl FieldDefinition {
             Cardinality::Optional => {
                 let value = stored_element.wrap_value(quote!(value));
                 quote!(let #binding = #selected
-                    .map(|node| <#base as ::m2_syn::Reconstruct<N>>::reconstruct(node)
-                        .map(|value| #value))
+                    .map(|node| {
+                        let value = <#base_type as ::m2_syn::Reconstruct<N>>::reconstruct(node)?;
+                        Ok::<_, ::m2_syn::ReconstructError>(#value)
+                    })
                     .transpose()?;)
             }
             Cardinality::Repeated => {
                 let value = stored_element.wrap_value(quote!(value));
                 quote!(let #binding = #selected
                     .into_iter()
-                    .map(|node| <#base as ::m2_syn::Reconstruct<N>>::reconstruct(node)
-                        .map(|value| #value))
-                    .collect::<Result<Vec<_>, _>>()?;)
+                    .map(|node| {
+                        let value = <#base_type as ::m2_syn::Reconstruct<N>>::reconstruct(node)?;
+                        Ok::<_, ::m2_syn::ReconstructError>(#value)
+                    })
+                    .collect::<Result<::std::vec::Vec<_>, _>>()?;)
+            }
+        })
+    }
+
+    fn to_tokens(&self, field_separator: &'static str) -> Result<TokenStream> {
+        let member = &self.member;
+        let (cardinality, _) = self.shape.cardinality()?;
+        let write = match cardinality {
+            Cardinality::Required | Cardinality::Optional => quote! {
+                ::m2_syn::ToTokens::to_tokens(&self.#member, &mut field_output);
+            },
+            Cardinality::Repeated => {
+                let separator = if field_separator.is_empty() && self.repeated_separator == " " {
+                    ""
+                } else {
+                    self.repeated_separator
+                };
+                quote! {
+                    for (index, value) in self.#member.iter().enumerate() {
+                        if index != 0 {
+                            field_output.push_synthetic(#separator);
+                        }
+                        ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
+                    }
+                }
+            }
+        };
+        let separator = (!self.attached).then_some(field_separator);
+        let separate = separator.map(|separator| {
+            quote! {
+                if !contents.is_empty() {
+                    contents.push_synthetic(#separator);
+                }
+            }
+        });
+        Ok(quote! {
+            {
+                let mut field_output = ::m2_syn::TokenStream::new();
+                #write
+                if !field_output.is_empty() {
+                    #separate
+                    ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
+                }
             }
         })
     }
@@ -1086,32 +846,28 @@ enum Cardinality {
 
 #[derive(Clone)]
 enum StoredShape {
-    Base(TypePath, Ident),
+    Base(TokenStream, Ident),
     Boxed(Box<Self>),
     Optional(Box<Self>),
     Repeated(Box<Self>),
 }
 
 impl TypeShape {
-    fn source_type(&self) -> TokenStream2 {
+    fn source_type(&self) -> TokenStream {
         match self {
             Self::Base(path, _) => quote!(#path),
-            Self::Boxed(inner) => {
-                let inner = inner.source_type();
-                quote!(Box<#inner>)
-            }
             Self::Optional(inner) => {
                 let inner = inner.source_type();
-                quote!(Option<#inner>)
+                quote!(::std::option::Option<#inner>)
             }
             Self::Repeated(inner) => {
                 let inner = inner.source_type();
-                quote!(Vec<#inner>)
+                quote!(::std::vec::Vec<#inner>)
             }
         }
     }
 
-    fn stored_type(&self, token_like: &BTreeSet<SyntaxTypeName>, indirect: bool) -> TokenStream2 {
+    fn stored_type(&self, token_like: &BTreeSet<SyntaxTypeName>, indirect: bool) -> TokenStream {
         self.stored_shape(token_like, indirect).ty()
     }
 
@@ -1125,9 +881,6 @@ impl TypeShape {
                     StoredShape::Boxed(Box::new(base))
                 }
             }
-            Self::Boxed(inner) => {
-                StoredShape::Boxed(Box::new(inner.stored_shape(token_like, true)))
-            }
             Self::Optional(inner) => {
                 StoredShape::Optional(Box::new(inner.stored_shape(token_like, indirect)))
             }
@@ -1137,43 +890,58 @@ impl TypeShape {
         }
     }
 
-    fn store_value(
-        &self,
-        value: TokenStream2,
-        token_like: &BTreeSet<SyntaxTypeName>,
-        indirect: bool,
-    ) -> TokenStream2 {
-        let stored = self.stored_shape(token_like, indirect);
-        self.convert_value(&stored, value)
-    }
-
-    fn convert_value(&self, stored: &StoredShape, value: TokenStream2) -> TokenStream2 {
+    fn convert_value(&self, stored: &StoredShape, value: TokenStream) -> TokenStream {
+        if self.conversion_is_identity(stored) {
+            return value;
+        }
         match (self, stored) {
-            (Self::Base(_, _), StoredShape::Base(_, _)) => value,
             (Self::Base(_, _), StoredShape::Boxed(inner))
                 if matches!(inner.as_ref(), StoredShape::Base(_, _)) =>
             {
-                quote!(Box::new(#value))
-            }
-            (Self::Boxed(source), StoredShape::Boxed(target)) => {
-                let converted = source.convert_value(target, quote!(*value));
-                quote!(Box::new({ let value = #value; #converted }))
+                quote!(::std::boxed::Box::new(#value))
             }
             (Self::Optional(source), StoredShape::Optional(target)) => {
-                let converted = source.convert_value(target, quote!(value));
-                quote!(#value.map(|value| #converted))
+                if matches!(
+                    (source.as_ref(), target.as_ref()),
+                    (
+                        Self::Base(_, _),
+                        StoredShape::Boxed(inner)
+                    ) if matches!(inner.as_ref(), StoredShape::Base(_, _))
+                ) {
+                    quote!(#value.map(::std::boxed::Box::new))
+                } else {
+                    let converted = source.convert_value(target, quote!(value));
+                    quote!(#value.map(|value| #converted))
+                }
             }
             (Self::Repeated(source), StoredShape::Repeated(target)) => {
                 let converted = source.convert_value(target, quote!(value));
-                quote!(#value.into_iter().map(|value| #converted).collect())
+                quote!({
+                    let values = #value;
+                    let mut converted_values = ::std::vec::Vec::with_capacity(values.len());
+                    for value in values {
+                        converted_values.push(#converted);
+                    }
+                    converted_values
+                })
             }
             _ => quote!(#value),
         }
     }
 
+    fn conversion_is_identity(&self, stored: &StoredShape) -> bool {
+        match (self, stored) {
+            (Self::Base(_, _), StoredShape::Base(_, _)) => true,
+            (Self::Optional(source), StoredShape::Optional(target))
+            | (Self::Repeated(source), StoredShape::Repeated(target)) => {
+                source.conversion_is_identity(target)
+            }
+            _ => false,
+        }
+    }
+
     fn cardinality(&self) -> Result<(Cardinality, &Self)> {
         match self {
-            Self::Boxed(inner) => inner.cardinality(),
             Self::Optional(inner)
                 if !matches!(inner.as_ref(), Self::Optional(_) | Self::Repeated(_)) =>
             {
@@ -1194,36 +962,36 @@ impl TypeShape {
 }
 
 impl StoredShape {
-    fn ty(&self) -> TokenStream2 {
+    fn ty(&self) -> TokenStream {
         match self {
             Self::Base(path, _) => quote!(#path),
             Self::Boxed(inner) => {
                 let inner = inner.ty();
-                quote!(Box<#inner>)
+                quote!(::std::boxed::Box<#inner>)
             }
             Self::Optional(inner) => {
                 let inner = inner.ty();
-                quote!(Option<#inner>)
+                quote!(::std::option::Option<#inner>)
             }
             Self::Repeated(inner) => {
                 let inner = inner.ty();
-                quote!(Vec<#inner>)
+                quote!(::std::vec::Vec<#inner>)
             }
         }
     }
 
-    fn wrap_value(&self, value: TokenStream2) -> TokenStream2 {
+    fn wrap_value(&self, value: TokenStream) -> TokenStream {
         match self {
             Self::Base(_, _) => value,
             Self::Boxed(inner) => {
                 let value = inner.wrap_value(value);
-                quote!(Box::new(#value))
+                quote!(::std::boxed::Box::new(#value))
             }
             Self::Optional(_) | Self::Repeated(_) => value,
         }
     }
 
-    fn visit(&self, value: TokenStream2) -> TokenStream2 {
+    fn visit(&self, value: TokenStream) -> TokenStream {
         match self {
             Self::Base(_, ident) => {
                 let method = format_ident!("visit_{}", to_snake_case(&ident.to_string()));
@@ -1241,7 +1009,7 @@ impl StoredShape {
         }
     }
 
-    fn visit_mut(&self, value: TokenStream2) -> TokenStream2 {
+    fn visit_mut(&self, value: TokenStream) -> TokenStream {
         match self {
             Self::Base(_, ident) => {
                 let method = format_ident!("visit_{}_mut", to_snake_case(&ident.to_string()));
@@ -1259,7 +1027,7 @@ impl StoredShape {
         }
     }
 
-    fn fold(&self, value: TokenStream2) -> TokenStream2 {
+    fn fold(&self, value: TokenStream) -> TokenStream {
         match self {
             Self::Base(_, ident) => {
                 let method = format_ident!("fold_{}", to_snake_case(&ident.to_string()));
@@ -1267,7 +1035,7 @@ impl StoredShape {
             }
             Self::Boxed(inner) => {
                 let folded = inner.fold(quote!(*#value));
-                quote!(Box::new(#folded))
+                quote!(::std::boxed::Box::new(#folded))
             }
             Self::Optional(inner) => {
                 let folded = inner.fold(quote!(value));
@@ -1281,7 +1049,7 @@ impl StoredShape {
     }
 }
 
-fn expand_enum(definition: &EnumDefinition) -> TokenStream2 {
+fn expand_enum(definition: &EnumDefinition) -> TokenStream {
     let attrs = &definition.attrs;
     let visibility = &definition.visibility;
     let name = &definition.name;
@@ -1303,13 +1071,18 @@ fn expand_enum(definition: &EnumDefinition) -> TokenStream2 {
         let variant = &variant.name;
         quote!(Self::#variant(node) => ::m2_syn::ToTokens::to_tokens(node, output))
     });
-    let match_checks = definition.variants.iter().map(|variant| {
-        let base = variant.shape.base_ident();
-        quote!(<#base as ::m2_syn::Reconstruct<N>>::matches(node))
-    });
+    let matches = definition
+        .variants
+        .iter()
+        .map(|variant| {
+            let base = variant.shape.source_type();
+            quote!(<#base as ::m2_syn::Reconstruct<N>>::matches(node))
+        })
+        .reduce(|left, right| quote!(#left || #right))
+        .unwrap_or_else(|| quote!(false));
     let reconstruct_arms = definition.variants.iter().map(|variant| {
         let variant_name = &variant.name;
-        let base = variant.shape.base_ident();
+        let base = variant.shape.source_type();
         quote! {
             if <#base as ::m2_syn::Reconstruct<N>>::matches(&node) {
                 return Ok(Self::#variant_name(
@@ -1318,6 +1091,10 @@ fn expand_enum(definition: &EnumDefinition) -> TokenStream2 {
             }
         }
     });
+    let borrowed_fallback = definition
+        .variants
+        .is_empty()
+        .then(|| quote!(_ => unreachable!("empty generated syntax category")));
     quote! {
         #(#attrs)*
         #[derive(Debug)]
@@ -1327,7 +1104,7 @@ fn expand_enum(definition: &EnumDefinition) -> TokenStream2 {
 
         impl ::m2_syn::Spanned for #name {
             fn span(&self) -> ::m2_syn::Span {
-                match self { #(#span_arms,)* }
+                match self { #(#span_arms,)* #borrowed_fallback }
             }
         }
 
@@ -1335,13 +1112,13 @@ fn expand_enum(definition: &EnumDefinition) -> TokenStream2 {
             type Kind = SyntaxKind;
 
             fn kind(&self) -> SyntaxKind {
-                match self { #(#kind_arms,)* }
+                match self { #(#kind_arms,)* #borrowed_fallback }
             }
         }
 
         impl ::m2_syn::ToTokens for #name {
             fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-                match self { #(#token_arms,)* }
+                match self { #(#token_arms,)* #borrowed_fallback }
             }
         }
 
@@ -1350,7 +1127,7 @@ fn expand_enum(definition: &EnumDefinition) -> TokenStream2 {
             N: ::m2_syn::CstNode,
         {
             fn matches(node: &N) -> bool {
-                false #(|| #match_checks)*
+                #matches
             }
 
             fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
@@ -1380,4 +1157,38 @@ fn to_snake_case(name: &str) -> String {
         result.extend(character.to_lowercase());
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote;
+    use syn::parse2;
+
+    #[test]
+    fn staged_tokens_feed_one_lookup_macro_and_operator_enums() {
+        let syntax: Syntax = parse2(quote! {
+            tokens {
+                [+] {pref, bin, aug}
+                [!] {post}
+            }
+            keywords: { [if] }
+            markers: {}
+            punct: { [,] }
+
+            Leaf ::= leaf
+        })
+        .unwrap();
+        let expansion = syntax.expand().unwrap().combined();
+        parse2::<syn::File>(expansion.clone()).unwrap();
+        let expansion = expansion.to_string();
+
+        assert_eq!(expansion.matches("macro_rules ! Token").count(), 1);
+        assert!(expansion.contains("enum PrefixOperator"));
+        assert!(expansion.contains("enum BinaryOperator"));
+        assert!(expansion.contains("enum PostfixOperator"));
+        assert!(expansion.contains("AddEql"));
+        assert!(expansion.contains("IfKeyword"));
+        assert!(expansion.contains("Cma"));
+    }
 }

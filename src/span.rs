@@ -4,6 +4,7 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceId(pub u64);
 
+/// Complete describption of position in a text document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TextPoint {
     pub line: u32,

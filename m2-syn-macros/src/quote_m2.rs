@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use proc_macro2::{Delimiter, Ident, Span, TokenStream as TokenStream2, TokenTree};
+use proc_macro2::{Delimiter, Ident, Spacing, Span, TokenStream as TokenStream2, TokenTree};
 use quote::{format_ident, quote};
 use syn::Result;
 
@@ -46,15 +46,58 @@ fn expand_stream(
             }
             TokenTree::Ident(identifier) => {
                 let text = identifier.to_string();
-                (quote!(#output.push_synthetic(#text);), true, false)
+                (
+                    quote! {
+                        #output.push_ident(::m2_syn::IdentToken::new(
+                            #text,
+                            ::m2_syn::Span::detached(),
+                        ));
+                    },
+                    true,
+                    false,
+                )
             }
             TokenTree::Literal(literal) => {
                 let text = literal.to_string();
-                (quote!(#output.push_synthetic(#text);), true, false)
+                let kind = if text.starts_with('"') {
+                    quote!(::m2_syn::LiteralKind::String)
+                } else if text.contains(['.', 'e', 'E']) {
+                    quote!(::m2_syn::LiteralKind::Float)
+                } else {
+                    quote!(::m2_syn::LiteralKind::Integer)
+                };
+                (
+                    quote! {
+                        #output.push_literal(::m2_syn::Literal::new(
+                            #kind,
+                            #text.into(),
+                            ::m2_syn::Span::detached(),
+                        ));
+                    },
+                    true,
+                    false,
+                )
             }
             TokenTree::Punct(punctuation) => {
-                let text = punctuation.as_char().to_string();
-                (quote!(#output.push_synthetic(#text);), false, false)
+                let mut text = punctuation.as_char().to_string();
+                while matches!(trees[index], TokenTree::Punct(ref punct) if punct.spacing() == Spacing::Joint)
+                {
+                    let Some(TokenTree::Punct(next)) = trees.get(index + 1) else {
+                        break;
+                    };
+                    text.push(next.as_char());
+                    index += 1;
+                }
+                (
+                    quote! {
+                        #output.push_punct(::m2_syn::Punct::new(
+                            #text,
+                            ::m2_syn::Span::detached(),
+                        ));
+                    },
+                    false,
+                    false,
+                )
             }
             TokenTree::Group(group) => {
                 let group_output =
@@ -80,11 +123,16 @@ fn expand_stream(
                     quote! {
                         let mut #group_output = ::m2_syn::TokenStream::new();
                         #(#nested)*
-                        #output.push_group(
-                            #delimiter,
+                        #output.push_group(::m2_syn::Group::new(
+                            ::m2_syn::Delimiter::new(
+                                #delimiter,
+                                ::m2_syn::DoubleSpan::new(
+                                    ::m2_syn::Span::detached(),
+                                    ::m2_syn::Span::detached(),
+                                ),
+                            ),
                             #group_output,
-                            ::m2_syn::Span::detached(),
-                        );
+                        ));
                     },
                     true,
                     false,
@@ -93,7 +141,13 @@ fn expand_stream(
         };
 
         if previous_wordlike && wordlike {
-            statements.push(quote!(#output.push_space();));
+            statements.push(quote! {
+                #output.push_trivia(::m2_syn::Trivia::new(
+                    ::m2_syn::TriviaKind::Whitespace,
+                    " ",
+                    ::m2_syn::Span::detached(),
+                ));
+            });
         }
         statements.push(statement);
         previous_wordlike = if resets_spacing { false } else { wordlike };

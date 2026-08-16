@@ -1,10 +1,11 @@
 use std::fmt::{Display, Formatter, Result};
 
-use crate::{Span, Spanned, token_stream::punct::Punct};
+use crate::{Span, Spanned};
 use delim::{Delimiter, DelimiterKind, DoubleSpan};
 
 pub mod delim;
 mod punct;
+pub use punct::Punct;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LiteralKind {
@@ -37,12 +38,29 @@ impl Literal {
     pub fn new(kind: LiteralKind, text: String, span: Span) -> Self {
         Self { kind, text, span }
     }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentToken {
     text: String,
     span: Span,
+}
+
+impl IdentToken {
+    pub fn new(text: impl Into<String>, span: Span) -> Self {
+        Self {
+            text: text.into(),
+            span,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 impl Spanned for IdentToken {
@@ -60,7 +78,7 @@ impl Display for IdentToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     delimiter: Delimiter,
-    stream: Box<TokenStream>,
+    stream: TokenStream,
 }
 
 impl Spanned for Group {
@@ -70,6 +88,10 @@ impl Spanned for Group {
 }
 
 impl Group {
+    pub fn new(delimiter: Delimiter, stream: TokenStream) -> Self {
+        Self { delimiter, stream }
+    }
+
     pub fn delimiter(&self) -> &Delimiter {
         &self.delimiter
     }
@@ -80,6 +102,92 @@ impl Group {
 
     pub fn double_span(&self) -> DoubleSpan {
         self.delimiter.span2
+    }
+
+    pub fn stream(&self) -> &TokenStream {
+        &self.stream
+    }
+
+    pub fn into_stream(self) -> TokenStream {
+        self.stream
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TriviaKind {
+    Whitespace,
+    CarriageReturn,
+    LineBreak,
+    LineComment,
+    BlockComment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Trivia {
+    kind: TriviaKind,
+    text: String,
+    span: Span,
+}
+
+impl Trivia {
+    pub fn new(kind: TriviaKind, text: impl Into<String>, span: Span) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+            span,
+        }
+    }
+
+    pub fn kind(&self) -> TriviaKind {
+        self.kind
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl Spanned for Trivia {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Display for Trivia {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellBlock {
+    stream: TokenStream,
+    span: Span,
+}
+
+impl CellBlock {
+    pub fn new(stream: TokenStream, span: Span) -> Self {
+        Self { stream, span }
+    }
+
+    pub fn stream(&self) -> &TokenStream {
+        &self.stream
+    }
+
+    pub fn into_stream(self) -> TokenStream {
+        self.stream
+    }
+}
+
+impl Spanned for CellBlock {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Display for CellBlock {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
+        self.stream.fmt(formatter)
     }
 }
 
@@ -97,6 +205,19 @@ pub enum TokenTree {
     Literal(Literal),
     Punct(Punct),
     Ident(IdentToken),
+    Trivia(Trivia),
+}
+
+impl Spanned for TokenTree {
+    fn span(&self) -> Span {
+        match self {
+            Self::Group(token) => token.span(),
+            Self::Literal(token) => token.span(),
+            Self::Punct(token) => token.span(),
+            Self::Ident(token) => token.span(),
+            Self::Trivia(token) => token.span(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -115,26 +236,28 @@ impl TokenStream {
         self.0.is_empty()
     }
 
-    pub fn push_text(&mut self, text: impl Into<String>, span: Span) {
-        self.0.push(TokenTree::Ident(IdentToken {
-            text: text.into(),
-            span,
-        }));
+    pub fn push_ident(&mut self, ident: IdentToken) {
+        self.0.push(TokenTree::Ident(ident));
     }
 
-    pub fn push_synthetic(&mut self, text: impl Into<String>) {
-        self.push_text(text, Span::detached());
+    pub fn push_literal(&mut self, literal: Literal) {
+        self.0.push(TokenTree::Literal(literal));
     }
 
-    pub fn push_space(&mut self) {
-        self.push_synthetic(" ");
+    pub fn push_punct(&mut self, punct: Punct) {
+        self.0.push(TokenTree::Punct(punct));
     }
 
-    pub fn push_group(&mut self, kind: DelimiterKind, stream: TokenStream, span: Span) {
-        self.0.push(TokenTree::Group(Group {
-            delimiter: Delimiter::new(kind, DoubleSpan::new(span, span)),
-            stream: Box::new(stream),
-        }));
+    pub fn push_trivia(&mut self, trivia: Trivia) {
+        self.0.push(TokenTree::Trivia(trivia));
+    }
+
+    pub fn push_group(&mut self, group: Group) {
+        self.0.push(TokenTree::Group(group));
+    }
+
+    pub fn push(&mut self, tree: TokenTree) {
+        self.0.push(tree);
     }
 }
 
@@ -146,6 +269,7 @@ impl Display for TokenStream {
                 TokenTree::Literal(literal) => literal.fmt(formatter)?,
                 TokenTree::Punct(punct) => punct.fmt(formatter)?,
                 TokenTree::Ident(ident) => ident.fmt(formatter)?,
+                TokenTree::Trivia(trivia) => trivia.fmt(formatter)?,
             }
         }
         Ok(())
@@ -155,6 +279,65 @@ impl Display for TokenStream {
 impl Extend<TokenTree> for TokenStream {
     fn extend<T: IntoIterator<Item = TokenTree>>(&mut self, iter: T) {
         self.0.extend(iter);
+    }
+}
+
+impl IntoIterator for TokenStream {
+    type Item = TokenTree;
+    type IntoIter = std::vec::IntoIter<TokenTree>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellStream {
+    cells: Vec<CellBlock>,
+    source_id: crate::SourceId,
+}
+
+impl CellStream {
+    pub fn new(cells: Vec<CellBlock>, source_id: crate::SourceId) -> Self {
+        Self { cells, source_id }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &CellBlock> {
+        self.cells.iter()
+    }
+
+    pub fn cells(&self) -> &[CellBlock] {
+        &self.cells
+    }
+
+    pub fn into_cells(self) -> Vec<CellBlock> {
+        self.cells
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    pub fn source_id(&self) -> crate::SourceId {
+        self.source_id
+    }
+}
+
+impl Display for CellStream {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
+        for cell in &self.cells {
+            cell.fmt(formatter)?;
+        }
+        Ok(())
+    }
+}
+
+impl IntoIterator for CellStream {
+    type Item = CellBlock;
+    type IntoIter = std::vec::IntoIter<CellBlock>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.cells.into_iter()
     }
 }
 

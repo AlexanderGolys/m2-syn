@@ -3,12 +3,13 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    CstChild, CstNode, NodeIdentity, ParseInput, Parser, ReconstructError, SourceFile, SourceId,
-    Span, TextPoint, TextRange, TokenStream, reconstruct,
+    CellStream, CstChild, CstNode, LexError, NodeIdentity, Parse, ReconstructError, SourceFile,
+    SourceId, Span, TextPoint, TextRange, TokenStream, lex_str, reconstruct,
 };
 
 #[derive(Debug)]
 pub enum ParseError {
+    Lex(LexError),
     Language(tree_sitter::LanguageError),
     Cancelled,
     InvalidSyntax(Span),
@@ -18,6 +19,7 @@ pub enum ParseError {
 impl Display for ParseError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Lex(error) => error.fmt(formatter),
             Self::Language(error) => error.fmt(formatter),
             Self::Cancelled => formatter.write_str("Tree-sitter parsing was cancelled"),
             Self::InvalidSyntax(span) => match span.range() {
@@ -36,6 +38,7 @@ impl Display for ParseError {
 impl Error for ParseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Lex(error) => Some(error),
             Self::Language(error) => Some(error),
             Self::Reconstruct(error) => Some(error),
             Self::Cancelled | Self::InvalidSyntax(_) => None,
@@ -46,6 +49,12 @@ impl Error for ParseError {
 impl From<ReconstructError> for ParseError {
     fn from(error: ReconstructError) -> Self {
         Self::Reconstruct(error)
+    }
+}
+
+impl From<LexError> for ParseError {
+    fn from(error: LexError) -> Self {
+        Self::Lex(error)
     }
 }
 
@@ -63,23 +72,25 @@ impl TreeSitterParser {
     }
 }
 
-impl Parser for TreeSitterParser {
+impl Parse for TreeSitterParser {
     type Error = ParseError;
 
-    fn parse(&mut self, input: ParseInput<'_>) -> Result<SourceFile, Self::Error> {
+    fn parse(&mut self, tokens: CellStream) -> Result<SourceFile, Self::Error> {
+        let source_id = tokens.source_id();
+        let source = tokens.to_string();
         let tree = self
             .parser
-            .parse(input.source, None)
+            .parse(&source, None)
             .ok_or(ParseError::Cancelled)?;
         if let Some(error) = first_error(tree.root_node()) {
             return Err(ParseError::InvalidSyntax(
-                TreeSitterNode::new(error, input.source.as_bytes(), input.source_id).span(),
+                TreeSitterNode::new(error, source.as_bytes(), source_id).span(),
             ));
         }
         reconstruct(TreeSitterNode::new(
             tree.root_node(),
-            input.source.as_bytes(),
-            input.source_id,
+            source.as_bytes(),
+            source_id,
         ))
         .map_err(Into::into)
     }
@@ -87,7 +98,7 @@ impl Parser for TreeSitterParser {
 
 pub fn parse_file(source: &str, source_id: SourceId) -> Result<SourceFile, ParseError> {
     let mut parser = TreeSitterParser::new()?;
-    parser.parse(ParseInput::new(source, source_id))
+    parser.parse(lex_str(source, source_id)?)
 }
 
 /// Parses an emitted M2 token stream into the complete typed source file.
@@ -143,6 +154,20 @@ impl<'tree, 'source> TreeSitterNode<'tree, 'source> {
             _ => self.node,
         }
     }
+
+    fn is_implicit_adjacency(self) -> bool {
+        let node = self.normalized_node();
+        if node.kind() != "binary_expression" {
+            return false;
+        }
+        let Some(operator) = node.child_by_field_name("operator") else {
+            return false;
+        };
+        operator.kind() == "SPACE"
+            && self.source[operator.byte_range()]
+                .iter()
+                .all(u8::is_ascii_whitespace)
+    }
 }
 
 impl CstNode for TreeSitterNode<'_, '_> {
@@ -152,6 +177,9 @@ impl CstNode for TreeSitterNode<'_, '_> {
         Self: 'syntax;
 
     fn identity(&self) -> NodeIdentity<'_> {
+        if self.is_implicit_adjacency() {
+            return NodeIdentity::new("adjacent_expression", true);
+        }
         let node = self.normalized_node();
         NodeIdentity::new(node.kind(), node.is_named())
     }

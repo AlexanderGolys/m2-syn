@@ -1,7 +1,7 @@
 use m2_syn::{
     AstNode, BinaryExpression, BinaryOperator, Expr, PrefixOperator, SourceId, Span, Spanned,
-    Symbol, SyntaxKind, SyntaxNode, TextPoint, TextRange, ToTokens, fold::Fold, parse_tokens,
-    quote_m2, visit::Visit, visit_mut::VisitMut,
+    Symbol, SyntaxKind, SyntaxNode, TextPoint, TextRange, ToTokens, TokenTree, TriviaKind,
+    fold::Fold, parse_tokens, quote_m2, visit::Visit, visit_mut::VisitMut,
 };
 
 fn span(start: usize, end: usize) -> Span {
@@ -20,7 +20,7 @@ fn symbol(name: &str, start: usize) -> Symbol {
 }
 
 fn multiply(start: usize) -> m2_syn::Token![*] {
-    <m2_syn::Token![*]>::new(span(start, start + 1))
+    m2_syn::Token![*](span(start, start + 1))
 }
 
 fn assignment() -> SyntaxNode {
@@ -117,6 +117,10 @@ fn one_token_type_can_belong_to_multiple_operator_categories() {
 
     assert!(matches!(binary, BinaryOperator::Mul(_)));
     assert!(matches!(prefix, PrefixOperator::Mul(_)));
+    assert!(matches!(
+        multiply(0).tokens().into_iter().next(),
+        Some(TokenTree::Punct(punct)) if punct.text() == "*"
+    ));
 }
 
 #[test]
@@ -129,6 +133,19 @@ fn quote_builds_an_m2_token_stream_with_interpolation() {
 
     assert_eq!(tokens.to_string(), "result=value+1;return result");
     assert_eq!(tokens.to_m2(), "result=value+1;return result");
+    let tokens = tokens.into_iter().collect::<Vec<_>>();
+    assert!(matches!(tokens[0], TokenTree::Ident(_)));
+    assert!(matches!(tokens[1], TokenTree::Punct(_)));
+    assert!(matches!(tokens[2], TokenTree::Ident(_)));
+    assert!(matches!(tokens[3], TokenTree::Punct(_)));
+    assert!(matches!(tokens[4], TokenTree::Literal(_)));
+    assert!(matches!(tokens[5], TokenTree::Punct(_)));
+    assert!(matches!(tokens[6], TokenTree::Ident(_)));
+    assert!(matches!(
+        tokens[7],
+        TokenTree::Trivia(ref trivia) if trivia.kind() == TriviaKind::Whitespace
+    ));
+    assert!(matches!(tokens[8], TokenTree::Ident(_)));
 }
 
 #[test]

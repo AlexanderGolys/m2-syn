@@ -122,8 +122,9 @@ impl DelimiterKind {
             Self::Bracket => quote!(::m2_syn::DelimiterKind::Bracket),
             Self::Brace => quote!(::m2_syn::DelimiterKind::Brace),
             Self::AngleBar => quote!(::m2_syn::DelimiterKind::AngleBar),
-            Self::String => quote!(::m2_syn::DelimiterKind::String),
-            Self::RawString => quote!(::m2_syn::DelimiterKind::RawString),
+            Self::String | Self::RawString => {
+                unreachable!("string literals are not token-tree groups")
+            }
         }
     }
 
@@ -223,7 +224,11 @@ impl Syntax {
             .iter()
             .map(|definition| self.expand_struct(definition, &token_like))
             .collect::<Result<Vec<_>>>()?;
-        let enums = self.enums.iter().map(expand_enum).collect::<Vec<_>>();
+        let enums = self
+            .enums
+            .iter()
+            .map(|definition| expand_enum(definition, &self.tokens))
+            .collect::<Vec<_>>();
         let conversions = self.expand_conversions()?;
         let node_kinds = self.expand_node_kinds();
         let visits = self.expand_visit(&token_like);
@@ -347,7 +352,44 @@ impl Syntax {
 
         };
         match &definition.fields {
-            StructFields::Leaf => Ok(quote! {
+            StructFields::Leaf => {
+                let emit = match name.to_string().as_str() {
+                    "FloatLiteral" => quote! {
+                        output.push_literal(::m2_syn::Literal::new(
+                            ::m2_syn::LiteralKind::Float,
+                            self.text.clone(),
+                            ::m2_syn::Spanned::span(self),
+                        ));
+                    },
+                    "IntegerLiteral" => quote! {
+                        output.push_literal(::m2_syn::Literal::new(
+                            ::m2_syn::LiteralKind::Integer,
+                            self.text.clone(),
+                            ::m2_syn::Spanned::span(self),
+                        ));
+                    },
+                    "BlockComment" => quote! {
+                        output.push_trivia(::m2_syn::Trivia::new(
+                            ::m2_syn::TriviaKind::BlockComment,
+                            &self.text,
+                            ::m2_syn::Spanned::span(self),
+                        ));
+                    },
+                    "LineComment" => quote! {
+                        output.push_trivia(::m2_syn::Trivia::new(
+                            ::m2_syn::TriviaKind::LineComment,
+                            &self.text,
+                            ::m2_syn::Spanned::span(self),
+                        ));
+                    },
+                    _ => quote! {
+                        output.push_ident(::m2_syn::IdentToken::new(
+                            &self.text,
+                            ::m2_syn::Spanned::span(self),
+                        ));
+                    },
+                };
+                Ok(quote! {
 
                 #(#attrs)*
                 #[derive(Debug)]
@@ -370,7 +412,7 @@ impl Syntax {
 
                 impl ::m2_syn::ToTokens for #name {
                     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-                        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+                        #emit
                     }
                 }
 
@@ -396,7 +438,8 @@ impl Syntax {
                     }
                 }
 
-            }),
+                })
+            }
 
             StructFields::Product { fields } => {
                 let structural_matches = if definition.cst_kind.is_some() {
@@ -465,15 +508,39 @@ impl Syntax {
                     .iter()
                     .map(|field| field.to_tokens(field_separator))
                     .collect::<Result<Vec<_>>>()?;
-                let emit_contents = if let Some(delimiter) = definition.delimiter {
-                    let delimiter = delimiter.tokens();
-                    quote! {
-                        output.push_group(#delimiter, contents, ::m2_syn::Spanned::span(self));
+                let emit_contents = match definition.delimiter {
+                    Some(DelimiterKind::String) => quote! {
+                        output.push_literal(::m2_syn::Literal::new(
+                            ::m2_syn::LiteralKind::String,
+                            ::std::format!("\"{}\"", contents),
+                            ::m2_syn::Spanned::span(self),
+                        ));
+                    },
+                    Some(DelimiterKind::RawString) => quote! {
+                        output.push_literal(::m2_syn::Literal::new(
+                            ::m2_syn::LiteralKind::RawString,
+                            ::std::format!("///{}///", contents),
+                            ::m2_syn::Spanned::span(self),
+                        ));
+                    },
+                    Some(delimiter) => {
+                        let delimiter = delimiter.tokens();
+                        quote! {
+                            output.push_group(::m2_syn::Group::new(
+                                ::m2_syn::Delimiter::new(
+                                    #delimiter,
+                                    ::m2_syn::DoubleSpan::new(
+                                        ::m2_syn::Span::detached(),
+                                        ::m2_syn::Span::detached(),
+                                    ),
+                                ),
+                                contents,
+                            ));
+                        }
                     }
-                } else {
-                    quote! {
+                    None => quote! {
                         ::m2_syn::ToTokens::to_tokens(&contents, output);
-                    }
+                    },
                 };
                 Ok(quote! {
                     #(#attrs)*
@@ -806,21 +873,31 @@ impl FieldDefinition {
                 } else {
                     self.repeated_separator
                 };
-                quote! {
-                    for (index, value) in self.#member.iter().enumerate() {
-                        if index != 0 {
-                            field_output.push_synthetic(#separator);
+                if separator.is_empty() {
+                    quote! {
+                        for value in &self.#member {
+                            ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
                         }
-                        ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
+                    }
+                } else {
+                    let push_separator = push_detached_separator(quote!(field_output), separator);
+                    quote! {
+                        for (index, value) in self.#member.iter().enumerate() {
+                            if index != 0 {
+                                #push_separator
+                            }
+                            ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
+                        }
                     }
                 }
             }
         };
-        let separator = (!self.attached).then_some(field_separator);
+        let separator = (!self.attached && !field_separator.is_empty()).then_some(field_separator);
         let separate = separator.map(|separator| {
+            let push_separator = push_detached_separator(quote!(contents), separator);
             quote! {
                 if !contents.is_empty() {
-                    contents.push_synthetic(#separator);
+                    #push_separator
                 }
             }
         });
@@ -834,6 +911,38 @@ impl FieldDefinition {
                 }
             }
         })
+    }
+}
+
+fn push_detached_separator(output: TokenStream, separator: &str) -> TokenStream {
+    match separator {
+        "" => quote! {},
+        " " => quote! {
+            #output.push_trivia(::m2_syn::Trivia::new(
+                ::m2_syn::TriviaKind::Whitespace,
+                " ",
+                ::m2_syn::Span::detached(),
+            ));
+        },
+        "\n" => quote! {
+            #output.push_trivia(::m2_syn::Trivia::new(
+                ::m2_syn::TriviaKind::LineBreak,
+                "\n",
+                ::m2_syn::Span::detached(),
+            ));
+        },
+        ", " => quote! {
+            #output.push_punct(::m2_syn::Punct::new(
+                ",",
+                ::m2_syn::Span::detached(),
+            ));
+            #output.push_trivia(::m2_syn::Trivia::new(
+                ::m2_syn::TriviaKind::Whitespace,
+                " ",
+                ::m2_syn::Span::detached(),
+            ));
+        },
+        separator => panic!("unsupported generated separator `{separator}`"),
     }
 }
 
@@ -1049,7 +1158,7 @@ impl StoredShape {
     }
 }
 
-fn expand_enum(definition: &EnumDefinition) -> TokenStream {
+fn expand_enum(definition: &EnumDefinition, tokens: &TokenDefinitions) -> TokenStream {
     let attrs = &definition.attrs;
     let visibility = &definition.visibility;
     let name = &definition.name;
@@ -1095,6 +1204,50 @@ fn expand_enum(definition: &EnumDefinition) -> TokenStream {
         .variants
         .is_empty()
         .then(|| quote!(_ => unreachable!("empty generated syntax category")));
+    let spelling_api = [
+        OperatorKind::Prefix,
+        OperatorKind::Binary,
+        OperatorKind::Postfix,
+    ]
+    .into_iter()
+    .find(|kind| kind.enum_name() == *name)
+    .map(|_| {
+        let from_spelling_arms = definition.variants.iter().map(|variant| {
+            let variant_name = &variant.name;
+            let ty = variant.shape.source_type();
+            let spelling = tokens
+                .spelling(variant.shape.base_ident())
+                .expect("operator variants are generated from tokens");
+            quote!(#spelling => Some(Self::#variant_name(#ty(span))))
+        });
+        let spelling_arms = definition.variants.iter().map(|variant| {
+            let variant_name = &variant.name;
+            let spelling = tokens
+                .spelling(variant.shape.base_ident())
+                .expect("operator variants are generated from tokens");
+            quote!(Self::#variant_name(_) => #spelling)
+        });
+        quote! {
+            impl #name {
+                pub fn from_spelling(
+                    spelling: &str,
+                    span: ::m2_syn::Span,
+                ) -> ::std::option::Option<Self> {
+                    match spelling {
+                        #(#from_spelling_arms,)*
+                        _ => None,
+                    }
+                }
+
+                pub fn spelling(&self) -> &'static str {
+                    match self {
+                        #(#spelling_arms,)*
+                        #borrowed_fallback
+                    }
+                }
+            }
+        }
+    });
     quote! {
         #(#attrs)*
         #[derive(Debug)]
@@ -1138,6 +1291,8 @@ fn expand_enum(definition: &EnumDefinition) -> TokenStream {
                 ))
             }
         }
+
+        #spelling_api
     }
 }
 

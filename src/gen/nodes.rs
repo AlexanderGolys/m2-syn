@@ -20,7 +20,10 @@ impl ::m2_syn::Spanned for Symbol {
 }
 impl ::m2_syn::ToTokens for Symbol {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_ident(::m2_syn::IdentToken::new(
+            &self.text,
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for Symbol {
@@ -67,7 +70,10 @@ impl ::m2_syn::Spanned for Keyword {
 }
 impl ::m2_syn::ToTokens for Keyword {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_ident(::m2_syn::IdentToken::new(
+            &self.text,
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for Keyword {
@@ -114,7 +120,11 @@ impl ::m2_syn::Spanned for BlockComment {
 }
 impl ::m2_syn::ToTokens for BlockComment {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_trivia(::m2_syn::Trivia::new(
+            ::m2_syn::TriviaKind::BlockComment,
+            &self.text,
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for BlockComment {
@@ -161,7 +171,11 @@ impl ::m2_syn::Spanned for LineComment {
 }
 impl ::m2_syn::ToTokens for LineComment {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_trivia(::m2_syn::Trivia::new(
+            ::m2_syn::TriviaKind::LineComment,
+            &self.text,
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for LineComment {
@@ -208,7 +222,10 @@ impl ::m2_syn::Spanned for EmptyComponent {
 }
 impl ::m2_syn::ToTokens for EmptyComponent {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_ident(::m2_syn::IdentToken::new(
+            &self.text,
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for EmptyComponent {
@@ -255,7 +272,10 @@ impl ::m2_syn::Spanned for EscapeSequence {
 }
 impl ::m2_syn::ToTokens for EscapeSequence {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_ident(::m2_syn::IdentToken::new(
+            &self.text,
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for EscapeSequence {
@@ -302,7 +322,11 @@ impl ::m2_syn::Spanned for FloatLiteral {
 }
 impl ::m2_syn::ToTokens for FloatLiteral {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_literal(::m2_syn::Literal::new(
+            ::m2_syn::LiteralKind::Float,
+            self.text.clone(),
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for FloatLiteral {
@@ -349,7 +373,11 @@ impl ::m2_syn::Spanned for IntegerLiteral {
 }
 impl ::m2_syn::ToTokens for IntegerLiteral {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_literal(::m2_syn::Literal::new(
+            ::m2_syn::LiteralKind::Integer,
+            self.text.clone(),
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for IntegerLiteral {
@@ -396,7 +424,10 @@ impl ::m2_syn::Spanned for RawStringContent {
 }
 impl ::m2_syn::ToTokens for RawStringContent {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_ident(::m2_syn::IdentToken::new(
+            &self.text,
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for RawStringContent {
@@ -443,7 +474,10 @@ impl ::m2_syn::Spanned for StringContent {
 }
 impl ::m2_syn::ToTokens for StringContent {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-        output.push_text(&self.text, ::m2_syn::Spanned::span(self));
+        output.push_ident(::m2_syn::IdentToken::new(
+            &self.text,
+            ::m2_syn::Spanned::span(self),
+        ));
     }
 }
 impl ::m2_syn::AstNode for StringContent {
@@ -493,13 +527,21 @@ impl ::m2_syn::ToTokens for SourceFile {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.elements.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic("\n");
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::LineBreak,
+                        "\n",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -568,7 +610,11 @@ impl ::m2_syn::ToTokens for ExpressionCell {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -635,7 +681,11 @@ impl ::m2_syn::ToTokens for SequenceCell {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -700,13 +750,22 @@ impl ::m2_syn::ToTokens for NakedSequence {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.elements.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(", ");
+                    field_output.push_punct(::m2_syn::Punct::new(",", ::m2_syn::Span::detached()));
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -779,13 +838,22 @@ impl ::m2_syn::ToTokens for MutedCell {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.elements.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(", ");
+                    field_output.push_punct(::m2_syn::Punct::new(",", ::m2_syn::Span::detached()));
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -876,13 +944,22 @@ impl ::m2_syn::ToTokens for MutedGroup {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.elements.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(", ");
+                    field_output.push_punct(::m2_syn::Punct::new(",", ::m2_syn::Span::detached()));
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -973,13 +1050,21 @@ impl ::m2_syn::ToTokens for Array {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.muted.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(" ");
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -988,22 +1073,33 @@ impl ::m2_syn::ToTokens for Array {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.elements.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(", ");
+                    field_output.push_punct(::m2_syn::Punct::new(",", ::m2_syn::Span::detached()));
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
         }
-        output.push_group(
-            ::m2_syn::DelimiterKind::Bracket,
+        output.push_group(::m2_syn::Group::new(
+            ::m2_syn::Delimiter::new(
+                ::m2_syn::DelimiterKind::Bracket,
+                ::m2_syn::DoubleSpan::new(::m2_syn::Span::detached(), ::m2_syn::Span::detached()),
+            ),
             contents,
-            ::m2_syn::Spanned::span(self),
-        );
+        ));
     }
 }
 impl ::m2_syn::AstNode for Array {
@@ -1083,13 +1179,21 @@ impl ::m2_syn::ToTokens for List {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.muted.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(" ");
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1098,22 +1202,33 @@ impl ::m2_syn::ToTokens for List {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.elements.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(", ");
+                    field_output.push_punct(::m2_syn::Punct::new(",", ::m2_syn::Span::detached()));
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
         }
-        output.push_group(
-            ::m2_syn::DelimiterKind::Brace,
+        output.push_group(::m2_syn::Group::new(
+            ::m2_syn::Delimiter::new(
+                ::m2_syn::DelimiterKind::Brace,
+                ::m2_syn::DoubleSpan::new(::m2_syn::Span::detached(), ::m2_syn::Span::detached()),
+            ),
             contents,
-            ::m2_syn::Spanned::span(self),
-        );
+        ));
     }
 }
 impl ::m2_syn::AstNode for List {
@@ -1193,13 +1308,21 @@ impl ::m2_syn::ToTokens for AngleBarList {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.muted.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(" ");
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1208,22 +1331,33 @@ impl ::m2_syn::ToTokens for AngleBarList {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.elements.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(", ");
+                    field_output.push_punct(::m2_syn::Punct::new(",", ::m2_syn::Span::detached()));
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
         }
-        output.push_group(
-            ::m2_syn::DelimiterKind::AngleBar,
+        output.push_group(::m2_syn::Group::new(
+            ::m2_syn::Delimiter::new(
+                ::m2_syn::DelimiterKind::AngleBar,
+                ::m2_syn::DoubleSpan::new(::m2_syn::Span::detached(), ::m2_syn::Span::detached()),
+            ),
             contents,
-            ::m2_syn::Spanned::span(self),
-        );
+        ));
     }
 }
 impl ::m2_syn::AstNode for AngleBarList {
@@ -1303,13 +1437,21 @@ impl ::m2_syn::ToTokens for Sequence {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.muted.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(" ");
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1318,22 +1460,33 @@ impl ::m2_syn::ToTokens for Sequence {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.elements.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(", ");
+                    field_output.push_punct(::m2_syn::Punct::new(",", ::m2_syn::Span::detached()));
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
         }
-        output.push_group(
-            ::m2_syn::DelimiterKind::Parenthesis,
+        output.push_group(::m2_syn::Group::new(
+            ::m2_syn::Delimiter::new(
+                ::m2_syn::DelimiterKind::Parenthesis,
+                ::m2_syn::DoubleSpan::new(::m2_syn::Span::detached(), ::m2_syn::Span::detached()),
+            ),
             contents,
-            ::m2_syn::Spanned::span(self),
-        );
+        ));
     }
 }
 impl ::m2_syn::AstNode for Sequence {
@@ -1412,13 +1565,21 @@ impl ::m2_syn::ToTokens for ParenthesizedExpression {
             let mut field_output = ::m2_syn::TokenStream::new();
             for (index, value) in self.muted.iter().enumerate() {
                 if index != 0 {
-                    field_output.push_synthetic(" ");
+                    field_output.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1428,16 +1589,22 @@ impl ::m2_syn::ToTokens for ParenthesizedExpression {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
         }
-        output.push_group(
-            ::m2_syn::DelimiterKind::Parenthesis,
+        output.push_group(::m2_syn::Group::new(
+            ::m2_syn::Delimiter::new(
+                ::m2_syn::DelimiterKind::Parenthesis,
+                ::m2_syn::DoubleSpan::new(::m2_syn::Span::detached(), ::m2_syn::Span::detached()),
+            ),
             contents,
-            ::m2_syn::Spanned::span(self),
-        );
+        ));
     }
 }
 impl ::m2_syn::AstNode for ParenthesizedExpression {
@@ -1502,24 +1669,18 @@ impl ::m2_syn::ToTokens for StringLiteral {
         let mut contents = ::m2_syn::TokenStream::new();
         {
             let mut field_output = ::m2_syn::TokenStream::new();
-            for (index, value) in self.elements.iter().enumerate() {
-                if index != 0 {
-                    field_output.push_synthetic("");
-                }
+            for value in &self.elements {
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
-                if !contents.is_empty() {
-                    contents.push_synthetic("");
-                }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
         }
-        output.push_group(
-            ::m2_syn::DelimiterKind::String,
-            contents,
+        output.push_literal(::m2_syn::Literal::new(
+            ::m2_syn::LiteralKind::String,
+            ::std::format!("\"{}\"", contents),
             ::m2_syn::Spanned::span(self),
-        );
+        ));
     }
 }
 impl ::m2_syn::AstNode for StringLiteral {
@@ -1577,24 +1738,18 @@ impl ::m2_syn::ToTokens for RawStringLiteral {
         let mut contents = ::m2_syn::TokenStream::new();
         {
             let mut field_output = ::m2_syn::TokenStream::new();
-            for (index, value) in self.elements.iter().enumerate() {
-                if index != 0 {
-                    field_output.push_synthetic("");
-                }
+            for value in &self.elements {
                 ::m2_syn::ToTokens::to_tokens(value, &mut field_output);
             }
             if !field_output.is_empty() {
-                if !contents.is_empty() {
-                    contents.push_synthetic("");
-                }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
         }
-        output.push_group(
-            ::m2_syn::DelimiterKind::RawString,
-            contents,
+        output.push_literal(::m2_syn::Literal::new(
+            ::m2_syn::LiteralKind::RawString,
+            ::std::format!("///{}///", contents),
             ::m2_syn::Spanned::span(self),
-        );
+        ));
     }
 }
 impl ::m2_syn::AstNode for RawStringLiteral {
@@ -1670,7 +1825,11 @@ impl ::m2_syn::ToTokens for BinaryExpression {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1680,7 +1839,11 @@ impl ::m2_syn::ToTokens for BinaryExpression {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1690,7 +1853,11 @@ impl ::m2_syn::ToTokens for BinaryExpression {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1739,6 +1906,104 @@ where
     }
 }
 #[derive(Debug)]
+pub struct AdjacentExpression {
+    pub left: ::std::boxed::Box<Expr>,
+    pub right: ::std::boxed::Box<Expr>,
+    pub(crate) span: ::m2_syn::Span,
+}
+impl AdjacentExpression {
+    pub fn new(left: Expr, right: Expr) -> Self {
+        let span = ::m2_syn::Span::join_all([
+            ::m2_syn::Spanned::span(&left),
+            ::m2_syn::Spanned::span(&right),
+        ]);
+        {
+            let left = ::std::boxed::Box::new(left);
+            let right = ::std::boxed::Box::new(right);
+            Self { left, right, span }
+        }
+    }
+}
+impl ::m2_syn::Spanned for AdjacentExpression {
+    fn span(&self) -> ::m2_syn::Span {
+        self.span
+    }
+}
+impl ::m2_syn::ToTokens for AdjacentExpression {
+    fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
+        let mut contents = ::m2_syn::TokenStream::new();
+        {
+            let mut field_output = ::m2_syn::TokenStream::new();
+            ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
+            if !field_output.is_empty() {
+                if !contents.is_empty() {
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
+                }
+                ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
+            }
+        }
+        {
+            let mut field_output = ::m2_syn::TokenStream::new();
+            ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
+            if !field_output.is_empty() {
+                if !contents.is_empty() {
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
+                }
+                ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
+            }
+        }
+        ::m2_syn::ToTokens::to_tokens(&contents, output);
+    }
+}
+impl ::m2_syn::AstNode for AdjacentExpression {
+    type Kind = SyntaxKind;
+    fn kind(&self) -> SyntaxKind {
+        SyntaxKind::AdjacentExpression
+    }
+}
+impl<N> ::m2_syn::Reconstruct<N> for AdjacentExpression
+where
+    N: ::m2_syn::CstNode,
+{
+    fn matches(node: &N) -> bool {
+        node.identity().matches("adjacent_expression", true)
+            && node.children().any(|child| {
+                child.field == Some("left")
+                    && <Expr as ::m2_syn::Reconstruct<N>>::matches(&child.node)
+            })
+            && node.children().any(|child| {
+                child.field == Some("right")
+                    && <Expr as ::m2_syn::Reconstruct<N>>::matches(&child.node)
+            })
+    }
+    fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
+        if !<Self as ::m2_syn::Reconstruct<N>>::matches(&node) {
+            return Err(::m2_syn::ReconstructError::wrong_node(
+                "adjacent_expression",
+                true,
+                node.identity(),
+            ));
+        }
+        let span = node.span();
+        let mut children = ::m2_syn::ChildCursor::new(&node);
+        let left = ::std::boxed::Box::new(<Expr as ::m2_syn::Reconstruct<N>>::reconstruct(
+            children.required_field("left")?,
+        )?);
+        let right = ::std::boxed::Box::new(<Expr as ::m2_syn::Reconstruct<N>>::reconstruct(
+            children.required_field("right")?,
+        )?);
+        Ok(Self { left, right, span })
+    }
+}
+#[derive(Debug)]
 pub struct PrefixExpression {
     pub operator: PrefixOperator,
     pub operand: ::std::boxed::Box<Expr>,
@@ -1773,7 +2038,11 @@ impl ::m2_syn::ToTokens for PrefixExpression {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1783,7 +2052,11 @@ impl ::m2_syn::ToTokens for PrefixExpression {
             ::m2_syn::ToTokens::to_tokens(&self.operand, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1862,7 +2135,11 @@ impl ::m2_syn::ToTokens for PostfixExpression {
             ::m2_syn::ToTokens::to_tokens(&self.operand, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1872,7 +2149,11 @@ impl ::m2_syn::ToTokens for PostfixExpression {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1955,7 +2236,11 @@ impl ::m2_syn::ToTokens for LambdaExpression {
             ::m2_syn::ToTokens::to_tokens(&self.parameters, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1965,7 +2250,11 @@ impl ::m2_syn::ToTokens for LambdaExpression {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -1975,7 +2264,11 @@ impl ::m2_syn::ToTokens for LambdaExpression {
             ::m2_syn::ToTokens::to_tokens(&self.body, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2063,7 +2356,11 @@ impl ::m2_syn::ToTokens for Assignment {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2073,7 +2370,11 @@ impl ::m2_syn::ToTokens for Assignment {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2083,7 +2384,11 @@ impl ::m2_syn::ToTokens for Assignment {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2182,7 +2487,11 @@ impl ::m2_syn::ToTokens for LocalAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2192,7 +2501,11 @@ impl ::m2_syn::ToTokens for LocalAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2202,7 +2515,11 @@ impl ::m2_syn::ToTokens for LocalAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2301,7 +2618,11 @@ impl ::m2_syn::ToTokens for BinaryAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2311,7 +2632,11 @@ impl ::m2_syn::ToTokens for BinaryAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2321,7 +2646,11 @@ impl ::m2_syn::ToTokens for BinaryAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2409,7 +2738,11 @@ impl ::m2_syn::ToTokens for BinaryInstallation {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2419,7 +2752,11 @@ impl ::m2_syn::ToTokens for BinaryInstallation {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2429,7 +2766,11 @@ impl ::m2_syn::ToTokens for BinaryInstallation {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2517,7 +2858,11 @@ impl ::m2_syn::ToTokens for PrefixAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2527,7 +2872,11 @@ impl ::m2_syn::ToTokens for PrefixAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2537,7 +2886,11 @@ impl ::m2_syn::ToTokens for PrefixAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2625,7 +2978,11 @@ impl ::m2_syn::ToTokens for PrefixInstallation {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2635,7 +2992,11 @@ impl ::m2_syn::ToTokens for PrefixInstallation {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2645,7 +3006,11 @@ impl ::m2_syn::ToTokens for PrefixInstallation {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2733,7 +3098,11 @@ impl ::m2_syn::ToTokens for PostfixAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2743,7 +3112,11 @@ impl ::m2_syn::ToTokens for PostfixAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2753,7 +3126,11 @@ impl ::m2_syn::ToTokens for PostfixAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2842,7 +3219,11 @@ impl ::m2_syn::ToTokens for PostfixInstallation {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2852,7 +3233,11 @@ impl ::m2_syn::ToTokens for PostfixInstallation {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2862,7 +3247,11 @@ impl ::m2_syn::ToTokens for PostfixInstallation {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2951,7 +3340,11 @@ impl ::m2_syn::ToTokens for StructuredBinding {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2961,7 +3354,11 @@ impl ::m2_syn::ToTokens for StructuredBinding {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -2971,7 +3368,11 @@ impl ::m2_syn::ToTokens for StructuredBinding {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3070,7 +3471,11 @@ impl ::m2_syn::ToTokens for LocalStructuredBinding {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3080,7 +3485,11 @@ impl ::m2_syn::ToTokens for LocalStructuredBinding {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3090,7 +3499,11 @@ impl ::m2_syn::ToTokens for LocalStructuredBinding {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3189,7 +3602,11 @@ impl ::m2_syn::ToTokens for EvaluatedAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3199,7 +3616,11 @@ impl ::m2_syn::ToTokens for EvaluatedAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3209,7 +3630,11 @@ impl ::m2_syn::ToTokens for EvaluatedAssignment {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3258,13 +3683,13 @@ where
     }
 }
 #[derive(Debug)]
-pub struct Option {
+pub struct OptionExpression {
     pub left: ::std::boxed::Box<Expr>,
     pub operator: Token![=>],
     pub right: ::std::boxed::Box<Expr>,
     pub(crate) span: ::m2_syn::Span,
 }
-impl Option {
+impl OptionExpression {
     pub fn new(left: Expr, operator: Token![=>], right: Expr) -> Self {
         let span = ::m2_syn::Span::join_all([
             ::m2_syn::Spanned::span(&left),
@@ -3283,12 +3708,12 @@ impl Option {
         }
     }
 }
-impl ::m2_syn::Spanned for Option {
+impl ::m2_syn::Spanned for OptionExpression {
     fn span(&self) -> ::m2_syn::Span {
         self.span
     }
 }
-impl ::m2_syn::ToTokens for Option {
+impl ::m2_syn::ToTokens for OptionExpression {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
         let mut contents = ::m2_syn::TokenStream::new();
         {
@@ -3296,7 +3721,11 @@ impl ::m2_syn::ToTokens for Option {
             ::m2_syn::ToTokens::to_tokens(&self.left, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3306,7 +3735,11 @@ impl ::m2_syn::ToTokens for Option {
             ::m2_syn::ToTokens::to_tokens(&self.operator, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3316,7 +3749,11 @@ impl ::m2_syn::ToTokens for Option {
             ::m2_syn::ToTokens::to_tokens(&self.right, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3324,18 +3761,30 @@ impl ::m2_syn::ToTokens for Option {
         ::m2_syn::ToTokens::to_tokens(&contents, output);
     }
 }
-impl ::m2_syn::AstNode for Option {
+impl ::m2_syn::AstNode for OptionExpression {
     type Kind = SyntaxKind;
     fn kind(&self) -> SyntaxKind {
-        SyntaxKind::Option
+        SyntaxKind::OptionExpression
     }
 }
-impl<N> ::m2_syn::Reconstruct<N> for Option
+impl<N> ::m2_syn::Reconstruct<N> for OptionExpression
 where
     N: ::m2_syn::CstNode,
 {
     fn matches(node: &N) -> bool {
         node.identity().matches("option", true)
+            && node.children().any(|child| {
+                child.field == Some("left")
+                    && <Expr as ::m2_syn::Reconstruct<N>>::matches(&child.node)
+            })
+            && node.children().any(|child| {
+                child.field == Some("operator")
+                    && <Token![=>] as ::m2_syn::Reconstruct<N>>::matches(&child.node)
+            })
+            && node.children().any(|child| {
+                child.field == Some("right")
+                    && <Expr as ::m2_syn::Reconstruct<N>>::matches(&child.node)
+            })
     }
     fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
         if !<Self as ::m2_syn::Reconstruct<N>>::matches(&node) {
@@ -3399,7 +3848,11 @@ impl ::m2_syn::ToTokens for ThenClause {
             ::m2_syn::ToTokens::to_tokens(&self._then_clause_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3409,7 +3862,11 @@ impl ::m2_syn::ToTokens for ThenClause {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3488,7 +3945,11 @@ impl ::m2_syn::ToTokens for ElseClause {
             ::m2_syn::ToTokens::to_tokens(&self._else_clause_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3498,7 +3959,11 @@ impl ::m2_syn::ToTokens for ElseClause {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3590,7 +4055,11 @@ impl ::m2_syn::ToTokens for IfStatement {
             ::m2_syn::ToTokens::to_tokens(&self._if_statement_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3600,7 +4069,11 @@ impl ::m2_syn::ToTokens for IfStatement {
             ::m2_syn::ToTokens::to_tokens(&self.condition, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3610,7 +4083,11 @@ impl ::m2_syn::ToTokens for IfStatement {
             ::m2_syn::ToTokens::to_tokens(&self.then_clause, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3620,7 +4097,11 @@ impl ::m2_syn::ToTokens for IfStatement {
             ::m2_syn::ToTokens::to_tokens(&self.else_clause, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3724,7 +4205,11 @@ impl ::m2_syn::ToTokens for LoopBody {
             ::m2_syn::ToTokens::to_tokens(&self._loop_body_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3734,7 +4219,11 @@ impl ::m2_syn::ToTokens for LoopBody {
             ::m2_syn::ToTokens::to_tokens(&self.listed_value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3744,7 +4233,11 @@ impl ::m2_syn::ToTokens for LoopBody {
             ::m2_syn::ToTokens::to_tokens(&self._loop_body_2, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3754,7 +4247,11 @@ impl ::m2_syn::ToTokens for LoopBody {
             ::m2_syn::ToTokens::to_tokens(&self.ignored_value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3878,7 +4375,11 @@ impl ::m2_syn::ToTokens for IterationRange {
             ::m2_syn::ToTokens::to_tokens(&self._iteration_range_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3888,7 +4389,11 @@ impl ::m2_syn::ToTokens for IterationRange {
             ::m2_syn::ToTokens::to_tokens(&self.iterated_collection, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3898,7 +4403,11 @@ impl ::m2_syn::ToTokens for IterationRange {
             ::m2_syn::ToTokens::to_tokens(&self._iteration_range_2, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3908,7 +4417,11 @@ impl ::m2_syn::ToTokens for IterationRange {
             ::m2_syn::ToTokens::to_tokens(&self.range_start, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3918,7 +4431,11 @@ impl ::m2_syn::ToTokens for IterationRange {
             ::m2_syn::ToTokens::to_tokens(&self._iteration_range_4, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -3928,7 +4445,11 @@ impl ::m2_syn::ToTokens for IterationRange {
             ::m2_syn::ToTokens::to_tokens(&self.range_end, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4069,7 +4590,11 @@ impl ::m2_syn::ToTokens for ForLoop {
             ::m2_syn::ToTokens::to_tokens(&self._for_loop_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4079,7 +4604,11 @@ impl ::m2_syn::ToTokens for ForLoop {
             ::m2_syn::ToTokens::to_tokens(&self.variable, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4089,7 +4618,11 @@ impl ::m2_syn::ToTokens for ForLoop {
             ::m2_syn::ToTokens::to_tokens(&self.range, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4099,7 +4632,11 @@ impl ::m2_syn::ToTokens for ForLoop {
             ::m2_syn::ToTokens::to_tokens(&self._for_loop_3, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4109,7 +4646,11 @@ impl ::m2_syn::ToTokens for ForLoop {
             ::m2_syn::ToTokens::to_tokens(&self.filter, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4119,7 +4660,11 @@ impl ::m2_syn::ToTokens for ForLoop {
             ::m2_syn::ToTokens::to_tokens(&self.body, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4230,7 +4775,11 @@ impl ::m2_syn::ToTokens for WhileLoop {
             ::m2_syn::ToTokens::to_tokens(&self._while_loop_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4240,7 +4789,11 @@ impl ::m2_syn::ToTokens for WhileLoop {
             ::m2_syn::ToTokens::to_tokens(&self.condition, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4250,7 +4803,11 @@ impl ::m2_syn::ToTokens for WhileLoop {
             ::m2_syn::ToTokens::to_tokens(&self.body, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4354,7 +4911,11 @@ impl ::m2_syn::ToTokens for NewStatement {
             ::m2_syn::ToTokens::to_tokens(&self._new_statement_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4364,7 +4925,11 @@ impl ::m2_syn::ToTokens for NewStatement {
             ::m2_syn::ToTokens::to_tokens(&self.class, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4374,7 +4939,11 @@ impl ::m2_syn::ToTokens for NewStatement {
             ::m2_syn::ToTokens::to_tokens(&self._new_statement_2, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4384,7 +4953,11 @@ impl ::m2_syn::ToTokens for NewStatement {
             ::m2_syn::ToTokens::to_tokens(&self.parent, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4394,7 +4967,11 @@ impl ::m2_syn::ToTokens for NewStatement {
             ::m2_syn::ToTokens::to_tokens(&self._new_statement_4, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4404,7 +4981,11 @@ impl ::m2_syn::ToTokens for NewStatement {
             ::m2_syn::ToTokens::to_tokens(&self.instance, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4515,7 +5096,11 @@ impl ::m2_syn::ToTokens for DebugClause {
             ::m2_syn::ToTokens::to_tokens(&self.keyword, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4525,7 +5110,11 @@ impl ::m2_syn::ToTokens for DebugClause {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4608,7 +5197,11 @@ impl ::m2_syn::ToTokens for BreakStatement {
             ::m2_syn::ToTokens::to_tokens(&self._break_statement_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4618,7 +5211,11 @@ impl ::m2_syn::ToTokens for BreakStatement {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4704,7 +5301,11 @@ impl ::m2_syn::ToTokens for ContinueStatement {
             ::m2_syn::ToTokens::to_tokens(&self._continue_statement_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4714,7 +5315,11 @@ impl ::m2_syn::ToTokens for ContinueStatement {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4797,7 +5402,11 @@ impl ::m2_syn::ToTokens for ReturnStatement {
             ::m2_syn::ToTokens::to_tokens(&self._return_statement_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4807,7 +5416,11 @@ impl ::m2_syn::ToTokens for ReturnStatement {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4890,7 +5503,11 @@ impl ::m2_syn::ToTokens for CatchStatement {
             ::m2_syn::ToTokens::to_tokens(&self._catch_statement_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4900,7 +5517,11 @@ impl ::m2_syn::ToTokens for CatchStatement {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4979,7 +5600,11 @@ impl ::m2_syn::ToTokens for ThrowStatement {
             ::m2_syn::ToTokens::to_tokens(&self._throw_statement_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -4989,7 +5614,11 @@ impl ::m2_syn::ToTokens for ThrowStatement {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5068,7 +5697,11 @@ impl ::m2_syn::ToTokens for TrapStatement {
             ::m2_syn::ToTokens::to_tokens(&self._trap_statement_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5078,7 +5711,11 @@ impl ::m2_syn::ToTokens for TrapStatement {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5169,7 +5806,11 @@ impl ::m2_syn::ToTokens for ExceptClause {
             ::m2_syn::ToTokens::to_tokens(&self._except_clause_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5179,7 +5820,11 @@ impl ::m2_syn::ToTokens for ExceptClause {
             ::m2_syn::ToTokens::to_tokens(&self.exception, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5189,7 +5834,11 @@ impl ::m2_syn::ToTokens for ExceptClause {
             ::m2_syn::ToTokens::to_tokens(&self._except_clause_2, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5199,7 +5848,11 @@ impl ::m2_syn::ToTokens for ExceptClause {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5299,7 +5952,11 @@ impl ::m2_syn::ToTokens for TryStatement {
             ::m2_syn::ToTokens::to_tokens(&self._try_statement_0, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5309,7 +5966,11 @@ impl ::m2_syn::ToTokens for TryStatement {
             ::m2_syn::ToTokens::to_tokens(&self.value, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5319,7 +5980,11 @@ impl ::m2_syn::ToTokens for TryStatement {
             ::m2_syn::ToTokens::to_tokens(&self.then_clause, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5329,7 +5994,11 @@ impl ::m2_syn::ToTokens for TryStatement {
             ::m2_syn::ToTokens::to_tokens(&self.fallback, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5424,7 +6093,11 @@ impl ::m2_syn::ToTokens for QuoteExpression {
             ::m2_syn::ToTokens::to_tokens(&self.specifier, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5434,7 +6107,11 @@ impl ::m2_syn::ToTokens for QuoteExpression {
             ::m2_syn::ToTokens::to_tokens(&self.token, &mut field_output);
             if !field_output.is_empty() {
                 if !contents.is_empty() {
-                    contents.push_synthetic(" ");
+                    contents.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        ::m2_syn::Span::detached(),
+                    ));
                 }
                 ::m2_syn::ToTokens::to_tokens(&field_output, &mut contents);
             }
@@ -5673,6 +6350,49 @@ where
         ))
     }
 }
+impl PrefixOperator {
+    pub fn from_spelling(spelling: &str, span: ::m2_syn::Span) -> ::std::option::Option<Self> {
+        match spelling {
+            "#" => Some(Self::Hsh(Token![#](span))),
+            "*" => Some(Self::Mul(Token![*](span))),
+            "+" => Some(Self::Add(Token![+](span))),
+            "-" => Some(Self::Sub(Token![-](span))),
+            "<" => Some(Self::Lst(Token![<](span))),
+            "<<" => Some(Self::LstLst(Token![<<](span))),
+            "<=" => Some(Self::LstEql(Token![<=](span))),
+            "<==" => Some(Self::LstEqlEql(Token![<==](span))),
+            "<===" => Some(Self::LstEqlEqlEql(Token![<===](span))),
+            ">" => Some(Self::Gst(Token![>](span))),
+            ">=" => Some(Self::GstEql(Token![>=](span))),
+            "?" => Some(Self::Qsm(Token![?](span))),
+            "??" => Some(Self::QsmQsm(Token![??](span))),
+            "|-" => Some(Self::PipSub(Token![|-](span))),
+            "~" => Some(Self::Tld(Token![~](span))),
+            "not" => Some(Self::Not(Token![not](span))),
+            _ => None,
+        }
+    }
+    pub fn spelling(&self) -> &'static str {
+        match self {
+            Self::Hsh(_) => "#",
+            Self::Mul(_) => "*",
+            Self::Add(_) => "+",
+            Self::Sub(_) => "-",
+            Self::Lst(_) => "<",
+            Self::LstLst(_) => "<<",
+            Self::LstEql(_) => "<=",
+            Self::LstEqlEql(_) => "<==",
+            Self::LstEqlEqlEql(_) => "<===",
+            Self::Gst(_) => ">",
+            Self::GstEql(_) => ">=",
+            Self::Qsm(_) => "?",
+            Self::QsmQsm(_) => "??",
+            Self::PipSub(_) => "|-",
+            Self::Tld(_) => "~",
+            Self::Not(_) => "not",
+        }
+    }
+}
 #[derive(Debug)]
 pub enum BinaryOperator {
     BngEql(Token![!=]),
@@ -5771,7 +6491,6 @@ pub enum BinaryOperator {
     And(Token![and]),
     Or(Token![or]),
     Space(Token![SPACE]),
-    Adj(Token![]),
     Xor(Token![xor]),
 }
 impl ::m2_syn::Spanned for BinaryOperator {
@@ -5873,7 +6592,6 @@ impl ::m2_syn::Spanned for BinaryOperator {
             Self::And(node) => ::m2_syn::Spanned::span(node),
             Self::Or(node) => ::m2_syn::Spanned::span(node),
             Self::Space(node) => ::m2_syn::Spanned::span(node),
-            Self::Adj(node) => ::m2_syn::Spanned::span(node),
             Self::Xor(node) => ::m2_syn::Spanned::span(node),
         }
     }
@@ -5978,7 +6696,6 @@ impl ::m2_syn::AstNode for BinaryOperator {
             Self::And(node) => ::m2_syn::AstNode::kind(node),
             Self::Or(node) => ::m2_syn::AstNode::kind(node),
             Self::Space(node) => ::m2_syn::AstNode::kind(node),
-            Self::Adj(node) => ::m2_syn::AstNode::kind(node),
             Self::Xor(node) => ::m2_syn::AstNode::kind(node),
         }
     }
@@ -6082,7 +6799,6 @@ impl ::m2_syn::ToTokens for BinaryOperator {
             Self::And(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::Or(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::Space(node) => ::m2_syn::ToTokens::to_tokens(node, output),
-            Self::Adj(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::Xor(node) => ::m2_syn::ToTokens::to_tokens(node, output),
         }
     }
@@ -6188,7 +6904,6 @@ where
             || <Token![and] as ::m2_syn::Reconstruct<N>>::matches(node)
             || <Token![or] as ::m2_syn::Reconstruct<N>>::matches(node)
             || <Token![SPACE] as ::m2_syn::Reconstruct<N>>::matches(node)
-            || <Token![] as ::m2_syn::Reconstruct<N>>::matches(node)
             || <Token![xor] as ::m2_syn::Reconstruct<N>>::matches(node)
     }
     fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
@@ -6672,11 +7387,6 @@ where
                 <Token![SPACE] as ::m2_syn::Reconstruct<N>>::reconstruct(node)?,
             ));
         }
-        if <Token![] as ::m2_syn::Reconstruct<N>>::matches(&node) {
-            return Ok(Self::Adj(
-                <Token![] as ::m2_syn::Reconstruct<N>>::reconstruct(node)?,
-            ));
-        }
         if <Token![xor] as ::m2_syn::Reconstruct<N>>::matches(&node) {
             return Ok(Self::Xor(
                 <Token![xor] as ::m2_syn::Reconstruct<N>>::reconstruct(node)?,
@@ -6686,6 +7396,211 @@ where
             stringify!(BinaryOperator),
             node.identity(),
         ))
+    }
+}
+impl BinaryOperator {
+    pub fn from_spelling(spelling: &str, span: ::m2_syn::Span) -> ::std::option::Option<Self> {
+        match spelling {
+            "!=" => Some(Self::BngEql(Token![!=](span))),
+            "#" => Some(Self::Hsh(Token![#](span))),
+            "#?" => Some(Self::HshQsm(Token![#?](span))),
+            "%" => Some(Self::Mod(Token![%](span))),
+            "%=" => Some(Self::ModEql(Token![%=](span))),
+            "&" => Some(Self::Amp(Token![&](span))),
+            "&=" => Some(Self::AmpEql(Token![&=](span))),
+            "*" => Some(Self::Mul(Token![*](span))),
+            "*=" => Some(Self::MulEql(Token![*=](span))),
+            "**" => Some(Self::MulMul(Token![**](span))),
+            "**=" => Some(Self::MulMulEql(Token![**=](span))),
+            "+" => Some(Self::Add(Token![+](span))),
+            "+=" => Some(Self::AddEql(Token![+=](span))),
+            "++" => Some(Self::AddAdd(Token![++](span))),
+            "++=" => Some(Self::AddAddEql(Token![++=](span))),
+            "-" => Some(Self::Sub(Token![-](span))),
+            "-=" => Some(Self::SubEql(Token![-=](span))),
+            "." => Some(Self::Dot(Token![.](span))),
+            ".." => Some(Self::DotDot(Token![..](span))),
+            "..=" => Some(Self::DotDotEql(Token![..=](span))),
+            "..<" => Some(Self::DotDotLst(Token![..<](span))),
+            "..<=" => Some(Self::DotDotLstEql(Token![..<=](span))),
+            ".?" => Some(Self::DotQsm(Token![.?](span))),
+            "/" => Some(Self::Slh(Token![/](span))),
+            "/=" => Some(Self::SlhEql(Token![/=](span))),
+            "//" => Some(Self::SlhSlh(Token![/ /](span))),
+            "//=" => Some(Self::SlhSlhEql(Token![/ /=](span))),
+            ":" => Some(Self::Col(Token![:](span))),
+            ":=" => Some(Self::ColEql(Token![:=](span))),
+            "<" => Some(Self::Lst(Token![<](span))),
+            "<<" => Some(Self::LstLst(Token![<<](span))),
+            "<<=" => Some(Self::LstLstEql(Token![<<=](span))),
+            "<=" => Some(Self::LstEql(Token![<=](span))),
+            "<==" => Some(Self::LstEqlEql(Token![<==](span))),
+            "<===" => Some(Self::LstEqlEqlEql(Token![<===](span))),
+            "<==>" => Some(Self::LstEqlEqlGst(Token![<==>](span))),
+            "<==>=" => Some(Self::LstEqlEqlGstEql(Token![<==>=](span))),
+            "=!=" => Some(Self::EqlBngEql(Token![=!=](span))),
+            "==" => Some(Self::EqlEql(Token![==](span))),
+            "===" => Some(Self::EqlEqlEql(Token![===](span))),
+            "===>" => Some(Self::EqlEqlEqlGst(Token![===>](span))),
+            "===>=" => Some(Self::EqlEqlEqlGstEql(Token![===>=](span))),
+            "==>" => Some(Self::EqlEqlGst(Token![==>](span))),
+            "==>=" => Some(Self::EqlEqlGstEql(Token![==>=](span))),
+            ">" => Some(Self::Gst(Token![>](span))),
+            ">=" => Some(Self::GstEql(Token![>=](span))),
+            ">>" => Some(Self::GstGst(Token![>>](span))),
+            ">>=" => Some(Self::GstGstEql(Token![>>=](span))),
+            "?" => Some(Self::Qsm(Token![?](span))),
+            "??" => Some(Self::QsmQsm(Token![??](span))),
+            "??=" => Some(Self::QsmQsmEql(Token![??=](span))),
+            "@" => Some(Self::Att(Token![@](span))),
+            "@=" => Some(Self::AttEql(Token![@=](span))),
+            "@@" => Some(Self::AttAtt(Token![@@](span))),
+            "@@=" => Some(Self::AttAttEql(Token![@@=](span))),
+            "@@?" => Some(Self::AttAttQsm(Token![@@?](span))),
+            "@@?=" => Some(Self::AttAttQsmEql(Token![@@?=](span))),
+            "\\" => Some(Self::Bsl(Token!["\\"](span))),
+            "\\=" => Some(Self::BslEql(Token!["\\="](span))),
+            "\\\\" => Some(Self::BslBsl(Token!["\\\\"](span))),
+            "\\\\=" => Some(Self::BslBslEql(Token!["\\\\="](span))),
+            "^" => Some(Self::Crt(Token![^](span))),
+            "^=" => Some(Self::CrtEql(Token![^=](span))),
+            "^**" => Some(Self::CrtMulMul(Token![^**](span))),
+            "^**=" => Some(Self::CrtMulMulEql(Token![^**=](span))),
+            "^<" => Some(Self::CrtLst(Token![^<](span))),
+            "^<=" => Some(Self::CrtLstEql(Token![^<=](span))),
+            "^>" => Some(Self::CrtGst(Token![^>](span))),
+            "^>=" => Some(Self::CrtGstEql(Token![^>=](span))),
+            "^^" => Some(Self::CrtCrt(Token![^^](span))),
+            "^^=" => Some(Self::CrtCrtEql(Token![^^=](span))),
+            "_" => Some(Self::Ubs(Token![_](span))),
+            "_=" => Some(Self::UbsEql(Token![_ =](span))),
+            "_<" => Some(Self::UbsLst(Token![_ <](span))),
+            "_<=" => Some(Self::UbsLstEql(Token![_ <=](span))),
+            "_>" => Some(Self::UbsGst(Token![_ >](span))),
+            "_>=" => Some(Self::UbsGstEql(Token![_ >=](span))),
+            "|" => Some(Self::Pip(Token![|](span))),
+            "|=" => Some(Self::PipEql(Token![|=](span))),
+            "|-" => Some(Self::PipSub(Token![|-](span))),
+            "|-=" => Some(Self::PipSubEql(Token![|-=](span))),
+            "|_" => Some(Self::PipUbs(Token![| _](span))),
+            "|_=" => Some(Self::PipUbsEql(Token![| _ =](span))),
+            "||" => Some(Self::PipPip(Token![||](span))),
+            "||=" => Some(Self::PipPipEql(Token![||=](span))),
+            "~" => Some(Self::Tld(Token![~](span))),
+            "~=" => Some(Self::TldEql(Token![~=](span))),
+            "·" => Some(Self::Cdt(Token!["·"](span))),
+            "·=" => Some(Self::CdtEql(Token!["·="](span))),
+            "⊠" => Some(Self::Box(Token!["⊠"](span))),
+            "⊠=" => Some(Self::BoxEql(Token!["⊠="](span))),
+            "⧢" => Some(Self::Sfp(Token!["⧢"](span))),
+            "⧢=" => Some(Self::SfpEql(Token!["⧢="](span))),
+            "and" => Some(Self::And(Token![and](span))),
+            "or" => Some(Self::Or(Token![or](span))),
+            "SPACE" => Some(Self::Space(Token![SPACE](span))),
+            "xor" => Some(Self::Xor(Token![xor](span))),
+            _ => None,
+        }
+    }
+    pub fn spelling(&self) -> &'static str {
+        match self {
+            Self::BngEql(_) => "!=",
+            Self::Hsh(_) => "#",
+            Self::HshQsm(_) => "#?",
+            Self::Mod(_) => "%",
+            Self::ModEql(_) => "%=",
+            Self::Amp(_) => "&",
+            Self::AmpEql(_) => "&=",
+            Self::Mul(_) => "*",
+            Self::MulEql(_) => "*=",
+            Self::MulMul(_) => "**",
+            Self::MulMulEql(_) => "**=",
+            Self::Add(_) => "+",
+            Self::AddEql(_) => "+=",
+            Self::AddAdd(_) => "++",
+            Self::AddAddEql(_) => "++=",
+            Self::Sub(_) => "-",
+            Self::SubEql(_) => "-=",
+            Self::Dot(_) => ".",
+            Self::DotDot(_) => "..",
+            Self::DotDotEql(_) => "..=",
+            Self::DotDotLst(_) => "..<",
+            Self::DotDotLstEql(_) => "..<=",
+            Self::DotQsm(_) => ".?",
+            Self::Slh(_) => "/",
+            Self::SlhEql(_) => "/=",
+            Self::SlhSlh(_) => "//",
+            Self::SlhSlhEql(_) => "//=",
+            Self::Col(_) => ":",
+            Self::ColEql(_) => ":=",
+            Self::Lst(_) => "<",
+            Self::LstLst(_) => "<<",
+            Self::LstLstEql(_) => "<<=",
+            Self::LstEql(_) => "<=",
+            Self::LstEqlEql(_) => "<==",
+            Self::LstEqlEqlEql(_) => "<===",
+            Self::LstEqlEqlGst(_) => "<==>",
+            Self::LstEqlEqlGstEql(_) => "<==>=",
+            Self::EqlBngEql(_) => "=!=",
+            Self::EqlEql(_) => "==",
+            Self::EqlEqlEql(_) => "===",
+            Self::EqlEqlEqlGst(_) => "===>",
+            Self::EqlEqlEqlGstEql(_) => "===>=",
+            Self::EqlEqlGst(_) => "==>",
+            Self::EqlEqlGstEql(_) => "==>=",
+            Self::Gst(_) => ">",
+            Self::GstEql(_) => ">=",
+            Self::GstGst(_) => ">>",
+            Self::GstGstEql(_) => ">>=",
+            Self::Qsm(_) => "?",
+            Self::QsmQsm(_) => "??",
+            Self::QsmQsmEql(_) => "??=",
+            Self::Att(_) => "@",
+            Self::AttEql(_) => "@=",
+            Self::AttAtt(_) => "@@",
+            Self::AttAttEql(_) => "@@=",
+            Self::AttAttQsm(_) => "@@?",
+            Self::AttAttQsmEql(_) => "@@?=",
+            Self::Bsl(_) => "\\",
+            Self::BslEql(_) => "\\=",
+            Self::BslBsl(_) => "\\\\",
+            Self::BslBslEql(_) => "\\\\=",
+            Self::Crt(_) => "^",
+            Self::CrtEql(_) => "^=",
+            Self::CrtMulMul(_) => "^**",
+            Self::CrtMulMulEql(_) => "^**=",
+            Self::CrtLst(_) => "^<",
+            Self::CrtLstEql(_) => "^<=",
+            Self::CrtGst(_) => "^>",
+            Self::CrtGstEql(_) => "^>=",
+            Self::CrtCrt(_) => "^^",
+            Self::CrtCrtEql(_) => "^^=",
+            Self::Ubs(_) => "_",
+            Self::UbsEql(_) => "_=",
+            Self::UbsLst(_) => "_<",
+            Self::UbsLstEql(_) => "_<=",
+            Self::UbsGst(_) => "_>",
+            Self::UbsGstEql(_) => "_>=",
+            Self::Pip(_) => "|",
+            Self::PipEql(_) => "|=",
+            Self::PipSub(_) => "|-",
+            Self::PipSubEql(_) => "|-=",
+            Self::PipUbs(_) => "|_",
+            Self::PipUbsEql(_) => "|_=",
+            Self::PipPip(_) => "||",
+            Self::PipPipEql(_) => "||=",
+            Self::Tld(_) => "~",
+            Self::TldEql(_) => "~=",
+            Self::Cdt(_) => "·",
+            Self::CdtEql(_) => "·=",
+            Self::Box(_) => "⊠",
+            Self::BoxEql(_) => "⊠=",
+            Self::Sfp(_) => "⧢",
+            Self::SfpEql(_) => "⧢=",
+            Self::And(_) => "and",
+            Self::Or(_) => "or",
+            Self::Space(_) => "SPACE",
+            Self::Xor(_) => "xor",
+        }
     }
 }
 #[derive(Debug)]
@@ -6801,6 +7716,33 @@ where
             stringify!(PostfixOperator),
             node.identity(),
         ))
+    }
+}
+impl PostfixOperator {
+    pub fn from_spelling(spelling: &str, span: ::m2_syn::Span) -> ::std::option::Option<Self> {
+        match spelling {
+            "!" => Some(Self::Bng(Token![!](span))),
+            "(*)" => Some(Self::Graded(Token![(*)](span))),
+            "^!" => Some(Self::CrtBng(Token![^!](span))),
+            "^*" => Some(Self::CrtMul(Token![^*](span))),
+            "^~" => Some(Self::CrtTld(Token![^~](span))),
+            "_!" => Some(Self::UbsBng(Token![_ !](span))),
+            "_*" => Some(Self::UbsMul(Token![_ *](span))),
+            "_~" => Some(Self::UbsTld(Token![_ ~](span))),
+            _ => None,
+        }
+    }
+    pub fn spelling(&self) -> &'static str {
+        match self {
+            Self::Bng(_) => "!",
+            Self::Graded(_) => "(*)",
+            Self::CrtBng(_) => "^!",
+            Self::CrtMul(_) => "^*",
+            Self::CrtTld(_) => "^~",
+            Self::UbsBng(_) => "_!",
+            Self::UbsMul(_) => "_*",
+            Self::UbsTld(_) => "_~",
+        }
     }
 }
 #[derive(Debug)]
@@ -7685,6 +8627,7 @@ where
 }
 #[derive(Debug)]
 pub enum OperatorExpr {
+    AdjacentExpression(AdjacentExpression),
     BinaryExpression(BinaryExpression),
     PrefixExpression(PrefixExpression),
     PostfixExpression(PostfixExpression),
@@ -7692,6 +8635,7 @@ pub enum OperatorExpr {
 impl ::m2_syn::Spanned for OperatorExpr {
     fn span(&self) -> ::m2_syn::Span {
         match self {
+            Self::AdjacentExpression(node) => ::m2_syn::Spanned::span(node),
             Self::BinaryExpression(node) => ::m2_syn::Spanned::span(node),
             Self::PrefixExpression(node) => ::m2_syn::Spanned::span(node),
             Self::PostfixExpression(node) => ::m2_syn::Spanned::span(node),
@@ -7702,6 +8646,7 @@ impl ::m2_syn::AstNode for OperatorExpr {
     type Kind = SyntaxKind;
     fn kind(&self) -> SyntaxKind {
         match self {
+            Self::AdjacentExpression(node) => ::m2_syn::AstNode::kind(node),
             Self::BinaryExpression(node) => ::m2_syn::AstNode::kind(node),
             Self::PrefixExpression(node) => ::m2_syn::AstNode::kind(node),
             Self::PostfixExpression(node) => ::m2_syn::AstNode::kind(node),
@@ -7711,6 +8656,7 @@ impl ::m2_syn::AstNode for OperatorExpr {
 impl ::m2_syn::ToTokens for OperatorExpr {
     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
         match self {
+            Self::AdjacentExpression(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::BinaryExpression(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::PrefixExpression(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::PostfixExpression(node) => ::m2_syn::ToTokens::to_tokens(node, output),
@@ -7722,11 +8668,17 @@ where
     N: ::m2_syn::CstNode,
 {
     fn matches(node: &N) -> bool {
-        <BinaryExpression as ::m2_syn::Reconstruct<N>>::matches(node)
+        <AdjacentExpression as ::m2_syn::Reconstruct<N>>::matches(node)
+            || <BinaryExpression as ::m2_syn::Reconstruct<N>>::matches(node)
             || <PrefixExpression as ::m2_syn::Reconstruct<N>>::matches(node)
             || <PostfixExpression as ::m2_syn::Reconstruct<N>>::matches(node)
     }
     fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
+        if <AdjacentExpression as ::m2_syn::Reconstruct<N>>::matches(&node) {
+            return Ok(Self::AdjacentExpression(
+                <AdjacentExpression as ::m2_syn::Reconstruct<N>>::reconstruct(node)?,
+            ));
+        }
         if <BinaryExpression as ::m2_syn::Reconstruct<N>>::matches(&node) {
             return Ok(Self::BinaryExpression(
                 <BinaryExpression as ::m2_syn::Reconstruct<N>>::reconstruct(node)?,
@@ -7898,7 +8850,7 @@ pub enum Expr {
     Collection(Collection),
     OperatorExpr(OperatorExpr),
     AssignmentExpr(AssignmentExpr),
-    Option(Option),
+    OptionExpression(OptionExpression),
     LambdaExpression(LambdaExpression),
     IfStatement(IfStatement),
     ForLoop(ForLoop),
@@ -7925,7 +8877,7 @@ impl ::m2_syn::Spanned for Expr {
             Self::Collection(node) => ::m2_syn::Spanned::span(node),
             Self::OperatorExpr(node) => ::m2_syn::Spanned::span(node),
             Self::AssignmentExpr(node) => ::m2_syn::Spanned::span(node),
-            Self::Option(node) => ::m2_syn::Spanned::span(node),
+            Self::OptionExpression(node) => ::m2_syn::Spanned::span(node),
             Self::LambdaExpression(node) => ::m2_syn::Spanned::span(node),
             Self::IfStatement(node) => ::m2_syn::Spanned::span(node),
             Self::ForLoop(node) => ::m2_syn::Spanned::span(node),
@@ -7955,7 +8907,7 @@ impl ::m2_syn::AstNode for Expr {
             Self::Collection(node) => ::m2_syn::AstNode::kind(node),
             Self::OperatorExpr(node) => ::m2_syn::AstNode::kind(node),
             Self::AssignmentExpr(node) => ::m2_syn::AstNode::kind(node),
-            Self::Option(node) => ::m2_syn::AstNode::kind(node),
+            Self::OptionExpression(node) => ::m2_syn::AstNode::kind(node),
             Self::LambdaExpression(node) => ::m2_syn::AstNode::kind(node),
             Self::IfStatement(node) => ::m2_syn::AstNode::kind(node),
             Self::ForLoop(node) => ::m2_syn::AstNode::kind(node),
@@ -7984,7 +8936,7 @@ impl ::m2_syn::ToTokens for Expr {
             Self::Collection(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::OperatorExpr(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::AssignmentExpr(node) => ::m2_syn::ToTokens::to_tokens(node, output),
-            Self::Option(node) => ::m2_syn::ToTokens::to_tokens(node, output),
+            Self::OptionExpression(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::LambdaExpression(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::IfStatement(node) => ::m2_syn::ToTokens::to_tokens(node, output),
             Self::ForLoop(node) => ::m2_syn::ToTokens::to_tokens(node, output),
@@ -8015,7 +8967,7 @@ where
         <Collection as ::m2_syn::Reconstruct<N>>::matches(node)
             || <OperatorExpr as ::m2_syn::Reconstruct<N>>::matches(node)
             || <AssignmentExpr as ::m2_syn::Reconstruct<N>>::matches(node)
-            || <Option as ::m2_syn::Reconstruct<N>>::matches(node)
+            || <OptionExpression as ::m2_syn::Reconstruct<N>>::matches(node)
             || <LambdaExpression as ::m2_syn::Reconstruct<N>>::matches(node)
             || <IfStatement as ::m2_syn::Reconstruct<N>>::matches(node)
             || <ForLoop as ::m2_syn::Reconstruct<N>>::matches(node)
@@ -8052,9 +9004,9 @@ where
                 <AssignmentExpr as ::m2_syn::Reconstruct<N>>::reconstruct(node)?,
             ));
         }
-        if <Option as ::m2_syn::Reconstruct<N>>::matches(&node) {
-            return Ok(Self::Option(
-                <Option as ::m2_syn::Reconstruct<N>>::reconstruct(node)?,
+        if <OptionExpression as ::m2_syn::Reconstruct<N>>::matches(&node) {
+            return Ok(Self::OptionExpression(
+                <OptionExpression as ::m2_syn::Reconstruct<N>>::reconstruct(node)?,
             ));
         }
         if <LambdaExpression as ::m2_syn::Reconstruct<N>>::matches(&node) {
@@ -8248,9 +9200,31 @@ impl From<Token![+=]> for BinaryOperator {
         BinaryOperator::AddEql(value)
     }
 }
-impl From<Token![]> for BinaryOperator {
-    fn from(value: Token![]) -> Self {
-        BinaryOperator::Adj(value)
+impl From<AdjacentExpression> for Component {
+    fn from(value: AdjacentExpression) -> Self {
+        Component::Expr(Expr::OperatorExpr(OperatorExpr::AdjacentExpression(value)))
+    }
+}
+impl From<AdjacentExpression> for Expr {
+    fn from(value: AdjacentExpression) -> Self {
+        Expr::OperatorExpr(OperatorExpr::AdjacentExpression(value))
+    }
+}
+impl From<AdjacentExpression> for OperatorExpr {
+    fn from(value: AdjacentExpression) -> Self {
+        OperatorExpr::AdjacentExpression(value)
+    }
+}
+impl From<AdjacentExpression> for SequenceElement {
+    fn from(value: AdjacentExpression) -> Self {
+        SequenceElement::Component(Component::Expr(Expr::OperatorExpr(
+            OperatorExpr::AdjacentExpression(value),
+        )))
+    }
+}
+impl From<AdjacentExpression> for SyntaxNode {
+    fn from(value: AdjacentExpression) -> Self {
+        SyntaxNode::Expr(Expr::OperatorExpr(OperatorExpr::AdjacentExpression(value)))
     }
 }
 impl From<Token![&]> for BinaryOperator {
@@ -9330,24 +10304,24 @@ impl From<OperatorExpr> for SyntaxNode {
         SyntaxNode::Expr(Expr::OperatorExpr(value))
     }
 }
-impl From<Option> for Component {
-    fn from(value: Option) -> Self {
-        Component::Expr(Expr::Option(value))
+impl From<OptionExpression> for Component {
+    fn from(value: OptionExpression) -> Self {
+        Component::Expr(Expr::OptionExpression(value))
     }
 }
-impl From<Option> for Expr {
-    fn from(value: Option) -> Self {
-        Expr::Option(value)
+impl From<OptionExpression> for Expr {
+    fn from(value: OptionExpression) -> Self {
+        Expr::OptionExpression(value)
     }
 }
-impl From<Option> for SequenceElement {
-    fn from(value: Option) -> Self {
-        SequenceElement::Component(Component::Expr(Expr::Option(value)))
+impl From<OptionExpression> for SequenceElement {
+    fn from(value: OptionExpression) -> Self {
+        SequenceElement::Component(Component::Expr(Expr::OptionExpression(value)))
     }
 }
-impl From<Option> for SyntaxNode {
-    fn from(value: Option) -> Self {
-        SyntaxNode::Expr(Expr::Option(value))
+impl From<OptionExpression> for SyntaxNode {
+    fn from(value: OptionExpression) -> Self {
+        SyntaxNode::Expr(Expr::OptionExpression(value))
     }
 }
 impl From<Token![or]> for BinaryOperator {

@@ -1,10 +1,10 @@
 use m2_syn::treesitter::TreeSitterNode;
 use m2_syn::{
-    AnyCell, AssignmentExpr, AstNode, BinaryExpression, BinaryOperator, Cell, Collection, Expr,
+    AnyCell, AssignmentExpr, AstNode, BinaryExpression, BinaryOperator, CellNode, Collection, Expr,
     Reconstruct, SourceFile, SourceId, Spanned, SyntaxKind, ToTokens, parse_file,
 };
 
-fn cell_kind(cell: &impl Cell) -> SyntaxKind {
+fn cell_kind(cell: &impl CellNode) -> SyntaxKind {
     cell.kind()
 }
 
@@ -28,6 +28,19 @@ fn reconstructs_typed_nodes_from_tree_sitter() {
     assert!(matches!(expression.left.as_ref(), Expr::Symbol(symbol) if symbol.text == "left"));
     assert!(matches!(expression.operator, BinaryOperator::Add(_)));
     assert!(matches!(expression.right.as_ref(), Expr::Symbol(symbol) if symbol.text == "right"));
+}
+
+#[test]
+fn reconstructs_implicit_application_without_a_synthetic_operator() {
+    let source_file = parse_file("f x", SourceId(50)).unwrap();
+    let AnyCell::ExpressionCell(cell) = &source_file.elements[0] else {
+        panic!("application must be an expression cell");
+    };
+    assert!(matches!(
+        cell.value.as_ref(),
+        Expr::OperatorExpr(m2_syn::OperatorExpr::AdjacentExpression(_))
+    ));
+    assert_eq!(source_file.to_m2(), "f x");
 }
 
 #[test]
@@ -85,6 +98,12 @@ fn bundled_parser_matches_current_assignment_and_control_nodes() {
         cell.value.as_ref(),
         Expr::AssignmentExpr(AssignmentExpr::Assignment(_))
     ));
+
+    let option = parse_file("key => value", SourceId(51)).unwrap();
+    let AnyCell::ExpressionCell(cell) = &option.elements[0] else {
+        panic!("option must be an expression cell");
+    };
+    assert!(matches!(cell.value.as_ref(), Expr::OptionExpression(_)));
 
     let for_loop = parse_file("for x in y list x", SourceId(47)).unwrap();
     assert_eq!(for_loop.elements.len(), 1);

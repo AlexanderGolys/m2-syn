@@ -304,9 +304,6 @@ fn fold_bng_eql(&mut self, node: Token![!=]) -> Token![!=] {
         fn fold_space(&mut self, node: Token![SPACE]) -> Token![SPACE] {
             $crate::fold::fold_space(self, node)
         }
-        fn fold_adj(&mut self, node: Token![]) -> Token![] {
-            $crate::fold::fold_adj(self, node)
-        }
         fn fold_xor(&mut self, node: Token![xor]) -> Token![xor] {
             $crate::fold::fold_xor(self, node)
         }
@@ -532,6 +529,9 @@ fn fold_bng_eql(&mut self, node: Token![!=]) -> Token![!=] {
         fn fold_binary_expression(&mut self, node: BinaryExpression) -> BinaryExpression {
             $crate::fold::fold_binary_expression(self, node)
         }
+        fn fold_adjacent_expression(&mut self, node: AdjacentExpression) -> AdjacentExpression {
+            $crate::fold::fold_adjacent_expression(self, node)
+        }
         fn fold_prefix_expression(&mut self, node: PrefixExpression) -> PrefixExpression {
             $crate::fold::fold_prefix_expression(self, node)
         }
@@ -577,8 +577,8 @@ fn fold_bng_eql(&mut self, node: Token![!=]) -> Token![!=] {
         fn fold_evaluated_assignment(&mut self, node: EvaluatedAssignment) -> EvaluatedAssignment {
             $crate::fold::fold_evaluated_assignment(self, node)
         }
-        fn fold_option(&mut self, node: Option) -> Option {
-            $crate::fold::fold_option(self, node)
+        fn fold_option_expression(&mut self, node: OptionExpression) -> OptionExpression {
+            $crate::fold::fold_option_expression(self, node)
         }
         fn fold_then_clause(&mut self, node: ThenClause) -> ThenClause {
             $crate::fold::fold_then_clause(self, node)
@@ -1303,12 +1303,6 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
         {
             node
         }
-        pub fn fold_adj<F>(_folder: &mut F, node: Token![]) -> Token![]
-        where
-            F: Fold + ?Sized,
-        {
-            node
-        }
         pub fn fold_xor<F>(_folder: &mut F, node: Token![xor]) -> Token![xor]
         where
             F: Fold + ?Sized,
@@ -1878,6 +1872,19 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
                 span: node.span,
             }
         }
+        pub fn fold_adjacent_expression<F>(
+            folder: &mut F,
+            node: AdjacentExpression,
+        ) -> AdjacentExpression
+        where
+            F: Fold + ?Sized,
+        {
+            AdjacentExpression {
+                left: ::std::boxed::Box::new(folder.fold_expr(*node.left)),
+                right: ::std::boxed::Box::new(folder.fold_expr(*node.right)),
+                span: node.span,
+            }
+        }
         pub fn fold_prefix_expression<F>(folder: &mut F, node: PrefixExpression) -> PrefixExpression
         where
             F: Fold + ?Sized,
@@ -2054,11 +2061,11 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
                 span: node.span,
             }
         }
-        pub fn fold_option<F>(folder: &mut F, node: Option) -> Option
+        pub fn fold_option_expression<F>(folder: &mut F, node: OptionExpression) -> OptionExpression
         where
             F: Fold + ?Sized,
         {
-            Option {
+            OptionExpression {
                 left: ::std::boxed::Box::new(folder.fold_expr(*node.left)),
                 operator: folder.fold_eql_gst(node.operator),
                 right: ::std::boxed::Box::new(folder.fold_expr(*node.right)),
@@ -2509,7 +2516,6 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
                 BinaryOperator::And(node) => BinaryOperator::And(folder.fold_and(node)),
                 BinaryOperator::Or(node) => BinaryOperator::Or(folder.fold_or(node)),
                 BinaryOperator::Space(node) => BinaryOperator::Space(folder.fold_space(node)),
-                BinaryOperator::Adj(node) => BinaryOperator::Adj(folder.fold_adj(node)),
                 BinaryOperator::Xor(node) => BinaryOperator::Xor(folder.fold_xor(node)),
             }
         }
@@ -2730,6 +2736,9 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             match node {
+                OperatorExpr::AdjacentExpression(node) => {
+                    OperatorExpr::AdjacentExpression(folder.fold_adjacent_expression(node))
+                }
                 OperatorExpr::BinaryExpression(node) => {
                     OperatorExpr::BinaryExpression(folder.fold_binary_expression(node))
                 }
@@ -2793,7 +2802,9 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
                 Expr::AssignmentExpr(node) => {
                     Expr::AssignmentExpr(folder.fold_assignment_expr(node))
                 }
-                Expr::Option(node) => Expr::Option(folder.fold_option(node)),
+                Expr::OptionExpression(node) => {
+                    Expr::OptionExpression(folder.fold_option_expression(node))
+                }
                 Expr::LambdaExpression(node) => {
                     Expr::LambdaExpression(folder.fold_lambda_expression(node))
                 }

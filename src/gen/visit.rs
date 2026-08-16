@@ -304,9 +304,6 @@ fn visit_bng_eql(&mut self, node: &'ast Token![!=]) {
         fn visit_space(&mut self, node: &'ast Token![SPACE]) {
             $crate::visit::visit_space(self, node);
         }
-        fn visit_adj(&mut self, node: &'ast Token![]) {
-            $crate::visit::visit_adj(self, node);
-        }
         fn visit_xor(&mut self, node: &'ast Token![xor]) {
             $crate::visit::visit_xor(self, node);
         }
@@ -523,6 +520,9 @@ fn visit_bng_eql(&mut self, node: &'ast Token![!=]) {
         fn visit_binary_expression(&mut self, node: &'ast BinaryExpression) {
             $crate::visit::visit_binary_expression(self, node);
         }
+        fn visit_adjacent_expression(&mut self, node: &'ast AdjacentExpression) {
+            $crate::visit::visit_adjacent_expression(self, node);
+        }
         fn visit_prefix_expression(&mut self, node: &'ast PrefixExpression) {
             $crate::visit::visit_prefix_expression(self, node);
         }
@@ -565,8 +565,8 @@ fn visit_bng_eql(&mut self, node: &'ast Token![!=]) {
         fn visit_evaluated_assignment(&mut self, node: &'ast EvaluatedAssignment) {
             $crate::visit::visit_evaluated_assignment(self, node);
         }
-        fn visit_option(&mut self, node: &'ast Option) {
-            $crate::visit::visit_option(self, node);
+        fn visit_option_expression(&mut self, node: &'ast OptionExpression) {
+            $crate::visit::visit_option_expression(self, node);
         }
         fn visit_then_clause(&mut self, node: &'ast ThenClause) {
             $crate::visit::visit_then_clause(self, node);
@@ -1185,11 +1185,6 @@ pub fn visit_bng_eql<'ast, V>(_visitor: &mut V, _node: &'ast Token![!=])
             V: Visit<'ast> + ?Sized,
         {
         }
-        pub fn visit_adj<'ast, V>(_visitor: &mut V, _node: &'ast Token![])
-        where
-            V: Visit<'ast> + ?Sized,
-        {
-        }
         pub fn visit_xor<'ast, V>(_visitor: &mut V, _node: &'ast Token![xor])
         where
             V: Visit<'ast> + ?Sized,
@@ -1615,6 +1610,13 @@ pub fn visit_bng_eql<'ast, V>(_visitor: &mut V, _node: &'ast Token![!=])
             visitor.visit_binary_operator(&node.operator);
             visitor.visit_expr((&node.right).as_ref());
         }
+        pub fn visit_adjacent_expression<'ast, V>(visitor: &mut V, node: &'ast AdjacentExpression)
+        where
+            V: Visit<'ast> + ?Sized,
+        {
+            visitor.visit_expr((&node.left).as_ref());
+            visitor.visit_expr((&node.right).as_ref());
+        }
         pub fn visit_prefix_expression<'ast, V>(visitor: &mut V, node: &'ast PrefixExpression)
         where
             V: Visit<'ast> + ?Sized,
@@ -1727,7 +1729,7 @@ pub fn visit_bng_eql<'ast, V>(_visitor: &mut V, _node: &'ast Token![!=])
             visitor.visit_lst_sub(&node.operator);
             visitor.visit_expr((&node.right).as_ref());
         }
-        pub fn visit_option<'ast, V>(visitor: &mut V, node: &'ast Option)
+        pub fn visit_option_expression<'ast, V>(visitor: &mut V, node: &'ast OptionExpression)
         where
             V: Visit<'ast> + ?Sized,
         {
@@ -2278,9 +2280,6 @@ pub fn visit_bng_eql<'ast, V>(_visitor: &mut V, _node: &'ast Token![!=])
                 BinaryOperator::Space(node) => {
                     visitor.visit_space(node);
                 }
-                BinaryOperator::Adj(node) => {
-                    visitor.visit_adj(node);
-                }
                 BinaryOperator::Xor(node) => {
                     visitor.visit_xor(node);
                 }
@@ -2544,6 +2543,9 @@ pub fn visit_bng_eql<'ast, V>(_visitor: &mut V, _node: &'ast Token![!=])
             V: Visit<'ast> + ?Sized,
         {
             match node {
+                OperatorExpr::AdjacentExpression(node) => {
+                    visitor.visit_adjacent_expression(node);
+                }
                 OperatorExpr::BinaryExpression(node) => {
                     visitor.visit_binary_expression(node);
                 }
@@ -2609,8 +2611,8 @@ pub fn visit_bng_eql<'ast, V>(_visitor: &mut V, _node: &'ast Token![!=])
                 Expr::AssignmentExpr(node) => {
                     visitor.visit_assignment_expr(node);
                 }
-                Expr::Option(node) => {
-                    visitor.visit_option(node);
+                Expr::OptionExpression(node) => {
+                    visitor.visit_option_expression(node);
                 }
                 Expr::LambdaExpression(node) => {
                     visitor.visit_lambda_expression(node);

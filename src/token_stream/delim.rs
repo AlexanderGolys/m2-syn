@@ -8,8 +8,6 @@ pub enum DelimiterKind {
     Bracket,
     Brace,
     AngleBar,
-    String,
-    RawString,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,8 +58,6 @@ impl DelimiterKind {
             Self::Bracket => "[",
             Self::Brace => "{",
             Self::AngleBar => "<|",
-            Self::String => "\"",
-            Self::RawString => "///",
         }
     }
 
@@ -71,8 +67,6 @@ impl DelimiterKind {
             Self::Bracket => "]",
             Self::Brace => "}",
             Self::AngleBar => "|>",
-            Self::String => "\"",
-            Self::RawString => "///",
         }
     }
 }

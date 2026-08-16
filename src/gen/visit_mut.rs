@@ -304,9 +304,6 @@ fn visit_bng_eql_mut(&mut self, node: &mut Token![!=]) {
         fn visit_space_mut(&mut self, node: &mut Token![SPACE]) {
             $crate::visit_mut::visit_space_mut(self, node);
         }
-        fn visit_adj_mut(&mut self, node: &mut Token![]) {
-            $crate::visit_mut::visit_adj_mut(self, node);
-        }
         fn visit_xor_mut(&mut self, node: &mut Token![xor]) {
             $crate::visit_mut::visit_xor_mut(self, node);
         }
@@ -523,6 +520,9 @@ fn visit_bng_eql_mut(&mut self, node: &mut Token![!=]) {
         fn visit_binary_expression_mut(&mut self, node: &mut BinaryExpression) {
             $crate::visit_mut::visit_binary_expression_mut(self, node);
         }
+        fn visit_adjacent_expression_mut(&mut self, node: &mut AdjacentExpression) {
+            $crate::visit_mut::visit_adjacent_expression_mut(self, node);
+        }
         fn visit_prefix_expression_mut(&mut self, node: &mut PrefixExpression) {
             $crate::visit_mut::visit_prefix_expression_mut(self, node);
         }
@@ -565,8 +565,8 @@ fn visit_bng_eql_mut(&mut self, node: &mut Token![!=]) {
         fn visit_evaluated_assignment_mut(&mut self, node: &mut EvaluatedAssignment) {
             $crate::visit_mut::visit_evaluated_assignment_mut(self, node);
         }
-        fn visit_option_mut(&mut self, node: &mut Option) {
-            $crate::visit_mut::visit_option_mut(self, node);
+        fn visit_option_expression_mut(&mut self, node: &mut OptionExpression) {
+            $crate::visit_mut::visit_option_expression_mut(self, node);
         }
         fn visit_then_clause_mut(&mut self, node: &mut ThenClause) {
             $crate::visit_mut::visit_then_clause_mut(self, node);
@@ -1185,11 +1185,6 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_adj_mut<V>(_visitor: &mut V, _node: &mut Token![])
-        where
-            V: VisitMut + ?Sized,
-        {
-        }
         pub fn visit_xor_mut<V>(_visitor: &mut V, _node: &mut Token![xor])
         where
             V: VisitMut + ?Sized,
@@ -1611,6 +1606,13 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             visitor.visit_binary_operator_mut(&mut node.operator);
             visitor.visit_expr_mut((&mut node.right).as_mut());
         }
+        pub fn visit_adjacent_expression_mut<V>(visitor: &mut V, node: &mut AdjacentExpression)
+        where
+            V: VisitMut + ?Sized,
+        {
+            visitor.visit_expr_mut((&mut node.left).as_mut());
+            visitor.visit_expr_mut((&mut node.right).as_mut());
+        }
         pub fn visit_prefix_expression_mut<V>(visitor: &mut V, node: &mut PrefixExpression)
         where
             V: VisitMut + ?Sized,
@@ -1723,7 +1725,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             visitor.visit_lst_sub_mut(&mut node.operator);
             visitor.visit_expr_mut((&mut node.right).as_mut());
         }
-        pub fn visit_option_mut<V>(visitor: &mut V, node: &mut Option)
+        pub fn visit_option_expression_mut<V>(visitor: &mut V, node: &mut OptionExpression)
         where
             V: VisitMut + ?Sized,
         {
@@ -2274,9 +2276,6 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
                 BinaryOperator::Space(node) => {
                     visitor.visit_space_mut(node);
                 }
-                BinaryOperator::Adj(node) => {
-                    visitor.visit_adj_mut(node);
-                }
                 BinaryOperator::Xor(node) => {
                     visitor.visit_xor_mut(node);
                 }
@@ -2540,6 +2539,9 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             V: VisitMut + ?Sized,
         {
             match node {
+                OperatorExpr::AdjacentExpression(node) => {
+                    visitor.visit_adjacent_expression_mut(node);
+                }
                 OperatorExpr::BinaryExpression(node) => {
                     visitor.visit_binary_expression_mut(node);
                 }
@@ -2605,8 +2607,8 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
                 Expr::AssignmentExpr(node) => {
                     visitor.visit_assignment_expr_mut(node);
                 }
-                Expr::Option(node) => {
-                    visitor.visit_option_mut(node);
+                Expr::OptionExpression(node) => {
+                    visitor.visit_option_expression_mut(node);
                 }
                 Expr::LambdaExpression(node) => {
                     visitor.visit_lambda_expression_mut(node);

@@ -71,7 +71,6 @@ syntax_schema! {
         [and]		{bin}
         [or]		{bin}
         [SPACE]		{bin}
-        []          {bin}
         [xor]		{bin}
         [!]			{post}
         [(*)]		{post}
@@ -171,6 +170,11 @@ syntax_schema! {
         right: Expr,
     )
 
+    AdjacentExpression ::= node(adjacent_expression,
+        left: Expr,
+        right: Expr,
+    )
+
     PrefixExpression ::= (
         operator: PrefixOperator,
         operand: Expr,
@@ -253,7 +257,7 @@ syntax_schema! {
         right: Expr,
     )
 
-    Option ::= (
+    OptionExpression ::= node(option,
         left: Expr,
         operator: Token![=>],
         right: Expr,
@@ -425,6 +429,7 @@ syntax_schema! {
     }
 
     OperatorExpr ::= {
+        AdjacentExpression,
         BinaryExpression,
         PrefixExpression,
         PostfixExpression,
@@ -448,7 +453,7 @@ syntax_schema! {
         Collection,
         OperatorExpr,
         AssignmentExpr,
-        Option,
+        OptionExpression,
         LambdaExpression,
         IfStatement,
         ForLoop,
@@ -484,13 +489,24 @@ include!("gen/visit.rs");
 include!("gen/visit_mut.rs");
 include!("gen/fold.rs");
 
+pub(crate) fn canonical_keyword_spelling(spelling: &str) -> &str {
+    let Some(keyword) = spelling.strip_prefix("Core$") else {
+        return spelling;
+    };
+    if GENERATED_KEYWORD_SPELLINGS.contains(&keyword) {
+        keyword
+    } else {
+        spelling
+    }
+}
+
 /// An expression evaluated in global scope.
 ///
 /// Rust Analyzer presents the implementations below as the concrete type
 /// hierarchy for cells.
-pub trait Cell: ::m2_syn::AstNode<Kind = SyntaxKind> + ::m2_syn::ToTokens {}
+pub trait CellNode: ::m2_syn::AstNode<Kind = SyntaxKind> + ::m2_syn::ToTokens {}
 
-impl Cell for AnyCell {}
-impl Cell for ExpressionCell {}
-impl Cell for SequenceCell {}
-impl Cell for MutedCell {}
+impl CellNode for AnyCell {}
+impl CellNode for ExpressionCell {}
+impl CellNode for SequenceCell {}
+impl CellNode for MutedCell {}

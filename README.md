@@ -135,6 +135,49 @@ This provenance is what diagnostics, hovers, semantic tokens, navigation, and
 source edits use to translate a typed node back to a document. Incremental
 dependency identity belongs in the semantic layer rather than in `Span`.
 
+## Native lexer
+
+`lex` is the first native-parser layer. It accepts any byte iterator and
+returns a source-spanned `CellStream`, whose `CellBlock` elements each own the
+same `TokenStream` used by quoting and emission. Identifiers, literals,
+punctuation, comments, whitespace, and physical line breaks are ordinary
+`TokenTree` variants; the lexer does not synthesize adjacency. Semicolons split
+cells only after all delimiters have been paired, while a physical line break
+splits unless an operator or mandatory clause component still requires more
+input. The terminating semicolon or line break remains in the cell's stream. A
+lone carriage return is preserved as ignored trivia rather than treated as a
+line break. After greedy token recognition, structural delimiter pairs become
+recursive `Group` trees with separate spans for their opening and closing
+delimiters.
+
+Each maximal punctuation spelling is one `Punct`. The lexer applies
+context-free maximal munch across generated operators, delimiters, and comment
+openers. Consequently `|--1` begins with the `|-` operator rather than a
+comment, while a token beginning with `--` is a line comment. Likewise, `(*)`
+remains the single greedy operator rather than a parenthesized group. Quotation
+marks are part of a single literal token, not delimiter groups.
+
+```rust
+use m2_syn::{SourceId, TokenTree, lex_str};
+
+let tokens = lex_str("***1", SourceId(1))?;
+let mut outer = tokens.into_iter();
+let cell = outer.next().unwrap();
+let spellings = cell
+    .into_stream()
+    .into_iter()
+    .map(|token| match token {
+        TokenTree::Punct(token) => token.text().to_owned(),
+        TokenTree::Literal(token) => token.text().to_owned(),
+        _ => unreachable!(),
+    })
+    .collect::<Vec<_>>();
+
+assert_eq!(spellings, ["**", "*", "1"]);
+assert!(outer.next().is_none());
+# Ok::<(), m2_syn::LexError>(())
+```
+
 ## Parser adapters
 
 Generated reconstruction depends only on `CstNode`. `TreeSitterNode` adapts
@@ -142,28 +185,30 @@ Tree-sitter identity, field names, source text, extras, and ranges to that
 interface. Other parsers can implement the same trait without entering the
 generated syntax model.
 
-`Parser<T>` is the high-level ecosystem boundary. It receives a `ParseInput`
-containing source text and its `SourceId`, and returns a typed target. `T`
-defaults to `SourceFile`, while parsers may implement the trait again for
-specific targets such as `Expr`. A parser with its own CST can implement
-`CstNode` and call `reconstruct`; a parser whose native model already matches
-the typed graph can construct the target directly.
+`Parse<T>` is the parser ecosystem boundary. It receives the `CellStream`
+produced by lexing and returns a generated syntax target. `T` defaults to
+`SourceFile`, while parsers may implement the trait again for more specific
+targets such as `Expr`. Both built-in backends implement this same token-stream
+API. A parser with its own CST can implement `CstNode` and call `reconstruct`;
+a parser whose native model already matches the generated graph can construct
+the target directly.
 
 ```rust
 # use std::convert::Infallible;
-use m2_syn::{ParseInput, Parser, SourceFile, SourceId, parse_with};
+use m2_syn::{CellStream, Parse, SourceFile, SourceId, lex_str, parse_with};
 
 struct EmptyParser;
 
-impl Parser for EmptyParser {
+impl Parse for EmptyParser {
     type Error = Infallible;
 
-    fn parse(&mut self, _input: ParseInput<'_>) -> Result<SourceFile, Self::Error> {
+    fn parse(&mut self, _tokens: CellStream) -> Result<SourceFile, Self::Error> {
         Ok(SourceFile::new(Vec::new()))
     }
 }
 
-let file = parse_with(&mut EmptyParser, "", SourceId(1)).unwrap();
+let tokens = lex_str("", SourceId(1)).unwrap();
+let file = parse_with(&mut EmptyParser, tokens).unwrap();
 assert!(file.elements.is_empty());
 ```
 

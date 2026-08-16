@@ -2,45 +2,49 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 
 use m2_syn::{
-    CstChild, CstNode, NodeIdentity, ParseInput, Parser, SourceFile, SourceId, Span, Symbol,
-    TreeSitterParser, parse_with, reconstruct,
+    CellStream, CstChild, CstNode, NativeParser, NodeIdentity, Parse, SourceFile, SourceId, Span,
+    Symbol, TreeSitterParser, lex_str, parse_with, reconstruct,
 };
 
 struct EmptyFileParser;
 
-impl Parser for EmptyFileParser {
+impl Parse for EmptyFileParser {
     type Error = Infallible;
 
-    fn parse(&mut self, _input: ParseInput<'_>) -> Result<SourceFile, Self::Error> {
+    fn parse(&mut self, _tokens: CellStream) -> Result<SourceFile, Self::Error> {
         Ok(SourceFile::new(Vec::new()))
     }
 }
 
 struct SymbolParser;
 
-impl Parser<Symbol> for SymbolParser {
+impl Parse<Symbol> for SymbolParser {
     type Error = Infallible;
 
-    fn parse(&mut self, input: ParseInput<'_>) -> Result<Symbol, Self::Error> {
-        Ok(Symbol::new(input.source, Span::detached()))
+    fn parse(&mut self, tokens: CellStream) -> Result<Symbol, Self::Error> {
+        Ok(Symbol::new(tokens.to_string(), Span::detached()))
     }
 }
 
 #[test]
 fn external_parsers_can_produce_files_or_more_specific_targets() {
-    let file = parse_with(&mut EmptyFileParser, "", SourceId(1)).unwrap();
-    let symbol: Symbol = parse_with(&mut SymbolParser, "example", SourceId(2)).unwrap();
+    let file = parse_with(&mut EmptyFileParser, lex_str("", SourceId(1)).unwrap()).unwrap();
+    let symbol: Symbol =
+        parse_with(&mut SymbolParser, lex_str("example", SourceId(2)).unwrap()).unwrap();
 
     assert!(file.elements.is_empty());
     assert_eq!(symbol.text, "example");
 }
 
 #[test]
-fn built_in_parser_uses_the_same_generic_entry_point() {
-    let mut parser = TreeSitterParser::new().unwrap();
-    let file: SourceFile = parse_with(&mut parser, "left + right", SourceId(3)).unwrap();
+fn both_built_in_parsers_use_the_same_generic_entry_point() {
+    let tokens = lex_str("left + right", SourceId(3)).unwrap();
+    let tree_sitter_file: SourceFile =
+        parse_with(&mut TreeSitterParser::new().unwrap(), tokens.clone()).unwrap();
+    let native_file: SourceFile = parse_with(&mut NativeParser::new(), tokens).unwrap();
 
-    assert_eq!(file.elements.len(), 1);
+    assert_eq!(tree_sitter_file.elements.len(), 1);
+    assert_eq!(native_file.elements.len(), 1);
 }
 
 #[derive(Clone)]

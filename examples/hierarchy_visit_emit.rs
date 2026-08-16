@@ -1,9 +1,9 @@
 use m2_syn::visit::Visit;
 use m2_syn::{
-    AnyCell, Cell, ParseError, SourceId, Symbol, SyntaxKind, ToTokens, parse_tokens, quote_m2,
+    AnyCell, CellNode, ParseError, SourceId, Symbol, SyntaxKind, ToTokens, parse_tokens, quote_m2,
 };
 
-fn require_cell<T: Cell>(cell: &T) -> SyntaxKind {
+fn require_cell<T: CellNode>(cell: &T) -> SyntaxKind {
     cell.kind()
 }
 
@@ -20,7 +20,7 @@ impl<'ast> Visit<'ast> for SymbolCollector {
 
 fn main() -> Result<(), ParseError> {
     let quoted = quote_m2! {
-        left + right
+        left + right 2
     };
     let source_file = parse_tokens(&quoted, SourceId(1))?;
     let AnyCell::ExpressionCell(cell) = &source_file.elements[0] else {
@@ -31,7 +31,7 @@ fn main() -> Result<(), ParseError> {
     let mut collector = SymbolCollector::default();
     collector.visit_source_file(&source_file);
 
-    println!("hierarchy: Cell -> ExpressionCell -> AnyCell -> SourceFile");
+    println!("hierarchy: CellNode -> ExpressionCell -> AnyCell -> SourceFile");
     println!("visited: {}", collector.symbols.join(", "));
     print!("generated: {}", source_file.to_m2());
     Ok(())

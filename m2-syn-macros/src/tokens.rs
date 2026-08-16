@@ -122,6 +122,8 @@ pub(crate) struct TokenDefinition {
     pub(crate) pattern: TokenStream,
     pub(crate) spelling: String,
     pub(crate) operators: BTreeSet<OperatorKind>,
+    is_operator: bool,
+    is_keyword: bool,
 }
 
 pub(crate) struct TokenDefinitions {
@@ -172,27 +174,56 @@ impl TokenDefinitions {
     }
 
     pub(crate) fn expand(&self) -> TokenStream {
+        let operator_spellings = self
+            .definitions
+            .iter()
+            .filter(|definition| definition.is_operator)
+            .map(|definition| definition.spelling.as_str());
+        let postfix_operator_spellings = self
+            .definitions
+            .iter()
+            .filter(|definition| definition.operators.contains(&OperatorKind::Postfix))
+            .map(|definition| definition.spelling.as_str());
+        let keyword_spellings = self
+            .definitions
+            .iter()
+            .filter(|definition| definition.is_keyword)
+            .map(|definition| definition.spelling.as_str());
+        let punctuation_spellings = self
+            .definitions
+            .iter()
+            .map(|definition| definition.spelling.as_str())
+            .filter(|spelling| {
+                !spelling.is_empty()
+                    && spelling
+                        .chars()
+                        .all(|character| !character.is_ascii_alphanumeric() && character != ' ')
+            });
         let definitions = self.definitions.iter().map(|definition| {
             let name = &definition.name;
             let spelling = &definition.spelling;
-            let emit = quote!(output.push_text(#spelling, span););
+            let punctuation = !spelling.is_empty()
+                && spelling
+                    .chars()
+                    .all(|character| !character.is_ascii_alphanumeric() && character != ' ');
+            let emit = if punctuation {
+                quote! {
+                    output.push_punct(::m2_syn::Punct::new(#spelling, span));
+                }
+            } else {
+                quote! {
+                    output.push_ident(::m2_syn::IdentToken::new(#spelling, span));
+                }
+            };
 
             quote! {
 
                 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-                pub struct #name {
-                    span: ::m2_syn::Span,
-                }
-
-                impl #name {
-                    pub fn new(span: ::m2_syn::Span) -> Self {
-                        Self { span }
-                    }
-                }
+                pub struct #name(pub ::m2_syn::Span);
 
                 impl ::m2_syn::Spanned for #name {
                     fn span(&self) -> ::m2_syn::Span {
-                        self.span
+                        self.0
                     }
                 }
 
@@ -229,7 +260,7 @@ impl TokenDefinitions {
                                 node.identity(),
                             ));
                         }
-                        Ok(Self::new(node.span()))
+                        Ok(Self(node.span()))
                     }
                 }
             }
@@ -240,6 +271,22 @@ impl TokenDefinitions {
             quote! { [#pattern] => { $crate::#name }; }
         });
         quote! {
+            pub(crate) const GENERATED_OPERATOR_SPELLINGS: &[&str] = &[
+                #(#operator_spellings),*
+            ];
+
+            pub(crate) const GENERATED_POSTFIX_OPERATOR_SPELLINGS: &[&str] = &[
+                #(#postfix_operator_spellings),*
+            ];
+
+            pub(crate) const GENERATED_KEYWORD_SPELLINGS: &[&str] = &[
+                #(#keyword_spellings),*
+            ];
+
+            pub(crate) const GENERATED_PUNCTUATION_SPELLINGS: &[&str] = &[
+                #(#punctuation_spellings),*
+            ];
+
             #(#definitions)*
 
             #[macro_export]
@@ -274,6 +321,8 @@ impl TokenDefinitions {
                     pattern: operator.pattern.clone(),
                     spelling: operator.spelling.clone(),
                     operators: categories,
+                    is_operator: true,
+                    is_keyword: false,
                 },
             )?;
 
@@ -288,6 +337,8 @@ impl TokenDefinitions {
                         pattern,
                         spelling: format!("{}=", operator.spelling),
                         operators: BTreeSet::from([OperatorKind::Binary]),
+                        is_operator: true,
+                        is_keyword: false,
                     },
                 )?;
             }
@@ -304,6 +355,8 @@ impl TokenDefinitions {
                     pattern: declaration.pattern,
                     spelling,
                     operators: BTreeSet::new(),
+                    is_operator: false,
+                    is_keyword: matches!(declaration.style, NameStyle::Keyword),
                 },
             )?;
         }
@@ -396,6 +449,8 @@ fn insert_definition(
             ));
         }
         existing.operators.extend(definition.operators);
+        existing.is_operator |= definition.is_operator;
+        existing.is_keyword |= definition.is_keyword;
     } else {
         names.insert(name, definitions.len());
         definitions.push(definition);
@@ -589,7 +644,6 @@ mod tests {
                 [(*)] {post}
                 ["\\"] {bin, aug}
                 [SPACE] {bin}
-                [] {bin}
             }
             keywords: { [if] [symbol] [threadLocal] [threadVariable] }
             markers: {}
@@ -610,7 +664,6 @@ mod tests {
         assert_eq!(names["AddEql"], "+=");
         assert_eq!(names["BslEql"], "\\=");
         assert_eq!(names["Graded"], "(*)");
-        assert_eq!(names["Adj"], "");
         assert_eq!(names["Space"], "SPACE");
         assert_eq!(names["IfKeyword"], "if");
         assert_eq!(names["ThreadLocalKeyword"], "threadLocal");
@@ -638,7 +691,6 @@ mod tests {
         assert_eq!(
             binary,
             BTreeSet::from([
-                "Adj".into(),
                 "Add".into(),
                 "AddEql".into(),
                 "Bsl".into(),
@@ -647,5 +699,42 @@ mod tests {
             ])
         );
         assert_eq!(postfix, BTreeSet::from(["Bng".into(), "Graded".into()]));
+    }
+
+    #[test]
+    fn lexical_operator_sets_distinguish_postfix_operators() {
+        let definitions = declarations();
+        let operators = definitions
+            .iter()
+            .filter(|definition| definition.is_operator)
+            .map(|definition| definition.spelling.as_str())
+            .collect::<BTreeSet<_>>();
+        let postfix = definitions
+            .operator_variants(OperatorKind::Postfix)
+            .map(|definition| definition.spelling.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(operators.contains("+"));
+        assert!(operators.contains("+="));
+        assert!(operators.contains("!"));
+        assert!(operators.contains("not"));
+        assert!(!operators.contains("if"));
+        assert!(!operators.contains(";"));
+        assert_eq!(postfix, BTreeSet::from(["!", "(*)"]));
+    }
+
+    #[test]
+    fn keyword_stage_remains_distinct_from_word_operators() {
+        let definitions = declarations();
+        let keywords = definitions
+            .iter()
+            .filter(|definition| definition.is_keyword)
+            .map(|definition| definition.spelling.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(keywords.contains("if"));
+        assert!(keywords.contains("symbol"));
+        assert!(!keywords.contains("not"));
+        assert!(!keywords.contains("SPACE"));
     }
 }

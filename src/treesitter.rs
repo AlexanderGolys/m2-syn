@@ -1,10 +1,18 @@
+//! Tree-sitter parser adapter.
+//!
+//! Tree-sitter nodes remain backend-local. [`TreeSitterNode`] projects them
+//! through the temporary untyped [`CstNode`] reconstruction seam; no
+//! Tree-sitter identity or child iterator is stored in the typed graph.
+
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::vec::IntoIter;
 
 use crate::{
-    CellStream, CstChild, CstNode, LexError, NodeIdentity, Parse, ReconstructError, SourceFile,
-    SourceId, Span, TextPoint, TextRange, TokenStream, lex_str, reconstruct,
+    CSTNodeClassLabel, CellStream, ExternalCstChild, ExternalCstNode, LexError, Parser,
+    ReconstructError, SourceFile, SourceId, Span, TextPoint, TextRange, TokenStream, lex_str,
+    reconstruct,
 };
 
 #[derive(Debug)]
@@ -26,7 +34,7 @@ impl Display for ParseError {
                 Ok(range) => write!(
                     formatter,
                     "invalid Macaulay2 syntax at byte {}",
-                    range.start.byte
+                    range.start().map_or(0, |point| point.byte)
                 ),
                 Err(_) => formatter.write_str("invalid Macaulay2 syntax"),
             },
@@ -72,7 +80,7 @@ impl TreeSitterParser {
     }
 }
 
-impl Parse for TreeSitterParser {
+impl Parser for TreeSitterParser {
     type Error = ParseError;
 
     fn parse(&mut self, tokens: CellStream) -> Result<SourceFile, Self::Error> {
@@ -154,34 +162,17 @@ impl<'tree, 'source> TreeSitterNode<'tree, 'source> {
             _ => self.node,
         }
     }
-
-    fn is_implicit_adjacency(self) -> bool {
-        let node = self.normalized_node();
-        if node.kind() != "binary_expression" {
-            return false;
-        }
-        let Some(operator) = node.child_by_field_name("operator") else {
-            return false;
-        };
-        operator.kind() == "SPACE"
-            && self.source[operator.byte_range()]
-                .iter()
-                .all(u8::is_ascii_whitespace)
-    }
 }
 
-impl CstNode for TreeSitterNode<'_, '_> {
+impl ExternalCstNode for TreeSitterNode<'_, '_> {
     type Children<'syntax>
-        = std::vec::IntoIter<CstChild<Self>>
+        = IntoIter<ExternalCstChild<Self>>
     where
         Self: 'syntax;
 
-    fn identity(&self) -> NodeIdentity<'_> {
-        if self.is_implicit_adjacency() {
-            return NodeIdentity::new("adjacent_expression", true);
-        }
+    fn identity(&self) -> CSTNodeClassLabel<'_> {
         let node = self.normalized_node();
-        NodeIdentity::new(node.kind(), node.is_named())
+        CSTNodeClassLabel::new(node.kind(), node.is_named())
     }
 
     fn children(&self) -> Self::Children<'_> {
@@ -189,7 +180,7 @@ impl CstNode for TreeSitterNode<'_, '_> {
         (0..parent.child_count())
             .filter_map(|index| {
                 let index = u32::try_from(index).expect("Tree-sitter child count fits u32");
-                parent.child(index).map(|node| CstChild {
+                parent.child(index).map(|node| ExternalCstChild {
                     field: parent.field_name_for_child(index),
                     node: Self::new(node, self.source, self.source_id),
                 })
@@ -215,9 +206,8 @@ impl CstNode for TreeSitterNode<'_, '_> {
                 node.end_position().column as u32,
                 node.end_byte(),
             ),
-        )
-        .expect("Tree-sitter node ranges are ordered");
-        Span::located(self.source_id, range)
+        );
+        Span::new(self.source_id, range)
     }
 
     fn is_extra(&self) -> bool {

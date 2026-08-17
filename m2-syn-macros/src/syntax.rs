@@ -18,7 +18,6 @@ struct Syntax {
 }
 
 pub struct GeneratedSyntax {
-    kinds: TokenStream,
     tokens: TokenStream,
     nodes: TokenStream,
     visit: TokenStream,
@@ -28,9 +27,8 @@ pub struct GeneratedSyntax {
 
 impl GeneratedSyntax {
     #[allow(dead_code)]
-    pub fn files(self) -> [(&'static str, TokenStream); 6] {
+    pub fn files(self) -> [(&'static str, TokenStream); 5] {
         [
-            ("kind.rs", self.kinds),
             ("tokens.rs", self.tokens),
             ("nodes.rs", self.nodes),
             ("visit.rs", self.visit),
@@ -42,7 +40,6 @@ impl GeneratedSyntax {
     #[allow(dead_code)]
     pub fn combined(self) -> TokenStream {
         let Self {
-            kinds,
             tokens,
             nodes,
             visit,
@@ -50,7 +47,6 @@ impl GeneratedSyntax {
             fold,
         } = self;
         quote! {
-            #kinds
             #tokens
             #nodes
             #visit
@@ -116,22 +112,20 @@ enum DelimiterKind {
 }
 
 impl DelimiterKind {
-    fn tokens(self) -> TokenStream {
-        match self {
-            Self::Parenthesis => quote!(::m2_syn::DelimiterKind::Parenthesis),
-            Self::Bracket => quote!(::m2_syn::DelimiterKind::Bracket),
-            Self::Brace => quote!(::m2_syn::DelimiterKind::Brace),
-            Self::AngleBar => quote!(::m2_syn::DelimiterKind::AngleBar),
-            Self::String | Self::RawString => {
-                unreachable!("string literals are not token-tree groups")
-            }
-        }
-    }
-
     fn field_separator(self) -> &'static str {
         match self {
             Self::String | Self::RawString => "",
             Self::Parenthesis | Self::Bracket | Self::Brace | Self::AngleBar => " ",
+        }
+    }
+
+    fn typed(self) -> Option<TokenStream> {
+        match self {
+            Self::Parenthesis => Some(quote!(Delimiter![()])),
+            Self::Bracket => Some(quote!(Delimiter![[]])),
+            Self::Brace => Some(quote!(Delimiter![{}])),
+            Self::AngleBar => Some(quote!(Delimiter![<| |>])),
+            Self::String | Self::RawString => None,
         }
     }
 }
@@ -230,13 +224,11 @@ impl Syntax {
             .map(|definition| expand_enum(definition, &self.tokens))
             .collect::<Vec<_>>();
         let conversions = self.expand_conversions()?;
-        let node_kinds = self.expand_node_kinds();
         let visits = self.expand_visit(&token_like);
         let visit_muts = self.expand_visit_mut(&token_like);
         let folds = self.expand_fold(&token_like);
 
         Ok(GeneratedSyntax {
-            kinds: node_kinds,
             tokens,
             nodes: quote! {
                 #(#structs)*
@@ -314,20 +306,6 @@ impl Syntax {
         }
     }
 
-    fn expand_node_kinds(&self) -> TokenStream {
-        let variants = self
-            .tokens
-            .iter()
-            .map(|definition| &definition.name)
-            .chain(self.structs.iter().map(|definition| &definition.name));
-        quote! {
-            #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-            pub enum SyntaxKind {
-                #(#variants,)*
-            }
-        }
-    }
-
     fn expand_struct(
         &self,
         definition: &StructDefinition,
@@ -340,17 +318,6 @@ impl Syntax {
             .cst_kind
             .clone()
             .unwrap_or_else(|| to_snake_case(&name.to_string()));
-        let common = quote! {
-
-            impl ::m2_syn::AstNode for #name {
-                type Kind = SyntaxKind;
-
-                fn kind(&self) -> SyntaxKind {
-                    SyntaxKind::#name
-                }
-            }
-
-        };
         match &definition.fields {
             StructFields::Leaf => {
                 let emit = match name.to_string().as_str() {
@@ -392,7 +359,7 @@ impl Syntax {
                 Ok(quote! {
 
                 #(#attrs)*
-                #[derive(Debug)]
+                #[derive(Debug, ::m2_syn::Spanned)]
                 #visibility struct #name {
                     pub text: String,
                     span: ::m2_syn::Span,
@@ -404,23 +371,15 @@ impl Syntax {
                     }
                 }
 
-                impl ::m2_syn::Spanned for #name {
-                    fn span(&self) -> ::m2_syn::Span {
-                        self.span
-                    }
-                }
-
                 impl ::m2_syn::ToTokens for #name {
                     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
                         #emit
                     }
                 }
 
-                #common
-
                 impl<N> ::m2_syn::Reconstruct<N> for #name
                 where
-                    N: ::m2_syn::CstNode,
+                    N: ::m2_syn::ExternalCstNode,
                 {
                     fn matches(node: &N) -> bool {
                         node.identity().matches(#kind, true)
@@ -457,10 +416,14 @@ impl Syntax {
                     let stored = field.shape.stored_type(token_like, false);
                     quote! { #(#attrs)* #visibility #member: #stored }
                 });
+                let typed_delimiter = definition.delimiter.and_then(DelimiterKind::typed);
+                let delimiter_field = typed_delimiter
+                    .as_ref()
+                    .map(|ty| quote!(pub delimiter: #ty,));
                 let struct_definition = quote! {
                     #visibility struct #name {
                         #(#expanded_fields,)*
-                        pub(crate) span: ::m2_syn::Span,
+                        #delimiter_field
                     }
                 };
                 let constructor_arguments = fields.iter().map(|field| {
@@ -482,7 +445,20 @@ impl Syntax {
                     })
                     .collect::<Vec<_>>();
                 let constructor_fields = fields.iter().map(|field| &field.binding);
-                let constructor_value = quote!(Self { #(#constructor_fields,)* span });
+                let constructor_delimiter = typed_delimiter.as_ref().map(|ty| {
+                    quote!(let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(
+                        ::m2_syn::DoubleSpan::new(span, span),
+                    );)
+                });
+                let delimiter_member = typed_delimiter.as_ref().map(|_| quote!(delimiter,));
+                let constructor_value = if constructor_delimiter.is_some() {
+                    quote!({
+                        #constructor_delimiter
+                        Self { #(#constructor_fields,)* #delimiter_member }
+                    })
+                } else {
+                    quote!(Self { #(#constructor_fields,)* })
+                };
                 let constructor = if constructor_conversions.is_empty() {
                     constructor_value
                 } else {
@@ -495,12 +471,30 @@ impl Syntax {
                     let binding = &field.binding;
                     quote! { ::m2_syn::Spanned::span(&#binding) }
                 });
+                let constructor_span = typed_delimiter
+                    .as_ref()
+                    .map(|_| quote!(let span = ::m2_syn::Span::join_all([#(#span_fields),*]);));
                 let reconstruct_fields = fields
                     .iter()
                     .map(|field| field.reconstruct(token_like))
                     .collect::<Result<Vec<_>>>()?;
                 let reconstructed_fields = fields.iter().map(|field| &field.binding);
-                let reconstructed = quote!(Self { #(#reconstructed_fields,)* span });
+                let reconstruct_delimiter = typed_delimiter.as_ref().map(|ty| {
+                    quote!(let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(
+                        ::m2_syn::DoubleSpan::new(span, span),
+                    );)
+                });
+                let reconstruct_span = typed_delimiter
+                    .as_ref()
+                    .map(|_| quote!(let span = node.span();));
+                let reconstructed = if reconstruct_delimiter.is_some() {
+                    quote!({
+                        #reconstruct_delimiter
+                        Self { #(#reconstructed_fields,)* #delimiter_member }
+                    })
+                } else {
+                    quote!(Self { #(#reconstructed_fields,)* })
+                };
                 let field_separator = definition
                     .delimiter
                     .map_or(" ", DelimiterKind::field_separator);
@@ -523,42 +517,28 @@ impl Syntax {
                             ::m2_syn::Spanned::span(self),
                         ));
                     },
-                    Some(delimiter) => {
-                        let delimiter = delimiter.tokens();
-                        quote! {
-                            output.push_group(::m2_syn::Group::new(
-                                ::m2_syn::Delimiter::new(
-                                    #delimiter,
-                                    ::m2_syn::DoubleSpan::new(
-                                        ::m2_syn::Span::detached(),
-                                        ::m2_syn::Span::detached(),
-                                    ),
-                                ),
-                                contents,
-                            ));
-                        }
-                    }
+                    Some(_) => quote! {
+                        ::m2_syn::DelimiterToken::surround(
+                            &self.delimiter,
+                            output,
+                            contents,
+                        );
+                    },
                     None => quote! {
                         ::m2_syn::ToTokens::to_tokens(&contents, output);
                     },
                 };
                 Ok(quote! {
                     #(#attrs)*
-                    #[derive(Debug)]
+                    #[derive(Debug, ::m2_syn::Spanned)]
                     #struct_definition
 
                     impl #name {
                         pub fn new(#(#constructor_arguments),*) -> Self {
-                            let span = ::m2_syn::Span::join_all([#(#span_fields),*]);
+                            #constructor_span
                             #constructor
                         }
                     }
-                   impl ::m2_syn::Spanned for #name {
-                        fn span(&self) -> ::m2_syn::Span {
-                            self.span
-                        }
-                    }
-
                     impl ::m2_syn::ToTokens for #name {
                         fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
                             let mut contents = ::m2_syn::TokenStream::new();
@@ -567,11 +547,9 @@ impl Syntax {
                         }
                     }
 
-                    #common
-
                     impl<N> ::m2_syn::Reconstruct<N> for #name
                     where
-                        N: ::m2_syn::CstNode,
+                        N: ::m2_syn::ExternalCstNode,
                     {
                         fn matches(node: &N) -> bool {
                             node.identity().matches(#kind, true)
@@ -586,7 +564,7 @@ impl Syntax {
                                     node.identity(),
                                 ));
                             }
-                            let span = node.span();
+                            #reconstruct_span
                             let mut children = ::m2_syn::ChildCursor::new(&node);
                             #(#reconstruct_fields)*
                             Ok(#reconstructed)
@@ -777,9 +755,15 @@ impl Syntax {
             let name = &definition.name;
             match &definition.fields {
                 StructFields::Leaf => traversal.empty_walker(name, quote!(#name)),
-                StructFields::Product { fields } => {
-                    traversal.struct_walker(name, fields, token_like)
-                }
+                StructFields::Product { fields } => traversal.struct_walker(
+                    name,
+                    fields,
+                    token_like,
+                    definition
+                        .delimiter
+                        .and_then(DelimiterKind::typed)
+                        .is_some(),
+                ),
             }
         });
         let enums = self
@@ -895,9 +879,20 @@ impl FieldDefinition {
         let separator = (!self.attached && !field_separator.is_empty()).then_some(field_separator);
         let separate = separator.map(|separator| {
             let push_separator = push_detached_separator(quote!(contents), separator);
-            quote! {
-                if !contents.is_empty() {
-                    #push_separator
+            if separator == " " {
+                quote! {
+                    if !contents.is_empty()
+                        && !contents.ends_with_whitespace()
+                        && !field_output.starts_with_whitespace()
+                    {
+                        #push_separator
+                    }
+                }
+            } else {
+                quote! {
+                    if !contents.is_empty() {
+                        #push_separator
+                    }
                 }
             }
         });
@@ -926,7 +921,7 @@ fn push_detached_separator(output: TokenStream, separator: &str) -> TokenStream 
         },
         "\n" => quote! {
             #output.push_trivia(::m2_syn::Trivia::new(
-                ::m2_syn::TriviaKind::LineBreak,
+                ::m2_syn::TriviaKind::Whitespace,
                 "\n",
                 ::m2_syn::Span::detached(),
             ));
@@ -1168,14 +1163,6 @@ fn expand_enum(definition: &EnumDefinition, tokens: &TokenDefinitions) -> TokenS
         let ty = variant.shape.source_type();
         quote! { #(#attrs)* #name(#ty) }
     });
-    let span_arms = definition.variants.iter().map(|variant| {
-        let variant = &variant.name;
-        quote!(Self::#variant(node) => ::m2_syn::Spanned::span(node))
-    });
-    let kind_arms = definition.variants.iter().map(|variant| {
-        let variant = &variant.name;
-        quote!(Self::#variant(node) => ::m2_syn::AstNode::kind(node))
-    });
     let token_arms = definition.variants.iter().map(|variant| {
         let variant = &variant.name;
         quote!(Self::#variant(node) => ::m2_syn::ToTokens::to_tokens(node, output))
@@ -1220,6 +1207,17 @@ fn expand_enum(definition: &EnumDefinition, tokens: &TokenDefinitions) -> TokenS
                 .expect("operator variants are generated from tokens");
             quote!(#spelling => Some(Self::#variant_name(#ty(span))))
         });
+        let from_token_arms = definition.variants.iter().map(|variant| {
+            let variant_name = &variant.name;
+            let ty = variant.shape.source_type();
+            quote! {
+                if <#ty as ::m2_syn::Token>::matches_token_tree(&token) {
+                    return Some(Self::#variant_name(
+                        <#ty as ::m2_syn::Token>::from_token_tree(token)?
+                    ));
+                }
+            }
+        });
         let spelling_arms = definition.variants.iter().map(|variant| {
             let variant_name = &variant.name;
             let spelling = tokens
@@ -1239,6 +1237,11 @@ fn expand_enum(definition: &EnumDefinition, tokens: &TokenDefinitions) -> TokenS
                     }
                 }
 
+                pub fn from_token_tree(token: ::m2_syn::TokenTree) -> ::std::option::Option<Self> {
+                    #(#from_token_arms)*
+                    None
+                }
+
                 pub fn spelling(&self) -> &'static str {
                     match self {
                         #(#spelling_arms,)*
@@ -1250,23 +1253,9 @@ fn expand_enum(definition: &EnumDefinition, tokens: &TokenDefinitions) -> TokenS
     });
     quote! {
         #(#attrs)*
-        #[derive(Debug)]
+        #[derive(Debug, ::m2_syn::Spanned)]
         #visibility enum #name {
             #(#variants,)*
-        }
-
-        impl ::m2_syn::Spanned for #name {
-            fn span(&self) -> ::m2_syn::Span {
-                match self { #(#span_arms,)* #borrowed_fallback }
-            }
-        }
-
-        impl ::m2_syn::AstNode for #name {
-            type Kind = SyntaxKind;
-
-            fn kind(&self) -> SyntaxKind {
-                match self { #(#kind_arms,)* #borrowed_fallback }
-            }
         }
 
         impl ::m2_syn::ToTokens for #name {
@@ -1277,7 +1266,7 @@ fn expand_enum(definition: &EnumDefinition, tokens: &TokenDefinitions) -> TokenS
 
         impl<N> ::m2_syn::Reconstruct<N> for #name
         where
-            N: ::m2_syn::CstNode,
+            N: ::m2_syn::ExternalCstNode,
         {
             fn matches(node: &N) -> bool {
                 #matches

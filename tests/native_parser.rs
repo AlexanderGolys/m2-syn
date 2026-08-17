@@ -1,6 +1,6 @@
 use m2_syn::{
     AnyCell, BinaryOperator, Collection, Expr, LiteralKind, NativeParseError, OperatorExpr,
-    QuoteValue, SourceId, ToTokens, TokenTree, lex_str, parse_native, parse_with,
+    SourceId, Spanned, ToCellStream, ToTokens, TokenTree, lex_str, parse_native, parse_with,
 };
 
 fn expression(source: &str) -> Expr {
@@ -13,9 +13,10 @@ fn expression(source: &str) -> Expr {
 }
 
 fn adjacent(expression: &Expr) -> (&Expr, &Expr) {
-    let Expr::OperatorExpr(OperatorExpr::AdjacentExpression(expression)) = expression else {
+    let Expr::OperatorExpr(OperatorExpr::BinaryExpression(expression)) = expression else {
         panic!("expected implicit application, found {expression:?}");
     };
+    assert!(matches!(expression.operator, BinaryOperator::Space(_)));
     (&expression.left, &expression.right)
 }
 
@@ -133,14 +134,22 @@ fn paired_top_level_semicolons_create_muted_cells() {
 }
 
 #[test]
+fn semicolons_cannot_delimit_empty_statements() {
+    for source in [";", "1;;2", "(;)", "(1;;2)"] {
+        parse_native(source, SourceId(33))
+            .expect_err(&format!("`{source}` should reject an empty statement"));
+    }
+}
+
+#[test]
 fn implicit_and_explicit_space_remain_distinct_typed_forms() {
     let implicit = expression("f x");
     adjacent(&implicit);
-    assert_eq!(implicit.to_m2(), "f x");
+    assert_eq!(implicit.to_code(), "f x");
 
     let explicit = expression("f SPACE x");
     assert!(matches!(binary(&explicit).1, BinaryOperator::Space(_)));
-    assert_eq!(explicit.to_m2(), "f SPACE x");
+    assert_eq!(explicit.to_code(), "f SPACE x");
 }
 
 #[test]
@@ -161,7 +170,35 @@ fn precedence_parser_consumes_the_shared_token_stream_directly() {
     let tokens = lex_str("a @ b @ c", SourceId(35)).unwrap();
     let mut parser = m2_syn::NativeParser::new();
     let file = parse_with(&mut parser, tokens).unwrap();
-    assert_eq!(file.to_m2(), "a @ b @ c");
+    assert_eq!(file.to_code(), "a @ b @ c");
+}
+
+#[test]
+fn typed_tokens_and_cells_round_trip_through_the_native_parser() {
+    let source_id = SourceId(351);
+    let lexed = lex_str("a * b;\nreturn c", source_id).unwrap();
+    let expected_multiply_span = lexed
+        .iter()
+        .flat_map(|cell| cell.stream().iter())
+        .find_map(|tree| match tree {
+            TokenTree::Punct(token) if token.text() == "*" => Some(token.span()),
+            _ => None,
+        })
+        .expect("the lexer should emit the shared raw punctuation atom");
+
+    let mut parser = m2_syn::NativeParser::new();
+    let file = parse_with(&mut parser, lexed).unwrap();
+    assert!(file.to_token_stream().into_iter().any(|tree| {
+        matches!(tree, TokenTree::Punct(token)
+            if token.text() == "*" && token.span() == expected_multiply_span)
+    }));
+
+    let cells = file.to_cell_stream(source_id);
+    assert_eq!(cells.cells().len(), 2);
+    assert_eq!(cells.to_string(), file.to_code());
+
+    let reparsed = parse_with(&mut parser, cells).unwrap();
+    assert_eq!(reparsed.to_code(), file.to_code());
 }
 
 #[test]
@@ -171,7 +208,7 @@ fn typed_strings_emit_literal_tokens_instead_of_delimiter_groups() {
         ("///a//b///", LiteralKind::RawString),
     ] {
         let file = parse_native(source, SourceId(36)).unwrap();
-        let tokens = file.tokens().into_iter().collect::<Vec<_>>();
+        let tokens = file.to_token_stream().into_iter().collect::<Vec<_>>();
         assert_eq!(tokens.len(), 1);
         let TokenTree::Literal(literal) = &tokens[0] else {
             panic!("`{source}` emitted a non-literal token: {:?}", tokens[0]);
@@ -274,7 +311,7 @@ fn nested_control_clauses_follow_their_12_and_16_stopper_levels() {
     ] {
         let file = parse_native(source, SourceId(39))
             .unwrap_or_else(|error| panic!("`{source}` failed with {error:?}"));
-        let normalized = file.to_m2();
+        let normalized = file.to_code();
         parse_native(&normalized, SourceId(40)).unwrap_or_else(|error| {
             panic!("normalized `{normalized}` from `{source}` failed with {error:?}")
         });
@@ -313,7 +350,7 @@ fn new_statement_parses_its_ordered_optional_clauses() {
     for source in ["new A", "new A of B", "new A from C"] {
         let file = parse_native(source, SourceId(42))
             .unwrap_or_else(|error| panic!("`{source}` failed with {error:?}"));
-        let normalized = file.to_m2();
+        let normalized = file.to_code();
         parse_native(&normalized, SourceId(43)).unwrap_or_else(|error| {
             panic!("normalized `{normalized}` from `{source}` failed with {error:?}")
         });
@@ -386,9 +423,7 @@ fn quote_specifiers_turn_keyword_spellings_into_symbols() {
     let Expr::QuoteExpression(quote) = expression("symbol if") else {
         panic!("expected a quote expression");
     };
-    let QuoteValue::Symbol(symbol) = *quote.token else {
-        panic!("a quoted keyword spelling should denote a symbol");
-    };
+    let symbol = quote.token;
     assert_eq!(symbol.text, "if");
 }
 
@@ -412,7 +447,7 @@ fn core_keyword_aliases_share_their_unqualified_parse_behavior() {
     let Expr::QuoteExpression(quote) = expression("Core$symbol if") else {
         panic!("Core$symbol should parse as a quote specifier");
     };
-    assert!(matches!(*quote.token, QuoteValue::Symbol(_)));
+    assert_eq!(quote.token.text, "if");
 }
 
 #[test]

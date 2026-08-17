@@ -102,7 +102,6 @@ syntax_schema! {
     // Leaf nodes retain their source text. Their concrete names are obtained by
     // converting the Rust name to snake_case, matching grammar.js.
     Symbol ::= leaf
-    Keyword ::= leaf
     BlockComment ::= leaf
     LineComment ::= leaf
     EmptyComponent ::= leaf
@@ -263,7 +262,6 @@ syntax_schema! {
         right: Expr,
     )
 
-
     ThenClause ::= (
         Token![then],
         value: unfielded Expr,
@@ -367,14 +365,9 @@ syntax_schema! {
         Token![threadLocal],
     }
 
-    QuoteValue ::= {
-        Keyword,
-        Symbol,
-    }
-
     QuoteExpression ::= (
         specifier: unfielded QuoteSpecifier,
-        token: QuoteValue,
+        token: Symbol,
     )
 
     AnyCell ::= {
@@ -482,7 +475,6 @@ syntax_schema! {
     }
 }
 
-include!("gen/kind.rs");
 include!("gen/tokens.rs");
 include!("gen/nodes.rs");
 include!("gen/visit.rs");
@@ -504,9 +496,68 @@ pub(crate) fn canonical_keyword_spelling(spelling: &str) -> &str {
 ///
 /// Rust Analyzer presents the implementations below as the concrete type
 /// hierarchy for cells.
-pub trait CellNode: ::m2_syn::AstNode<Kind = SyntaxKind> + ::m2_syn::ToTokens {}
+pub trait CellNode: ::m2_syn::Spanned + ::m2_syn::ToTokens {}
 
 impl CellNode for AnyCell {}
 impl CellNode for ExpressionCell {}
 impl CellNode for SequenceCell {}
 impl CellNode for MutedCell {}
+
+impl ::m2_syn::ToCellStream for SourceFile {
+    fn to_cell_stream(&self, source_id: ::m2_syn::SourceId) -> ::m2_syn::CellStream {
+        let cells = self
+            .elements
+            .iter()
+            .enumerate()
+            .map(|(index, cell)| {
+                let mut stream = ::m2_syn::ToTokens::to_token_stream(cell);
+                let (kind, closing) = match cell {
+                    AnyCell::MutedCell(_) => {
+                        let semicolon =
+                            stream.pop().expect("a muted cell emits its semicolon last");
+                        (
+                            ::m2_syn::DelimiterKind::Semicolon,
+                            ::m2_syn::Spanned::span(&semicolon),
+                        )
+                    }
+                    AnyCell::ExpressionCell(_) | AnyCell::SequenceCell(_) => {
+                        let span = ::m2_syn::Spanned::span(cell);
+                        let closing = span
+                            .source()
+                            .ok()
+                            .zip(span.end_point().ok())
+                            .map(|(source, point)| {
+                                ::m2_syn::Span::new(source, ::m2_syn::TextRange::from_point(point))
+                            })
+                            .unwrap_or_else(::m2_syn::Span::detached);
+                        (::m2_syn::DelimiterKind::Empty, closing)
+                    }
+                };
+                if index != 0 {
+                    let mut with_leading_newline = ::m2_syn::TokenStream::new();
+                    with_leading_newline.push_trivia(::m2_syn::Trivia::new(
+                        ::m2_syn::TriviaKind::LineBreak,
+                        "\n",
+                        ::m2_syn::Span::detached(),
+                    ));
+                    with_leading_newline.extend([stream]);
+                    stream = with_leading_newline;
+                }
+                let span = ::m2_syn::Spanned::span(cell);
+                let opening = span
+                    .source()
+                    .ok()
+                    .zip(span.start_point().ok())
+                    .map(|(source, point)| {
+                        ::m2_syn::Span::new(source, ::m2_syn::TextRange::from_point(point))
+                    })
+                    .unwrap_or_else(::m2_syn::Span::detached);
+                ::m2_syn::CellBlock::new(
+                    ::m2_syn::Delimiter::new(kind, ::m2_syn::DoubleSpan::new(opening, closing)),
+                    stream,
+                )
+            })
+            .collect();
+        ::m2_syn::CellStream::new(cells, source_id)
+    }
+}

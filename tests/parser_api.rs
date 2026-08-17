@@ -1,14 +1,16 @@
 use std::borrow::Cow;
 use std::convert::Infallible;
+use std::vec::IntoIter;
 
 use m2_syn::{
-    CellStream, CstChild, CstNode, NativeParser, NodeIdentity, Parse, SourceFile, SourceId, Span,
-    Symbol, TreeSitterParser, lex_str, parse_with, reconstruct,
+    CSTNodeClassLabel, CellStream, ExternalCstChild, ExternalCstNode, NativeParser, Parse,
+    ParseStream, Parser, SourceFile, SourceId, Span, Symbol, Token, TreeSitterParser, lex_str,
+    parse_with, quote_m2, reconstruct,
 };
 
 struct EmptyFileParser;
 
-impl Parse for EmptyFileParser {
+impl Parser for EmptyFileParser {
     type Error = Infallible;
 
     fn parse(&mut self, _tokens: CellStream) -> Result<SourceFile, Self::Error> {
@@ -18,7 +20,7 @@ impl Parse for EmptyFileParser {
 
 struct SymbolParser;
 
-impl Parse<Symbol> for SymbolParser {
+impl Parser<Symbol> for SymbolParser {
     type Error = Infallible;
 
     fn parse(&mut self, tokens: CellStream) -> Result<Symbol, Self::Error> {
@@ -47,14 +49,25 @@ fn both_built_in_parsers_use_the_same_generic_entry_point() {
     assert_eq!(native_file.elements.len(), 1);
 }
 
+#[test]
+fn token_parse_stream_supports_speculative_parsing() {
+    let mut input = ParseStream::new(quote_m2!(+ *));
+    let mut fork = input.fork();
+    let _: Token![+] = Parse::parse(&mut fork).unwrap();
+
+    input.advance_to(&fork);
+    let _: Token![*] = Parse::parse(&mut input).unwrap();
+    assert!(input.is_empty());
+}
+
 #[derive(Clone)]
 struct SymbolCst;
 
-impl CstNode for SymbolCst {
-    type Children<'syntax> = std::vec::IntoIter<CstChild<Self>>;
+impl ExternalCstNode for SymbolCst {
+    type Children<'syntax> = IntoIter<ExternalCstChild<Self>>;
 
-    fn identity(&self) -> NodeIdentity<'_> {
-        NodeIdentity::new("symbol", true)
+    fn identity(&self) -> CSTNodeClassLabel<'_> {
+        CSTNodeClassLabel::new("symbol", true)
     }
 
     fn children(&self) -> Self::Children<'_> {

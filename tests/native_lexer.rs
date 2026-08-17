@@ -43,13 +43,13 @@ fn public_token_stream_exposes_nested_groups_and_delimiter_spans() {
     assert_eq!(parenthesized.delim_kind(), DelimiterKind::Parenthesis);
 
     let spans = parenthesized.double_span();
-    assert_eq!(spans.span_open.range().unwrap().start.byte, 0);
-    assert_eq!(spans.span_open.range().unwrap().end.byte, 1);
+    assert_eq!(spans.span_open.start_point().unwrap().byte, 0);
+    assert_eq!(spans.span_open.end_point().unwrap().byte, 1);
     assert_eq!(
-        spans.span_close.range().unwrap().start.byte,
+        spans.span_close.start_point().unwrap().byte,
         source.len() - 1
     );
-    assert_eq!(spans.span_close.range().unwrap().end.byte, source.len());
+    assert_eq!(spans.span_close.end_point().unwrap().byte, source.len());
 }
 
 #[test]
@@ -62,7 +62,8 @@ fn public_lexer_returns_complete_top_level_cells() {
     assert!(matches!(first[0], TokenTree::Literal(_)));
     assert!(matches!(
         first[1],
-        TokenTree::Trivia(trivia) if trivia.kind() == TriviaKind::LineBreak
+        TokenTree::Trivia(trivia)
+            if trivia.kind() == TriviaKind::Whitespace && trivia.contains_line_break()
     ));
     let second = &cells[1];
     assert!(matches!(
@@ -70,6 +71,29 @@ fn public_lexer_returns_complete_top_level_cells() {
         Some(TokenTree::Literal(_))
     ));
     assert_eq!(cells.len(), 2);
+}
+
+#[test]
+fn top_level_cells_use_empty_and_semicolon_delimiters() {
+    let cells = lexed("1;2").into_cells();
+
+    assert_eq!(cells[0].delim_kind(), DelimiterKind::Semicolon);
+    assert_eq!(
+        cells[0]
+            .double_span()
+            .span_close
+            .start_point()
+            .unwrap()
+            .byte,
+        1
+    );
+    assert!(
+        cells[0]
+            .stream()
+            .iter()
+            .all(|token| token.spelling() != Some(";"))
+    );
+    assert_eq!(cells[1].delim_kind(), DelimiterKind::Empty);
 }
 
 #[test]
@@ -81,19 +105,23 @@ fn public_lexer_ignores_unpaired_carriage_returns_without_losing_them() {
 
     assert!(matches!(
         first[1],
-        TokenTree::Trivia(trivia) if trivia.kind() == TriviaKind::CarriageReturn
+        TokenTree::Trivia(trivia)
+            if trivia.kind() == TriviaKind::Whitespace
+                && trivia.text() == "\r"
+                && !trivia.contains_line_break()
     ));
     assert!(matches!(
         first[3],
-        TokenTree::Trivia(trivia) if trivia.kind() == TriviaKind::LineBreak
+        TokenTree::Trivia(trivia)
+            if trivia.kind() == TriviaKind::Whitespace && trivia.contains_line_break()
     ));
 
     let TokenTree::Literal(two) = &first[2] else {
         panic!("expected the literal after the ignored carriage return");
     };
-    let two = two.span().range().unwrap();
-    assert_eq!(two.start.line, 0);
-    assert_eq!(two.start.column, 2);
+    let two = two.span().start_point().unwrap();
+    assert_eq!(two.line, 0);
+    assert_eq!(two.column, 2);
 }
 
 #[test]

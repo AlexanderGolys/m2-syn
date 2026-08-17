@@ -451,9 +451,6 @@ fn visit_bng_eql_mut(&mut self, node: &mut Token![!=]) {
         fn visit_symbol_mut(&mut self, node: &mut Symbol) {
             $crate::visit_mut::visit_symbol_mut(self, node);
         }
-        fn visit_keyword_mut(&mut self, node: &mut Keyword) {
-            $crate::visit_mut::visit_keyword_mut(self, node);
-        }
         fn visit_block_comment_mut(&mut self, node: &mut BlockComment) {
             $crate::visit_mut::visit_block_comment_mut(self, node);
         }
@@ -639,9 +636,6 @@ fn visit_bng_eql_mut(&mut self, node: &mut Token![!=]) {
         }
         fn visit_quote_specifier_mut(&mut self, node: &mut QuoteSpecifier) {
             $crate::visit_mut::visit_quote_specifier_mut(self, node);
-        }
-        fn visit_quote_value_mut(&mut self, node: &mut QuoteValue) {
-            $crate::visit_mut::visit_quote_value_mut(self, node);
         }
         fn visit_any_cell_mut(&mut self, node: &mut AnyCell) {
             $crate::visit_mut::visit_any_cell_mut(self, node);
@@ -1434,11 +1428,6 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_keyword_mut<V>(_visitor: &mut V, _node: &mut Keyword)
-        where
-            V: VisitMut + ?Sized,
-        {
-        }
         pub fn visit_block_comment_mut<V>(_visitor: &mut V, _node: &mut BlockComment)
         where
             V: VisitMut + ?Sized,
@@ -1926,7 +1915,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             V: VisitMut + ?Sized,
         {
             visitor.visit_quote_specifier_mut(&mut node.specifier);
-            visitor.visit_quote_value_mut((&mut node.token).as_mut());
+            visitor.visit_symbol_mut((&mut node.token).as_mut());
         }
         pub fn visit_prefix_operator_mut<V>(visitor: &mut V, node: &mut PrefixOperator)
         where
@@ -2381,19 +2370,6 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
                 }
                 QuoteSpecifier::ThreadLocal(node) => {
                     visitor.visit_thread_local_keyword_mut(node);
-                }
-            }
-        }
-        pub fn visit_quote_value_mut<V>(visitor: &mut V, node: &mut QuoteValue)
-        where
-            V: VisitMut + ?Sized,
-        {
-            match node {
-                QuoteValue::Keyword(node) => {
-                    visitor.visit_keyword_mut(node);
-                }
-                QuoteValue::Symbol(node) => {
-                    visitor.visit_symbol_mut(node);
                 }
             }
         }

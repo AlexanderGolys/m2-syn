@@ -40,6 +40,53 @@ design rule is to describe as little grammar as possible in `syntax!` and
 generate the repetitive construction, traversal, reconstruction, and printing
 machinery.
 
+## Representation pipeline
+
+The frontend has one raw syntax representation and one generated typed graph:
+
+```text
+source bytes --lex--> CellStream --per cell--> TokenStream --parse--> typed CST
+                                                               ^          |
+                                                               | ToTokens |
+                                                               +----------+
+
+CellStream --Display--> source text
+TokenStream --Display--> source fragment
+```
+
+`CellStream` is the linear outer layer because a cell is the smallest block of
+M2 code that is normally parsed independently. Each `CellBlock` contains a
+`TokenStream`; cells cannot occur recursively. `TokenStream` is recursive only
+through balanced `Group` token trees.
+
+`Parse` and `ToTokens` are the two directions at the typed boundary. For a
+typed value `c`, parsing its emission should recover `c`. Emitting a parsed raw
+stream may normalize insignificant layout:
+
+```text
+Parse(ToTokens(c)) = c
+ToTokens(Parse(tokens)) = normalize(tokens)
+```
+
+The two parser backends differ only in how they reach the generated graph.
+`NativeParser` constructs it directly from the shared token cursor.
+`TreeSitterParser` temporarily projects Tree-sitter's untyped nodes through
+`CstNode` and `Reconstruct`. Those adapter traits are not an alternative graph
+or a traversal API; typed traversal is generated as `Visit`, `VisitMut`, and
+`Fold`.
+
+The ownership boundaries are intentionally narrow:
+
+| Location | Owns |
+| --- | --- |
+| `token_stream.rs` | raw atoms, recursive groups, and the non-recursive cell layer |
+| `lexer.rs` | byte recognition, delimiter balancing, and cell splitting |
+| `parse.rs` | the shared `Rc<TokenStream>` cursor and parser traits |
+| `native.rs` | precedence and typed-node construction decisions |
+| `treesitter.rs` / `cst.rs` | the external-CST compatibility adapter |
+| `nodes.rs` | the compact typed grammar declaration |
+| `m2-syn-macros/src/` | generation of tokens, nodes, traversal, parsing, and emission |
+
 ```text
 syntax! {
     tokens {
@@ -80,6 +127,7 @@ files are reviewable build inputs and must not be edited directly.
 | `Name ::= (left: Expr, ...)` | concrete product node | declared children |
 | `Name ::= { Expr, Variant: (...) }` | grouping category | one declared alternative; inline products become concrete structs |
 | `Token![=]` | anonymous literal token field | the type selected by the generated `Token!` macro |
+| `Delimiter![()]` | a typed delimiter field | the generated parenthesis delimiter atom |
 | `T?`, `[T]`, `punct(T)`, `lines(T)` | optional or repeated children | `Option<T>` or `Vec<T>` with generated reconstruction and normalized separators |
 | `paren(...)`, `brace(...)`, etc. | delimited product | a concrete node emitted inside the declared delimiter |
 
@@ -88,6 +136,9 @@ categories containing only tokens remain inline. Constructors accept the
 types written in the declaration and hide that storage choice. Generated
 signatures consistently refer to literal token types through `Token![...]`;
 their concrete Rust names are an implementation detail of `src/gen/tokens.rs`.
+Delimited products likewise store generated `Delimiter![()]`,
+`Delimiter![[]]`, `Delimiter![{}]`, or `Delimiter![<||>]` atoms. Their raw
+counterpart is the delimiter carried by `TokenTree::Group`.
 
 A named field uses the same CST field name. Prefix a field expression with
 `unfielded` when it should consume the next matching unlabelled child. An
@@ -96,12 +147,13 @@ unnamed product member receives a stable generated field name such as
 
 ## Generated implementations
 
-The declaration generates one `SyntaxKind` and the following API without
-requiring per-node handwritten boilerplate.
+The declaration generates the following API without requiring per-node
+handwritten boilerplate. Runtime alternatives are represented only by the
+grammar-backed enums themselves; there is no parallel global node-kind enum.
 
 | Node form | Generated API |
 | --- | --- |
-| every node and category | `AstNode`, `Spanned`, `Reconstruct<N>`, and traversal dispatch |
+| every node and category | `Spanned`, `Reconstruct<N>`, and traversal dispatch |
 | token | `Token`, constructor, reconstruction, and a `Token![spelling]` arm |
 | text leaf | text-plus-span constructor and exact CST reconstruction |
 | product struct | concrete-node matching, storage-aware constructor, child reconstruction, and default child walkers |
@@ -139,23 +191,32 @@ dependency identity belongs in the semantic layer rather than in `Span`.
 
 `lex` is the first native-parser layer. It accepts any byte iterator and
 returns a source-spanned `CellStream`, whose `CellBlock` elements each own the
-same `TokenStream` used by quoting and emission. Identifiers, literals,
-punctuation, comments, whitespace, and physical line breaks are ordinary
-`TokenTree` variants; the lexer does not synthesize adjacency. Semicolons split
+same `TokenStream` used by quoting and emission. The only raw token categories
+are `Group`, `Ident`, `Literal`, `Punct`, and `Trivia`; the lexer does not
+synthesize typed nodes or adjacency. Semicolons split
 cells only after all delimiters have been paired, while a physical line break
 splits unless an operator or mandatory clause component still requires more
 input. The terminating semicolon or line break remains in the cell's stream. A
-lone carriage return is preserved as ignored trivia rather than treated as a
-line break. After greedy token recognition, structural delimiter pairs become
-recursive `Group` trees with separate spans for their opening and closing
-delimiters.
+lone carriage return and physical line breaks are both whitespace trivia, with
+`Trivia::contains_line_break` carrying the structural distinction. After
+greedy token recognition, structural delimiter pairs become recursive `Group`
+trees with separate spans for their opening and closing delimiters.
 
-Each maximal punctuation spelling is one `Punct`. The lexer applies
-context-free maximal munch across generated operators, delimiters, and comment
-openers. Consequently `|--1` begins with the `|-` operator rather than a
-comment, while a token beginning with `--` is a line comment. Likewise, `(*)`
-remains the single greedy operator rather than a parenthesized group. Quotation
-marks are part of a single literal token, not delimiter groups.
+Generated `Token![..]` values are checked typed refinements of these raw atoms,
+not a sixth `TokenTree` variant. A punctuation atom retains its raw `Punct`, a
+keyword retains its raw `Ident`, and `Token![SPACE]` can retain either implicit
+whitespace or the explicit `SPACE` identifier. This makes parsing and emission
+use the same object rather than converting through a duplicate `FixedToken`
+enum. The lexer applies context-free maximal munch across generated operators,
+delimiters, and comment openers. Consequently `|--1` begins with the `|-`
+operator rather than a comment, while a token beginning with `--` is a line
+comment. Likewise, `(*)` remains the single greedy operator rather than a
+parenthesized group. Quotation marks are part of a single literal token, not
+delimiter groups.
+
+The lexer reads through a lazy byte cursor with arbitrary finite lookahead.
+Lookahead fills only the demanded prefix, so accepting an arbitrary byte
+iterator does not force the complete source into memory before lexing begins.
 
 ```rust
 use m2_syn::{SourceId, TokenTree, lex_str};
@@ -167,9 +228,8 @@ let spellings = cell
     .into_stream()
     .into_iter()
     .map(|token| match token {
-        TokenTree::Punct(token) => token.text().to_owned(),
         TokenTree::Literal(token) => token.text().to_owned(),
-        _ => unreachable!(),
+        token => token.spelling().unwrap().to_owned(),
     })
     .collect::<Vec<_>>();
 
@@ -180,12 +240,13 @@ assert!(outer.next().is_none());
 
 ## Parser adapters
 
-Generated reconstruction depends only on `CstNode`. `TreeSitterNode` adapts
-Tree-sitter identity, field names, source text, extras, and ranges to that
-interface. Other parsers can implement the same trait without entering the
-generated syntax model.
+Generated compatibility reconstruction depends only on `CstNode`.
+`TreeSitterNode` adapts Tree-sitter identity, field names, source text, extras,
+and ranges to that interface. This homogeneous node view ends at the adapter:
+it is never stored inside a generated typed node. Parsers that already know the
+typed grammar should construct the graph directly, as `NativeParser` does.
 
-`Parse<T>` is the parser ecosystem boundary. It receives the `CellStream`
+`Parser<T>` is the parser-backend boundary. It receives the `CellStream`
 produced by lexing and returns a generated syntax target. `T` defaults to
 `SourceFile`, while parsers may implement the trait again for more specific
 targets such as `Expr`. Both built-in backends implement this same token-stream
@@ -193,13 +254,33 @@ API. A parser with its own CST can implement `CstNode` and call `reconstruct`;
 a parser whose native model already matches the generated graph can construct
 the target directly.
 
+The target-owned `Parse` trait is the dual of `ToTokens`: `parse2::<T>` consumes
+one complete `TokenStream` as `T`. It currently forms a complete vertical slice
+for every generated `Token![..]` atom; composite-node parsing will be generated
+from the syntax schema next. `ParseStream` owns a
+`std::io::Cursor<Rc<TokenStream>>`. A `fork` shares immutable token storage but
+has an independent position; `advance_to` explicitly commits successful
+speculation. No `unsafe`, interior mutability, or parser-private token vector is
+involved.
+`parse_quote_m2!` composes quoting with type-inferred parsing.
+
+`ToTokens::to_token_stream` is the inverse boundary for every typed node.
+`ToCellStream::to_cell_stream` performs the corresponding top-level conversion
+for `SourceFile`, preserving cells as a linear outer layer rather than making
+them recursive token trees. The native parser therefore supports the normalized
+round trip `CellStream -> SourceFile -> CellStream -> SourceFile`. Generated
+concrete token structs are deliberately underscore-prefixed; use `Token![..]`
+to name their types and inspect the underlying `TokenTree` after `ToTokens`
+when working with a heterogeneous stream. Delimiter structs follow the same
+rule through `Delimiter![..]`.
+
 ```rust
 # use std::convert::Infallible;
-use m2_syn::{CellStream, Parse, SourceFile, SourceId, lex_str, parse_with};
+use m2_syn::{CellStream, Parser, SourceFile, SourceId, lex_str, parse_with};
 
 struct EmptyParser;
 
-impl Parse for EmptyParser {
+impl Parser for EmptyParser {
     type Error = Infallible;
 
     fn parse(&mut self, _tokens: CellStream) -> Result<SourceFile, Self::Error> {
@@ -238,6 +319,41 @@ use m2_syn::{SourceId, ToTokens, parse_tokens, quote_m2};
 let quoted = quote_m2! { left + (right) };
 let file = parse_tokens(&quoted, SourceId(1))?;
 assert_eq!(file.to_m2(), "left + (right)");
+# Ok(())
+# }
+```
+
+`ParsedFile` provides the convenient source-to-source interface over these
+lower-level pieces. It owns one mutable typed CST and computes every current
+output from that tree, so a token projection cannot silently become stale after
+an edit. The original source remains available separately as an immutable
+snapshot. `parse` uses Tree-sitter; `parse_native` selects the direct precedence
+parser.
+
+```rust
+# fn main() -> Result<(), m2_syn::ParseError> {
+use m2_syn::{ParsedFile, Symbol, visit_mut::VisitMut};
+
+struct Rename;
+
+impl VisitMut for Rename {
+    fn visit_symbol_mut(&mut self, symbol: &mut Symbol) {
+        if symbol.text == "left" {
+            symbol.text = "renamed".into();
+        }
+    }
+}
+
+let file = ParsedFile::parse("left + right")?.edit(|cst| {
+    Rename.visit_source_file_mut(cst);
+});
+
+assert_eq!(file.original_source(), "left + right");
+assert_eq!(file.to_source(), "renamed + right");
+
+// Indented views are useful in tests, examples, and diagnostics.
+println!("{}", file.pretty_tokens());
+println!("{}", file.pretty_cst());
 # Ok(())
 # }
 ```

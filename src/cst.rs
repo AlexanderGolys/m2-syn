@@ -1,16 +1,26 @@
+//! Typed syntax traits and the compatibility bridge from external CSTs.
+//!
+//! [`Token`] and generated node fields are the typed graph.
+//! [`CstNode`] and [`Reconstruct`] are an adapter-only seam for parsers such as
+//! Tree-sitter that first produce an untyped concrete tree. They are not a
+//! traversal interface for the typed graph; use `Visit`, `VisitMut`, or `Fold`
+//! for that. A parser that can construct typed nodes directly does not need
+//! this bridge.
+
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use crate::{Span, Spanned};
+use crate::{Span, Spanned, TokenTree};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeIdentity<'syntax> {
+/// Backend-local node identity used only during external CST reconstruction.
+pub struct CSTNodeClassLabel<'syntax> {
     pub name: Cow<'syntax, str>,
     pub named: bool,
 }
 
-impl<'syntax> NodeIdentity<'syntax> {
+impl<'syntax> CSTNodeClassLabel<'syntax> {
     pub fn new(name: impl Into<Cow<'syntax, str>>, named: bool) -> Self {
         Self {
             name: name.into(),
@@ -23,17 +33,21 @@ impl<'syntax> NodeIdentity<'syntax> {
     }
 }
 
-pub struct CstChild<N> {
+pub struct ExternalCstChild<N> {
     pub field: Option<&'static str>,
     pub node: N,
 }
 
-pub trait CstNode: Sized {
-    type Children<'syntax>: Iterator<Item = CstChild<Self>>
+/// Minimal untyped view required to reconstruct generated typed nodes.
+///
+/// This trait is deliberately confined to parser adapters. Its homogeneous
+/// child iterator must not be used to model or walk the typed syntax graph.
+pub trait ExternalCstNode: Sized {
+    type Children<'syntax>: Iterator<Item = ExternalCstChild<Self>>
     where
         Self: 'syntax;
 
-    fn identity(&self) -> NodeIdentity<'_>;
+    fn identity(&self) -> CSTNodeClassLabel<'_>;
     fn children(&self) -> Self::Children<'_>;
     fn text(&self) -> Cow<'_, str>;
     fn span(&self) -> Span;
@@ -43,31 +57,35 @@ pub trait CstNode: Sized {
     }
 }
 
-pub trait AstNode: Spanned {
-    type Kind: Copy + Eq;
+/// A generated closed token atom backed by one matching raw [`TokenTree`].
+///
+/// Parsing validates the raw category and spelling, then retains the raw atom
+/// so emission preserves distinctions such as implicit whitespace versus the
+/// explicit `SPACE` spelling.
+pub trait Token: Spanned + Sized {
+    /// Canonical spelling used in diagnostics and freshly constructed atoms.
+    const SPELLING: &'static str;
 
-    fn kind(&self) -> Self::Kind;
+    /// Tests whether a raw atom belongs to this closed token type.
+    fn matches_token_tree(token: &TokenTree) -> bool;
+
+    /// Validates and retains a raw atom as this typed token.
+    fn from_token_tree(token: TokenTree) -> Option<Self>;
 }
 
-pub trait Token: AstNode {}
-
-pub trait Reconstruct<N>: Sized
-where
-    N: CstNode,
-{
+/// Reconstructs one typed value from a parser backend's untyped CST node.
+pub trait Reconstruct<N: ExternalCstNode>: Sized {
     fn matches(node: &N) -> bool;
     fn reconstruct(node: N) -> Result<Self, ReconstructError>;
 }
 
+/// Single-pass field selection used only by generated reconstruction code.
 pub struct ChildCursor<N> {
-    children: Vec<Option<CstChild<N>>>,
+    children: Vec<Option<ExternalCstChild<N>>>,
     parent: String,
 }
 
-impl<N> ChildCursor<N>
-where
-    N: CstNode,
-{
+impl<N: ExternalCstNode> ChildCursor<N> {
     pub fn new(parent: &N) -> Self {
         Self {
             children: parent
@@ -120,7 +138,7 @@ where
         self.take_all(|child| child.field.is_none() && T::matches(&child.node))
     }
 
-    fn take_first(&mut self, predicate: impl Fn(&CstChild<N>) -> bool) -> Option<N> {
+    fn take_first(&mut self, predicate: impl Fn(&ExternalCstChild<N>) -> bool) -> Option<N> {
         self.children
             .iter_mut()
             .find(|child| child.as_ref().is_some_and(&predicate))
@@ -128,7 +146,7 @@ where
             .map(|child| child.node)
     }
 
-    fn take_all(&mut self, predicate: impl Fn(&CstChild<N>) -> bool) -> Vec<N> {
+    fn take_all(&mut self, predicate: impl Fn(&ExternalCstChild<N>) -> bool) -> Vec<N> {
         self.children
             .iter_mut()
             .filter_map(|child| {
@@ -168,7 +186,7 @@ impl ReconstructError {
     pub fn wrong_node(
         expected: &'static str,
         expected_named: bool,
-        actual: NodeIdentity<'_>,
+        actual: CSTNodeClassLabel<'_>,
     ) -> Self {
         Self::WrongNode {
             expected,
@@ -178,7 +196,7 @@ impl ReconstructError {
         }
     }
 
-    pub fn wrong_category(category: &'static str, actual: NodeIdentity<'_>) -> Self {
+    pub fn wrong_category(category: &'static str, actual: CSTNodeClassLabel<'_>) -> Self {
         Self::WrongCategory {
             category,
             actual: actual.name.into_owned(),

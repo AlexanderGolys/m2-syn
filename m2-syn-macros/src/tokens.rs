@@ -3,7 +3,7 @@ use std::iter;
 
 use proc_macro2::{Delimiter, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
 use quote::{format_ident, quote};
-use syn::parse::{Parse, ParseStream};
+use syn::parse::{Parse as SynParse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Error, LitStr, Result, Token, braced, bracketed, parse_str};
@@ -33,7 +33,7 @@ enum DeclarationKind {
     Augmented,
 }
 
-impl Parse for DeclarationKind {
+impl SynParse for DeclarationKind {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let ident: Ident = input.parse()?;
         match ident.to_string().as_str() {
@@ -68,7 +68,7 @@ struct OperatorDeclaration {
     kinds: BTreeSet<DeclarationKind>,
 }
 
-impl Parse for OperatorDeclaration {
+impl SynParse for OperatorDeclaration {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let pattern_content;
         bracketed!(pattern_content in input);
@@ -99,6 +99,13 @@ enum NameStyle {
     Punctuation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawTokenKind {
+    Punct,
+    Ident,
+    Whitespace,
+}
+
 #[derive(Clone)]
 struct PlainDeclaration {
     pattern: TokenStream,
@@ -124,6 +131,7 @@ pub(crate) struct TokenDefinition {
     pub(crate) operators: BTreeSet<OperatorKind>,
     is_operator: bool,
     is_keyword: bool,
+    raw_kind: RawTokenKind,
 }
 
 pub(crate) struct TokenDefinitions {
@@ -174,6 +182,7 @@ impl TokenDefinitions {
     }
 
     pub(crate) fn expand(&self) -> TokenStream {
+        let delimiters = expand_delimiters();
         let operator_spellings = self
             .definitions
             .iter()
@@ -201,52 +210,91 @@ impl TokenDefinitions {
             });
         let definitions = self.definitions.iter().map(|definition| {
             let name = &definition.name;
+            let type_name = hidden_token_name(name);
             let spelling = &definition.spelling;
-            let punctuation = !spelling.is_empty()
-                && spelling
-                    .chars()
-                    .all(|character| !character.is_ascii_alphanumeric() && character != ' ');
-            let emit = if punctuation {
-                quote! {
-                    output.push_punct(::m2_syn::Punct::new(#spelling, span));
-                }
-            } else {
-                quote! {
-                    output.push_ident(::m2_syn::IdentToken::new(#spelling, span));
-                }
+            let (raw_new, raw_matches) = match definition.raw_kind {
+                RawTokenKind::Punct => (
+                    quote!(::m2_syn::TokenTree::Punct(::m2_syn::Punct::new(#spelling, span))),
+                    quote!(matches!(token, ::m2_syn::TokenTree::Punct(token) if token.text() == #spelling)),
+                ),
+                RawTokenKind::Ident => (
+                    quote!(::m2_syn::TokenTree::Ident(::m2_syn::IdentToken::new(#spelling, span))),
+                    quote!(matches!(
+                        token,
+                        ::m2_syn::TokenTree::Ident(token)
+                            if token.text() == #spelling
+                                || token.text().strip_prefix("Core$") == Some(#spelling)
+                    )),
+                ),
+                RawTokenKind::Whitespace => (
+                    quote!(::m2_syn::TokenTree::Trivia(::m2_syn::Trivia::new(
+                            ::m2_syn::TriviaKind::Whitespace,
+                            " ",
+                            span,
+                        ))),
+                    quote!(matches!(
+                        token,
+                        ::m2_syn::TokenTree::Trivia(token)
+                            if token.kind() == ::m2_syn::TriviaKind::Whitespace
+                                && !token.contains_line_break()
+                    ) || matches!(
+                        token,
+                        ::m2_syn::TokenTree::Ident(token) if token.text() == "SPACE"
+                    )),
+                ),
             };
 
             quote! {
 
-                #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-                pub struct #name(pub ::m2_syn::Span);
+                #[derive(Debug, Clone, PartialEq, Eq)]
+                pub struct #type_name {
+                    raw: ::std::boxed::Box<::m2_syn::TokenTree>,
+                }
 
-                impl ::m2_syn::Spanned for #name {
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub fn #type_name<S: ::m2_syn::Spanned>(span: S) -> #type_name {
+                    let span = span.span();
+                    #type_name { raw: ::std::boxed::Box::new(#raw_new) }
+                }
+
+                impl ::m2_syn::Spanned for #type_name {
                     fn span(&self) -> ::m2_syn::Span {
-                        self.0
+                        ::m2_syn::Spanned::span(&self.raw)
                     }
                 }
 
-                impl ::m2_syn::AstNode for #name {
-                    type Kind = SyntaxKind;
+                impl ::m2_syn::Token for #type_name {
+                    const SPELLING: &'static str = #spelling;
 
-                    fn kind(&self) -> SyntaxKind {
-                        SyntaxKind::#name
+                    fn matches_token_tree(token: &::m2_syn::TokenTree) -> bool {
+                        #raw_matches
+                    }
+
+                    fn from_token_tree(token: ::m2_syn::TokenTree) -> ::std::option::Option<Self> {
+                        Self::matches_token_tree(&token).then_some(Self {
+                            raw: ::std::boxed::Box::new(token),
+                        })
                     }
                 }
 
-                impl ::m2_syn::Token for #name {}
+                impl ::m2_syn::Parse for #type_name {
+                    fn parse(
+                        input: &mut ::m2_syn::ParseStream,
+                    ) -> Result<Self, ::m2_syn::TokenParseError> {
+                        input.parse_token()
+                    }
+                }
 
-                impl ::m2_syn::ToTokens for #name {
+                impl ::m2_syn::ToTokens for #type_name {
                     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-                        let span = ::m2_syn::Spanned::span(self);
-                        #emit
+                        ::m2_syn::ToTokens::to_tokens(&self.raw, output);
                     }
                 }
 
-                impl<N> ::m2_syn::Reconstruct<N> for #name
+                impl<N> ::m2_syn::Reconstruct<N> for #type_name
                 where
-                    N: ::m2_syn::CstNode,
+                    N: ::m2_syn::ExternalCstNode,
                 {
                     fn matches(node: &N) -> bool {
                         node.identity().matches(#spelling, false)
@@ -260,17 +308,19 @@ impl TokenDefinitions {
                                 node.identity(),
                             ));
                         }
-                        Ok(Self(node.span()))
+                        Ok(#type_name(node.span()))
                     }
                 }
             }
         });
         let arms = self.definitions.iter().map(|definition| {
-            let name = &definition.name;
+            let name = hidden_token_name(&definition.name);
             let pattern = &definition.pattern;
             quote! { [#pattern] => { $crate::#name }; }
         });
         quote! {
+            #delimiters
+
             pub(crate) const GENERATED_OPERATOR_SPELLINGS: &[&str] = &[
                 #(#operator_spellings),*
             ];
@@ -307,6 +357,7 @@ impl TokenDefinitions {
         let mut names = BTreeMap::<String, usize>::new();
 
         for operator in operators {
+            let raw_kind = raw_token_kind(&operator.spelling, &operator.pattern, false);
             let categories = operator
                 .kinds
                 .iter()
@@ -323,6 +374,7 @@ impl TokenDefinitions {
                     operators: categories,
                     is_operator: true,
                     is_keyword: false,
+                    raw_kind,
                 },
             )?;
 
@@ -339,6 +391,7 @@ impl TokenDefinitions {
                         operators: BTreeSet::from([OperatorKind::Binary]),
                         is_operator: true,
                         is_keyword: false,
+                        raw_kind: RawTokenKind::Punct,
                     },
                 )?;
             }
@@ -347,6 +400,8 @@ impl TokenDefinitions {
         for declaration in plain {
             let spelling = token_spelling(&declaration.pattern)?;
             let name = token_name(&declaration.pattern, declaration.style)?;
+            let is_keyword = matches!(declaration.style, NameStyle::Keyword);
+            let raw_kind = raw_token_kind(&spelling, &declaration.pattern, is_keyword);
             insert_definition(
                 &mut definitions,
                 &mut names,
@@ -356,12 +411,86 @@ impl TokenDefinitions {
                     spelling,
                     operators: BTreeSet::new(),
                     is_operator: false,
-                    is_keyword: matches!(declaration.style, NameStyle::Keyword),
+                    is_keyword,
+                    raw_kind,
                 },
             )?;
         }
 
         Ok(Self { definitions })
+    }
+}
+
+fn expand_delimiters() -> TokenStream {
+    let definitions = [
+        (
+            format_ident!("_EmptyDelimiter"),
+            quote!(::m2_syn::DelimiterKind::Empty),
+        ),
+        (
+            format_ident!("_SemicolonDelimiter"),
+            quote!(::m2_syn::DelimiterKind::Semicolon),
+        ),
+        (
+            format_ident!("_ParenthesisDelimiter"),
+            quote!(::m2_syn::DelimiterKind::Parenthesis),
+        ),
+        (
+            format_ident!("_BracketDelimiter"),
+            quote!(::m2_syn::DelimiterKind::Bracket),
+        ),
+        (
+            format_ident!("_BraceDelimiter"),
+            quote!(::m2_syn::DelimiterKind::Brace),
+        ),
+        (
+            format_ident!("_AngleBarDelimiter"),
+            quote!(::m2_syn::DelimiterKind::AngleBar),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, kind)| {
+        quote! {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, ::m2_syn::Spanned)]
+            pub struct #name {
+                spans: ::m2_syn::DoubleSpan,
+            }
+
+            #[doc(hidden)]
+            #[allow(non_snake_case)]
+            pub fn #name(span: ::m2_syn::DoubleSpan) -> #name {
+                <#name as ::m2_syn::DelimiterToken>::new(span)
+            }
+
+            impl ::m2_syn::DelimiterToken for #name {
+                const KIND: ::m2_syn::DelimiterKind = #kind;
+
+                fn new(span: ::m2_syn::DoubleSpan) -> Self {
+                    Self { spans: span }
+                }
+
+                fn span2(&self) -> ::m2_syn::DoubleSpan {
+                    self.spans
+                }
+            }
+        }
+    });
+
+    quote! {
+        #(#definitions)*
+
+        #[macro_export]
+        macro_rules! Delimiter {
+            [] => { $crate::_EmptyDelimiter };
+            [;] => { $crate::_SemicolonDelimiter };
+            [()] => { $crate::_ParenthesisDelimiter };
+            [[]] => { $crate::_BracketDelimiter };
+            [{}] => { $crate::_BraceDelimiter };
+            [<| |>] => { $crate::_AngleBarDelimiter };
+            [$($unsupported:tt)*] => {
+                compile_error!("delimiter was not declared")
+            };
+        }
     }
 }
 
@@ -372,7 +501,11 @@ fn name_span(name: &str, definitions: &[TokenDefinition]) -> Span {
         .map_or_else(Span::call_site, |definition| definition.name.span())
 }
 
-impl Parse for TokenDefinitions {
+fn hidden_token_name(name: &Ident) -> Ident {
+    format_ident!("_{}", name, span = name.span())
+}
+
+impl SynParse for TokenDefinitions {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let operators = parse_operator_stage(input)?;
         let keywords = parse_plain_stage(input, "keywords", NameStyle::Keyword)?;
@@ -451,11 +584,32 @@ fn insert_definition(
         existing.operators.extend(definition.operators);
         existing.is_operator |= definition.is_operator;
         existing.is_keyword |= definition.is_keyword;
+        if existing.raw_kind != definition.raw_kind {
+            return Err(Error::new(
+                definition.name.span(),
+                format!("token name `{name}` has incompatible raw token categories"),
+            ));
+        }
     } else {
         names.insert(name, definitions.len());
         definitions.push(definition);
     }
     Ok(())
+}
+
+fn raw_token_kind(spelling: &str, _pattern: &TokenStream, is_keyword: bool) -> RawTokenKind {
+    if spelling == "SPACE" {
+        RawTokenKind::Whitespace
+    } else if is_keyword
+        || spelling
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic())
+    {
+        RawTokenKind::Ident
+    } else {
+        RawTokenKind::Punct
+    }
 }
 
 fn token_name(pattern: &TokenStream, style: NameStyle) -> Result<String> {

@@ -90,10 +90,8 @@ fn expand_stream(
                 }
                 (
                     quote! {
-                        #output.push_punct(::m2_syn::Punct::new(
-                            #text,
-                            ::m2_syn::Span::detached(),
-                        ));
+                        let span = ::m2_syn::Span::detached();
+                        #output.push_punct(::m2_syn::Punct::new(#text, span));
                     },
                     false,
                     false,

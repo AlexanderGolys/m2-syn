@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use m2_syn::{CstChild, CstNode, NodeIdentity, Reconstruct, Span, syntax};
+use m2_syn::{CSTNodeClassLabel, ExternalCstChild, ExternalCstNode, Reconstruct, Span, syntax};
 
 syntax! {
     tokens {}
@@ -28,21 +28,21 @@ impl Node {
     }
 }
 
-impl CstNode for Node {
+impl ExternalCstNode for Node {
     type Children<'syntax>
-        = std::vec::IntoIter<CstChild<Self>>
+        = std::vec::IntoIter<ExternalCstChild<Self>>
     where
         Self: 'syntax;
 
-    fn identity(&self) -> NodeIdentity<'_> {
-        NodeIdentity::new(self.name, true)
+    fn identity(&self) -> CSTNodeClassLabel<'_> {
+        CSTNodeClassLabel::new(self.name, true)
     }
 
     fn children(&self) -> Self::Children<'_> {
         self.children
             .iter()
             .cloned()
-            .map(|node| CstChild { field: None, node })
+            .map(|node| ExternalCstChild { field: None, node })
             .collect::<Vec<_>>()
             .into_iter()
     }

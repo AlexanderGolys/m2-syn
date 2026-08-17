@@ -1,12 +1,8 @@
 use m2_syn::treesitter::TreeSitterNode;
 use m2_syn::{
-    AnyCell, AssignmentExpr, AstNode, BinaryExpression, BinaryOperator, CellNode, Collection, Expr,
-    Reconstruct, SourceFile, SourceId, Spanned, SyntaxKind, ToTokens, parse_file,
+    AnyCell, AssignmentExpr, BinaryExpression, BinaryOperator, Collection, Expr, Reconstruct,
+    SourceFile, SourceId, Spanned, ToTokens, parse_file,
 };
-
-fn cell_kind(cell: &impl CellNode) -> SyntaxKind {
-    cell.kind()
-}
 
 #[test]
 fn reconstructs_typed_nodes_from_tree_sitter() {
@@ -23,7 +19,6 @@ fn reconstructs_typed_nodes_from_tree_sitter() {
         BinaryExpression::reconstruct(TreeSitterNode::new(raw_expression, source, SourceId(41)))
             .unwrap();
 
-    assert_eq!(expression.kind(), SyntaxKind::BinaryExpression);
     assert_eq!(expression.span().source(), Ok(SourceId(41)));
     assert!(matches!(expression.left.as_ref(), Expr::Symbol(symbol) if symbol.text == "left"));
     assert!(matches!(expression.operator, BinaryOperator::Add(_)));
@@ -31,16 +26,18 @@ fn reconstructs_typed_nodes_from_tree_sitter() {
 }
 
 #[test]
-fn reconstructs_implicit_application_without_a_synthetic_operator() {
+fn reconstructs_implicit_application_with_the_space_operator() {
     let source_file = parse_file("f x", SourceId(50)).unwrap();
     let AnyCell::ExpressionCell(cell) = &source_file.elements[0] else {
         panic!("application must be an expression cell");
     };
-    assert!(matches!(
-        cell.value.as_ref(),
-        Expr::OperatorExpr(m2_syn::OperatorExpr::AdjacentExpression(_))
-    ));
-    assert_eq!(source_file.to_m2(), "f x");
+    let Expr::OperatorExpr(m2_syn::OperatorExpr::BinaryExpression(expression)) =
+        cell.value.as_ref()
+    else {
+        panic!("application must be a binary operator expression");
+    };
+    assert!(matches!(expression.operator, BinaryOperator::Space(_)));
+    assert_eq!(source_file.to_code(), "f x");
 }
 
 #[test]
@@ -60,32 +57,25 @@ fn reconstructs_a_complete_source_file() {
 
     assert_eq!(source_file.elements.len(), 3);
     assert_eq!(source_file.span().source(), Ok(SourceId(42)));
-    assert_eq!(source_file.span().range().unwrap().end.byte, source.len());
+    assert_eq!(source_file.span().end_point().unwrap().byte, source.len());
 }
 
 #[test]
 fn specializes_global_cells_without_treating_nested_muted_groups_as_cells() {
     let source_file = parse_file("{x; y}\nx;", SourceId(45)).unwrap();
 
-    assert_eq!(
-        cell_kind(&source_file.elements[0]),
-        SyntaxKind::ExpressionCell
-    );
     let AnyCell::ExpressionCell(expression_cell) = &source_file.elements[0] else {
         panic!("a global expression must reconstruct as ExpressionCell");
     };
-    assert_eq!(cell_kind(expression_cell), SyntaxKind::ExpressionCell);
 
     let Expr::Collection(Collection::List(list)) = expression_cell.value.as_ref() else {
         panic!("the first cell must contain a list");
     };
     assert_eq!(list.muted.len(), 1);
-    assert_eq!(list.muted[0].kind(), SyntaxKind::MutedGroup);
 
-    let AnyCell::MutedCell(muted_cell) = &source_file.elements[1] else {
+    let AnyCell::MutedCell(_) = &source_file.elements[1] else {
         panic!("a global semicolon-terminated expression must reconstruct as MutedCell");
     };
-    assert_eq!(cell_kind(muted_cell), SyntaxKind::MutedCell);
 }
 
 #[test]
@@ -134,8 +124,8 @@ fn assignment_kind_is_specialized_by_its_left_child() {
 fn emitted_source_reparses_to_the_same_normal_form() {
     let source = "x + 1\ny + x * 2\nif y then return y else 0";
     let syntax = parse_file(source, SourceId(43)).unwrap();
-    let emitted = syntax.to_m2();
+    let emitted = syntax.to_code();
     let reparsed = parse_file(&emitted, SourceId(44)).unwrap();
 
-    assert_eq!(reparsed.to_m2(), emitted);
+    assert_eq!(reparsed.to_code(), emitted);
 }

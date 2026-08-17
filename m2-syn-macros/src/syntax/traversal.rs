@@ -48,6 +48,7 @@ impl Traversal {
         name: &Ident,
         fields: &[FieldDefinition],
         token_like: &BTreeSet<SyntaxTypeName>,
+        has_typed_delimiter: bool,
     ) -> TokenStream {
         let snake = to_snake_case(&name.to_string());
         match self {
@@ -97,7 +98,8 @@ impl Traversal {
                         .fold(quote!(node.#member));
                     quote!(#member: #value)
                 });
-                let folded = quote!(#name { #(#fields,)* span: node.span });
+                let delimiter = has_typed_delimiter.then(|| quote!(delimiter: node.delimiter,));
+                let folded = quote!(#name { #(#fields,)* #delimiter });
                 quote! {
                     pub fn #method<F>(folder: &mut F, node: #name) -> #name
                     where

@@ -1,11 +1,7 @@
 use m2_syn::visit::Visit;
-use m2_syn::{
-    AnyCell, CellNode, ParseError, SourceId, Symbol, SyntaxKind, ToTokens, parse_tokens, quote_m2,
-};
+use m2_syn::{AnyCell, CellNode, ParseError, SourceId, Symbol, ToTokens, parse_tokens, quote_m2};
 
-fn require_cell<T: CellNode>(cell: &T) -> SyntaxKind {
-    cell.kind()
-}
+fn require_cell<T: CellNode>(_cell: &T) {}
 
 #[derive(Default)]
 struct SymbolCollector {
@@ -26,13 +22,13 @@ fn main() -> Result<(), ParseError> {
     let AnyCell::ExpressionCell(cell) = &source_file.elements[0] else {
         panic!("quoted expression did not reconstruct as an ExpressionCell");
     };
-    assert_eq!(require_cell(cell), SyntaxKind::ExpressionCell);
+    require_cell(cell);
 
     let mut collector = SymbolCollector::default();
     collector.visit_source_file(&source_file);
 
     println!("hierarchy: CellNode -> ExpressionCell -> AnyCell -> SourceFile");
     println!("visited: {}", collector.symbols.join(", "));
-    print!("generated: {}", source_file.to_m2());
+    print!("generated: {}", source_file.to_code());
     Ok(())
 }

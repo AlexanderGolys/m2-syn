@@ -451,9 +451,6 @@ fn visit_bng_eql(&mut self, node: &'ast Token![!=]) {
         fn visit_symbol(&mut self, node: &'ast Symbol) {
             $crate::visit::visit_symbol(self, node);
         }
-        fn visit_keyword(&mut self, node: &'ast Keyword) {
-            $crate::visit::visit_keyword(self, node);
-        }
         fn visit_block_comment(&mut self, node: &'ast BlockComment) {
             $crate::visit::visit_block_comment(self, node);
         }
@@ -639,9 +636,6 @@ fn visit_bng_eql(&mut self, node: &'ast Token![!=]) {
         }
         fn visit_quote_specifier(&mut self, node: &'ast QuoteSpecifier) {
             $crate::visit::visit_quote_specifier(self, node);
-        }
-        fn visit_quote_value(&mut self, node: &'ast QuoteValue) {
-            $crate::visit::visit_quote_value(self, node);
         }
         fn visit_any_cell(&mut self, node: &'ast AnyCell) {
             $crate::visit::visit_any_cell(self, node);
@@ -1438,11 +1432,6 @@ pub fn visit_bng_eql<'ast, V>(_visitor: &mut V, _node: &'ast Token![!=])
             V: Visit<'ast> + ?Sized,
         {
         }
-        pub fn visit_keyword<'ast, V>(_visitor: &mut V, _node: &'ast Keyword)
-        where
-            V: Visit<'ast> + ?Sized,
-        {
-        }
         pub fn visit_block_comment<'ast, V>(_visitor: &mut V, _node: &'ast BlockComment)
         where
             V: Visit<'ast> + ?Sized,
@@ -1930,7 +1919,7 @@ pub fn visit_bng_eql<'ast, V>(_visitor: &mut V, _node: &'ast Token![!=])
             V: Visit<'ast> + ?Sized,
         {
             visitor.visit_quote_specifier(&node.specifier);
-            visitor.visit_quote_value((&node.token).as_ref());
+            visitor.visit_symbol((&node.token).as_ref());
         }
         pub fn visit_prefix_operator<'ast, V>(visitor: &mut V, node: &'ast PrefixOperator)
         where
@@ -2385,19 +2374,6 @@ pub fn visit_bng_eql<'ast, V>(_visitor: &mut V, _node: &'ast Token![!=])
                 }
                 QuoteSpecifier::ThreadLocal(node) => {
                     visitor.visit_thread_local_keyword(node);
-                }
-            }
-        }
-        pub fn visit_quote_value<'ast, V>(visitor: &mut V, node: &'ast QuoteValue)
-        where
-            V: Visit<'ast> + ?Sized,
-        {
-            match node {
-                QuoteValue::Keyword(node) => {
-                    visitor.visit_keyword(node);
-                }
-                QuoteValue::Symbol(node) => {
-                    visitor.visit_symbol(node);
                 }
             }
         }

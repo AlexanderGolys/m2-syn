@@ -1,16 +1,24 @@
+//! Native source-to-token conversion.
+//!
+//! This module owns byte classification, maximal munch, delimiter balancing,
+//! and top-level cell splitting. Its output uses only the shared raw atoms from
+//! `token_stream`; it never constructs a second lexer-specific token model.
+//! The private byte cursor provides arbitrary finite lookahead while pulling
+//! the underlying iterator lazily.
+
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::iter::Peekable;
 
+use crate::DoubleSpan;
 use crate::nodes::{
     GENERATED_OPERATOR_SPELLINGS, GENERATED_POSTFIX_OPERATOR_SPELLINGS,
     GENERATED_PUNCTUATION_SPELLINGS, canonical_keyword_spelling,
 };
+use crate::token_stream::delim::Delimiter;
 use crate::{
-    CellBlock, CellStream, Delimiter, DelimiterKind, DoubleSpan, Group, IdentToken, Literal,
-    LiteralKind, Punct, SourceId, Span, Spanned, TextPoint, TextRange, TokenStream, TokenTree,
-    Trivia, TriviaKind,
+    CellBlock, CellStream, DelimiterKind, Group, IdentToken, Literal, LiteralKind, Punct, SourceId,
+    Span, Spanned, TextPoint, TextRange, TokenStream, TokenTree, Trivia, TriviaKind,
 };
 
 const MAX_GROUP_DEPTH: usize = 256;
@@ -84,49 +92,44 @@ pub fn lex_str(source: &str, source_id: SourceId) -> Result<CellStream, LexError
     lex(source.bytes(), source_id)
 }
 
-/// A one-byte [`Peekable`] plus bytes tentatively consumed by maximal munch.
-/// Pending bytes have not advanced the source position and can be reconsidered
-/// when a shorter accepted token wins.
-struct ByteInput<I>
+/// A lazy cursor with arbitrary finite lookahead over a byte iterator.
+///
+/// Looking ahead only pulls enough bytes to answer the requested projection;
+/// advancing removes the first buffered byte. The lexer therefore never needs
+/// to tentatively consume and then push bytes back into its input.
+struct ByteCursor<I>
 where
     I: Iterator<Item = u8>,
 {
-    iterator: Peekable<I>,
-    pending: VecDeque<u8>,
+    iterator: I,
+    lookahead: VecDeque<u8>,
 }
 
-impl<I> ByteInput<I>
+impl<I> ByteCursor<I>
 where
     I: Iterator<Item = u8>,
 {
     fn new(iterator: I) -> Self {
         Self {
-            iterator: iterator.peekable(),
-            pending: VecDeque::new(),
+            iterator,
+            lookahead: VecDeque::new(),
         }
     }
 
-    fn peek(&mut self) -> Option<u8> {
-        self.pending
-            .front()
-            .copied()
-            .or_else(|| self.iterator.peek().copied())
-    }
-
-    fn pull(&mut self) -> Option<u8> {
-        self.pending.pop_front().or_else(|| self.iterator.next())
-    }
-
-    fn unread(&mut self, bytes: impl IntoIterator<Item = u8>) {
-        let bytes = bytes.into_iter().collect::<Vec<_>>();
-        for byte in bytes.into_iter().rev() {
-            self.pending.push_front(byte);
+    fn peek(&mut self, distance: usize) -> Option<u8> {
+        while self.lookahead.len() <= distance {
+            self.lookahead.push_back(self.iterator.next()?);
         }
+        self.lookahead.get(distance).copied()
+    }
+
+    fn next(&mut self) -> Option<u8> {
+        self.lookahead.pop_front().or_else(|| self.iterator.next())
     }
 }
 
 struct NativeLexer<I: Iterator<Item = u8>> {
-    input: ByteInput<I>,
+    input: ByteCursor<I>,
     source_id: SourceId,
     point: TextPoint,
 }
@@ -137,7 +140,7 @@ where
 {
     fn new(bytes: I, source_id: SourceId) -> Self {
         Self {
-            input: ByteInput::new(bytes),
+            input: ByteCursor::new(bytes),
             source_id,
             point: TextPoint::new(0, 0, 0),
         }
@@ -149,14 +152,21 @@ where
         let mut cell_start = self.point;
         let mut groups = Vec::<OpenGroup>::new();
         loop {
-            let Some(first) = self.input.peek() else {
+            let Some(first) = self.input.peek(0) else {
                 return match groups.last() {
                     Some(group) => {
                         Err(self.error(LexErrorKind::UnterminatedGroup, group.opening_start))
                     }
                     None => {
                         if !output.is_empty() {
-                            cells.push(CellBlock::new(output, self.span(cell_start, self.point)));
+                            let closing = self.span(self.point, self.point);
+                            self.finish_cell(
+                                &mut output,
+                                &mut cells,
+                                &mut cell_start,
+                                DelimiterKind::Empty,
+                                closing,
+                            );
                         }
                         Ok(CellStream::new(cells, self.source_id))
                     }
@@ -167,7 +177,14 @@ where
                 let top_level = groups.is_empty();
                 self.lex_line_break(&mut output)?;
                 if top_level && newline_ends_cell(&output) {
-                    self.finish_cell(&mut output, &mut cells, &mut cell_start);
+                    let closing = self.span(self.point, self.point);
+                    self.finish_cell(
+                        &mut output,
+                        &mut cells,
+                        &mut cell_start,
+                        DelimiterKind::Empty,
+                        closing,
+                    );
                 }
             } else if first == b'\r' {
                 self.lex_carriage_return(&mut output)?;
@@ -190,9 +207,19 @@ where
                 match punctuation.kind {
                     PunctuationKind::Ordinary => {
                         let ends_cell = groups.is_empty() && punctuation.bytes.as_slice() == b";";
-                        self.push_punctuation(punctuation.bytes, &mut output)?;
                         if ends_cell {
-                            self.finish_cell(&mut output, &mut cells, &mut cell_start);
+                            let closing_start = self.point;
+                            self.commit_bytes(&punctuation.bytes);
+                            let closing = self.span_from(closing_start);
+                            self.finish_cell(
+                                &mut output,
+                                &mut cells,
+                                &mut cell_start,
+                                DelimiterKind::Semicolon,
+                                closing,
+                            );
+                        } else {
+                            self.push_punctuation(punctuation.bytes, &mut output)?;
                         }
                     }
                     PunctuationKind::LineComment => {
@@ -204,7 +231,14 @@ where
                         self.lex_block_comment(punctuation.bytes, &mut output)?;
                         if top_level && self.point.line != start_line && newline_ends_cell(&output)
                         {
-                            self.finish_cell(&mut output, &mut cells, &mut cell_start);
+                            let closing = self.span(self.point, self.point);
+                            self.finish_cell(
+                                &mut output,
+                                &mut cells,
+                                &mut cell_start,
+                                DelimiterKind::Empty,
+                                closing,
+                            );
                         }
                     }
                     PunctuationKind::RawString => {
@@ -257,13 +291,13 @@ where
         let start = self.point;
         let first = self.next_or_error(LexErrorKind::InvalidCharacter, start)?;
         let mut bytes = vec![first];
-        if first == b'\r' && self.input.peek() == Some(b'\n') {
+        if first == b'\r' && self.input.peek(0) == Some(b'\n') {
             bytes.push(self.next_or_error(LexErrorKind::InvalidCharacter, start)?);
         }
         let text = self.text(bytes, start)?;
         let span = self.span_from(start);
         output.push(TokenTree::Trivia(Trivia::new(
-            TriviaKind::LineBreak,
+            TriviaKind::Whitespace,
             text,
             span,
         )));
@@ -275,7 +309,7 @@ where
         let byte = self.next_or_error(LexErrorKind::InvalidCharacter, start)?;
         let text = self.text(vec![byte], start)?;
         output.push(TokenTree::Trivia(Trivia::new(
-            TriviaKind::CarriageReturn,
+            TriviaKind::Whitespace,
             text,
             self.span_from(start),
         )));
@@ -298,7 +332,7 @@ where
         let start = self.point;
         let mut bytes = vec![self.next_or_error(LexErrorKind::InvalidUtf8, start)?];
         loop {
-            let Some(byte) = self.input.peek() else {
+            let Some(byte) = self.input.peek(0) else {
                 break;
             };
             if !is_identifier_continue(byte) || self.math_operator_width().is_some() {
@@ -319,7 +353,7 @@ where
         let mut bytes = Vec::new();
         let mut decimal = true;
 
-        if self.input.peek() == Some(b'0') {
+        if self.input.peek(0) == Some(b'0') {
             bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
             if let Some(radix) = self.number_radix() {
                 decimal = false;
@@ -332,28 +366,28 @@ where
             bytes.extend(self.take_while(|byte| byte.is_ascii_digit()));
         }
 
-        let next = self.input.peek();
+        let next = self.input.peek(0);
         let begins_float = decimal
             && (next == Some(b'.') && self.byte_after_current() != Some(b'.')
                 || matches!(next, Some(b'p' | b'e' | b'E')));
         let kind = if begins_float {
-            if self.input.peek() == Some(b'.') {
+            if self.input.peek(0) == Some(b'.') {
                 bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
                 bytes.extend(self.take_while(|byte| byte.is_ascii_digit()));
             }
-            if self.input.peek() == Some(b'p') {
+            if self.input.peek(0) == Some(b'p') {
                 bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
-                if !self.input.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                if !self.input.peek(0).is_some_and(|byte| byte.is_ascii_digit()) {
                     return Err(self.error(LexErrorKind::InvalidNumber, start));
                 }
                 bytes.extend(self.take_while(|byte| byte.is_ascii_digit()));
             }
-            if matches!(self.input.peek(), Some(b'e' | b'E')) {
+            if matches!(self.input.peek(0), Some(b'e' | b'E')) {
                 bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
-                if matches!(self.input.peek(), Some(b'+' | b'-')) {
+                if matches!(self.input.peek(0), Some(b'+' | b'-')) {
                     bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
                 }
-                if !self.input.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+                if !self.input.peek(0).is_some_and(|byte| byte.is_ascii_digit()) {
                     return Err(self.error(LexErrorKind::InvalidNumber, start));
                 }
                 bytes.extend(self.take_while(|byte| byte.is_ascii_digit()));
@@ -373,9 +407,8 @@ where
     }
 
     fn number_radix(&mut self) -> Option<NumberRadix> {
-        let marker = self.input.pull()?;
-        let digit = self.input.peek();
-        self.input.unread([marker]);
+        let marker = self.input.peek(0)?;
+        let digit = self.input.peek(1);
         match marker {
             b'b' | b'B' if digit.is_some_and(|byte| NumberRadix::Binary.is_digit(byte)) => {
                 Some(NumberRadix::Binary)
@@ -395,7 +428,7 @@ where
         let mut bytes = vec![self.next_or_error(LexErrorKind::UnterminatedString, start)?];
 
         loop {
-            match self.input.peek() {
+            match self.input.peek(0) {
                 None => return Err(self.error(LexErrorKind::UnterminatedString, start)),
                 Some(b'"') => {
                     bytes.push(self.next_or_error(LexErrorKind::UnterminatedString, start)?);
@@ -410,7 +443,7 @@ where
                 Some(b'\\') => {
                     let escape_start = self.point;
                     bytes.push(self.next_or_error(LexErrorKind::UnterminatedString, start)?);
-                    let Some(escaped) = self.input.peek() else {
+                    let Some(escaped) = self.input.peek(0) else {
                         return Err(self.error(LexErrorKind::UnterminatedString, start));
                     };
                     bytes.push(self.next_or_error(LexErrorKind::UnterminatedString, start)?);
@@ -419,7 +452,7 @@ where
                         | b'\\' => {}
                         b'0'..=b'7' => {
                             for _ in 0..2 {
-                                if !matches!(self.input.peek(), Some(b'0'..=b'7')) {
+                                if !matches!(self.input.peek(0), Some(b'0'..=b'7')) {
                                     break;
                                 }
                                 bytes.push(
@@ -446,7 +479,7 @@ where
         for _ in 0..digits {
             if !self
                 .input
-                .peek()
+                .peek(0)
                 .is_some_and(|byte| byte.is_ascii_hexdigit())
             {
                 return Err(self.error(LexErrorKind::InvalidEscape, start));
@@ -466,10 +499,10 @@ where
         let mut bytes = opener;
 
         loop {
-            if self.input.peek().is_none() {
+            if self.input.peek(0).is_none() {
                 return Err(self.error(LexErrorKind::UnterminatedRawString, start));
             }
-            if self.input.peek() == Some(b'/') {
+            if self.input.peek(0) == Some(b'/') {
                 match self.slash_run_len() {
                     3 => {
                         bytes.extend(self.take_exact(3, start)?);
@@ -502,7 +535,7 @@ where
         self.commit_bytes(&opener);
         let mut bytes = opener;
         loop {
-            match self.input.peek() {
+            match self.input.peek(0) {
                 None | Some(b'\n') => break,
                 Some(b'\r') if self.byte_after_current() == Some(b'\n') => break,
                 Some(_) => bytes.push(self.next_or_error(LexErrorKind::InvalidCharacter, start)?),
@@ -526,10 +559,10 @@ where
         self.commit_bytes(&opener);
         let mut bytes = opener;
         loop {
-            if self.input.peek().is_none() {
+            if self.input.peek(0).is_none() {
                 return Err(self.error(LexErrorKind::UnterminatedBlockComment, start));
             }
-            if self.input.peek() == Some(b'*') && self.byte_after_current() == Some(b'-') {
+            if self.input.peek(0) == Some(b'*') && self.byte_after_current() == Some(b'-') {
                 bytes.extend(self.take_exact(2, start)?);
                 let text = self.text(bytes, start)?;
                 output.push(TokenTree::Trivia(Trivia::new(
@@ -566,51 +599,43 @@ where
                 .map(|spelling| (spelling.as_bytes(), PunctuationKind::Ordinary)),
         );
 
-        let mut bytes = Vec::new();
         let mut accepted = None;
+        let mut distance = 0;
         loop {
-            let Some(next) = self.input.peek() else {
+            let Some(next) = self.input.peek(distance) else {
                 break;
             };
             if !candidates
                 .iter()
-                .any(|(spelling, _)| spelling.get(bytes.len()) == Some(&next))
+                .any(|(spelling, _)| spelling.get(distance) == Some(&next))
             {
                 break;
             }
-            let Some(byte) = self.input.pull() else {
-                break;
-            };
-            bytes.push(byte);
-            candidates.retain(|(spelling, _)| spelling.starts_with(&bytes));
+            distance += 1;
+            candidates.retain(|(spelling, _)| spelling.get(distance - 1) == Some(&next));
             for (spelling, kind) in &candidates {
-                if spelling.len() == bytes.len() {
-                    accepted = Some((bytes.len(), *kind));
+                if spelling.len() == distance {
+                    accepted = Some((distance, *kind));
                 }
             }
         }
 
-        let Some((accepted_len, kind)) = accepted else {
-            self.input.unread(bytes);
-            return None;
-        };
-        let suffix = bytes.split_off(accepted_len);
-        self.input.unread(suffix);
+        let (accepted_len, kind) = accepted?;
+        let bytes = (0..accepted_len)
+            .map(|_| self.input.next().expect("accepted bytes were buffered"))
+            .collect();
         Some(PunctuationMatch { bytes, kind })
     }
 
     fn math_operator_width(&mut self) -> Option<usize> {
-        let first = self.input.peek()?;
+        let first = self.input.peek(0)?;
         if !matches!(first, 0xc2 | 0xc3 | 0xe2) {
             return None;
         }
-        let first = self.input.pull()?;
-        let second = self.input.pull();
-        let result = second
+        self.input
+            .peek(1)
             .filter(|second| is_math_operator_pair(first, *second))
-            .and_then(|_| utf8_char_width(first));
-        self.input.unread([first].into_iter().chain(second));
-        result
+            .and_then(|_| utf8_char_width(first))
     }
 
     fn lex_math_operator(
@@ -620,7 +645,7 @@ where
     ) -> Result<(), LexError> {
         let start = self.point;
         let mut bytes = self.pull_exact(width, start)?;
-        if self.input.peek() == Some(b'=') {
+        if self.input.peek(0) == Some(b'=') {
             bytes.push(self.pull_or_error(LexErrorKind::InvalidUtf8, start)?);
         }
         self.push_punctuation(bytes, output)
@@ -639,28 +664,20 @@ where
     }
 
     fn byte_after_current(&mut self) -> Option<u8> {
-        let current = self.input.pull()?;
-        let next = self.input.peek();
-        self.input.unread([current]);
-        next
+        self.input.peek(1)
     }
 
     fn slash_run_len(&mut self) -> usize {
-        let mut slashes = Vec::new();
-        while slashes.len() < 4 && self.input.peek() == Some(b'/') {
-            let Some(slash) = self.input.pull() else {
-                break;
-            };
-            slashes.push(slash);
+        let mut len = 0;
+        while len < 4 && self.input.peek(len) == Some(b'/') {
+            len += 1;
         }
-        let len = slashes.len();
-        self.input.unread(slashes);
         len
     }
 
     fn take_while(&mut self, predicate: impl Fn(u8) -> bool) -> Vec<u8> {
         let mut bytes = Vec::new();
-        while self.input.peek().is_some_and(&predicate) {
+        while self.input.peek(0).is_some_and(&predicate) {
             let Some(byte) = self.next() else {
                 break;
             };
@@ -683,7 +700,7 @@ where
     fn pull_exact(&mut self, len: usize, start: TextPoint) -> Result<Vec<u8>, LexError> {
         let mut bytes = Vec::with_capacity(len);
         for _ in 0..len {
-            let Some(byte) = self.input.pull() else {
+            let Some(byte) = self.input.next() else {
                 return Err(self.error(LexErrorKind::InvalidUtf8, start));
             };
             bytes.push(byte);
@@ -692,8 +709,8 @@ where
     }
 
     fn next(&mut self) -> Option<u8> {
-        let byte = self.input.pull()?;
-        let next = (byte == b'\r').then(|| self.input.peek()).flatten();
+        let byte = self.input.next()?;
+        let next = (byte == b'\r').then(|| self.input.peek(0)).flatten();
         self.advance(byte, next);
         Some(byte)
     }
@@ -706,7 +723,7 @@ where
     }
 
     fn pull_or_error(&mut self, kind: LexErrorKind, start: TextPoint) -> Result<u8, LexError> {
-        match self.input.pull() {
+        match self.input.next() {
             Some(byte) => Ok(byte),
             None => Err(self.error(kind, start)),
         }
@@ -715,7 +732,7 @@ where
     fn commit_bytes(&mut self, bytes: &[u8]) {
         for (index, byte) in bytes.iter().copied().enumerate() {
             let next = (byte == b'\r')
-                .then(|| bytes.get(index + 1).copied().or_else(|| self.input.peek()))
+                .then(|| bytes.get(index + 1).copied().or_else(|| self.input.peek(0)))
                 .flatten();
             self.advance(byte, next);
         }
@@ -749,7 +766,7 @@ where
     }
 
     fn span(&self, start: TextPoint, end: TextPoint) -> Span {
-        Span::located(self.source_id, TextRange { start, end })
+        Span::new(self.source_id, TextRange::new(start, end))
     }
 
     fn finish_cell(
@@ -757,9 +774,15 @@ where
         output: &mut TokenStream,
         cells: &mut Vec<CellBlock>,
         cell_start: &mut TextPoint,
+        kind: DelimiterKind,
+        closing: Span,
     ) {
         let stream = std::mem::take(output);
-        cells.push(CellBlock::new(stream, self.span(*cell_start, self.point)));
+        let opening = self.span(*cell_start, *cell_start);
+        cells.push(CellBlock::new(
+            Delimiter::new(kind, DoubleSpan::new(opening, closing)),
+            stream,
+        ));
         *cell_start = self.point;
     }
 }
@@ -894,6 +917,7 @@ struct OpenGroup {
     parent: TokenStream,
 }
 
+// @##incorrect strings and comments are not punctuation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PunctuationKind {
     Ordinary,
@@ -935,6 +959,7 @@ fn is_identifier_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'$' | b'\'') || byte >= 128
 }
 
+// @##unreadable_code
 fn is_math_operator_pair(first: u8, second: u8) -> bool {
     let pair = u16::from(first) << 8 | u16::from(second);
     pair & 0xffe0 == 0xc2a0
@@ -973,22 +998,22 @@ mod tests {
     }
 
     #[test]
-    fn byte_input_uses_one_byte_peek_and_pending_state() {
+    fn byte_cursor_supports_lazy_arbitrary_finite_lookahead() {
         let reads = CounterCell::new(0);
         let iterator = [b'a', b'b', b'c'].into_iter().inspect(|_| {
             reads.set(reads.get() + 1);
         });
-        let mut input = ByteInput::new(iterator);
+        let mut input = ByteCursor::new(iterator);
 
-        assert_eq!(input.peek(), Some(b'a'));
+        assert_eq!(input.peek(0), Some(b'a'));
         assert_eq!(reads.get(), 1);
-        assert_eq!(input.pull(), Some(b'a'));
-        assert_eq!(input.pull(), Some(b'b'));
-        input.unread([b'a', b'b']);
-        assert_eq!(input.pull(), Some(b'a'));
-        assert_eq!(input.pull(), Some(b'b'));
-        assert_eq!(input.peek(), Some(b'c'));
+        assert_eq!(input.peek(2), Some(b'c'));
         assert_eq!(reads.get(), 3);
+        assert_eq!(input.next(), Some(b'a'));
+        assert_eq!(input.peek(0), Some(b'b'));
+        assert_eq!(input.next(), Some(b'b'));
+        assert_eq!(input.next(), Some(b'c'));
+        assert_eq!(input.next(), None);
     }
 
     #[test]
@@ -1074,7 +1099,8 @@ mod tests {
                 TokenTree::Trivia(newline),
                 TokenTree::Trivia(block),
             ] if line.kind() == TriviaKind::LineComment
-                && newline.kind() == TriviaKind::LineBreak
+                && newline.kind() == TriviaKind::Whitespace
+                && newline.contains_line_break()
                 && block.kind() == TriviaKind::BlockComment
         ));
     }
@@ -1086,11 +1112,11 @@ mod tests {
         assert!(matches!(
             trees.as_slice(),
             [
-                TokenTree::Punct(first),
-                TokenTree::Punct(second),
+                first,
+                second,
                 TokenTree::Literal(integer),
-            ] if first.text() == "**"
-                && second.text() == "*"
+            ] if first.spelling() == Some("**")
+                && second.spelling() == Some("*")
                 && integer.kind == LiteralKind::Integer
                 && integer.text() == "1"
         ));
@@ -1121,8 +1147,8 @@ mod tests {
         let trees = underscored.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
-            [TokenTree::Punct(underscore), TokenTree::Ident(name)]
-                if underscore.text() == "_" && name.text() == "name"
+            [underscore, TokenTree::Ident(name)]
+                if underscore.spelling() == Some("_") && name.text() == "name"
         ));
 
         let unicode = tokens("éλ🐻");
@@ -1137,9 +1163,11 @@ mod tests {
             trees.as_slice(),
             [
                 TokenTree::Ident(alpha),
-                TokenTree::Punct(operator),
+                operator,
                 TokenTree::Ident(beta),
-            ] if alpha.text() == "α" && operator.text() == "⊠" && beta.text() == "β"
+            ] if alpha.text() == "α"
+                && operator.spelling() == Some("⊠")
+                && beta.text() == "β"
         ));
     }
 
@@ -1186,18 +1214,19 @@ mod tests {
         assert!(matches!(
             trees.as_slice(),
             [
-                TokenTree::Punct(increment),
+                increment,
                 TokenTree::Ident(identifier),
                 TokenTree::Trivia(space),
-                TokenTree::Punct(first_plus),
+                first_plus,
                 TokenTree::Trivia(newline),
-                TokenTree::Punct(second_plus),
-            ] if increment.text() == "++"
+                second_plus,
+            ] if increment.spelling() == Some("++")
                 && identifier.text() == "x"
                 && space.kind() == TriviaKind::Whitespace
-                && first_plus.text() == "+"
-                && newline.kind() == TriviaKind::LineBreak
-                && second_plus.text() == "+"
+                && first_plus.spelling() == Some("+")
+                && newline.kind() == TriviaKind::Whitespace
+                && newline.contains_line_break()
+                && second_plus.spelling() == Some("+")
         ));
     }
 
@@ -1249,10 +1278,10 @@ mod tests {
         assert_eq!(parenthesized.delim_kind(), DelimiterKind::Parenthesis);
 
         let spans = parenthesized.double_span();
-        assert_eq!(spans.span_open.range().unwrap().start.byte, 0);
-        assert_eq!(spans.span_open.range().unwrap().end.byte, 1);
-        assert_eq!(spans.span_close.range().unwrap().start.byte, 14);
-        assert_eq!(spans.span_close.range().unwrap().end.byte, 15);
+        assert_eq!(spans.span_open.start_point().unwrap().byte, 0);
+        assert_eq!(spans.span_open.end_point().unwrap().byte, 1);
+        assert_eq!(spans.span_close.start_point().unwrap().byte, 14);
+        assert_eq!(spans.span_close.end_point().unwrap().byte, 15);
 
         let bracketed = parenthesized
             .stream()
@@ -1267,9 +1296,8 @@ mod tests {
             bracketed
                 .double_span()
                 .span_open
-                .range()
+                .start_point()
                 .unwrap()
-                .start
                 .byte,
             4
         );
@@ -1277,9 +1305,8 @@ mod tests {
             bracketed
                 .double_span()
                 .span_close
-                .range()
+                .start_point()
                 .unwrap()
-                .start
                 .byte,
             13
         );
@@ -1294,10 +1321,10 @@ mod tests {
             .unwrap();
         assert_eq!(angle_bar.delim_kind(), DelimiterKind::AngleBar);
         let spans = angle_bar.double_span();
-        assert_eq!(spans.span_open.range().unwrap().start.byte, 8);
-        assert_eq!(spans.span_open.range().unwrap().end.byte, 10);
-        assert_eq!(spans.span_close.range().unwrap().start.byte, 11);
-        assert_eq!(spans.span_close.range().unwrap().end.byte, 13);
+        assert_eq!(spans.span_open.start_point().unwrap().byte, 8);
+        assert_eq!(spans.span_open.end_point().unwrap().byte, 10);
+        assert_eq!(spans.span_close.start_point().unwrap().byte, 11);
+        assert_eq!(spans.span_close.end_point().unwrap().byte, 13);
     }
 
     #[test]
@@ -1306,7 +1333,7 @@ mod tests {
         let trees = graded.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
-            [TokenTree::Punct(graded)] if graded.text() == "(*)"
+            [graded] if graded.spelling() == Some("(*)")
         ));
 
         let grouped = tokens("(*x)");
@@ -1345,11 +1372,11 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(range.start, TextPoint::new(1, 0, 3));
-        assert_eq!(range.end, TextPoint::new(1, 1, 4));
+        assert_eq!(range.start(), Some(TextPoint::new(1, 0, 3)));
+        assert_eq!(range.end(), Some(TextPoint::new(1, 1, 4)));
 
         let error = lex_str("-* x\r\n", SourceId(11)).unwrap_err();
-        assert_eq!(error.span().range().unwrap().end, TextPoint::new(1, 0, 6));
+        assert_eq!(error.span().end_point().unwrap(), TextPoint::new(1, 0, 6));
     }
 
     #[test]

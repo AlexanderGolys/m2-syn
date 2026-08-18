@@ -11,8 +11,8 @@ use std::vec::IntoIter;
 
 use crate::{
     CSTNodeClassLabel, CellStream, ExternalCstChild, ExternalCstNode, LexError, Parser,
-    ReconstructError, SourceFile, SourceId, Span, TextPoint, TextRange, TokenStream, lex_str,
-    reconstruct,
+    ReconstructError, SourceFile, SourceId, Span, Spanned, TextPoint, TextRange, TokenStream,
+    lex_str, reconstruct,
 };
 
 #[derive(Debug)]
@@ -83,7 +83,7 @@ impl TreeSitterParser {
 impl Parser for TreeSitterParser {
     type Error = ParseError;
 
-    fn parse(&mut self, tokens: CellStream) -> Result<SourceFile, Self::Error> {
+    fn parse_cells(&mut self, tokens: CellStream) -> Result<SourceFile, Self::Error> {
         let source_id = tokens.source_id();
         let source = tokens.to_string();
         let tree = self
@@ -106,7 +106,7 @@ impl Parser for TreeSitterParser {
 
 pub fn parse_file(source: &str, source_id: SourceId) -> Result<SourceFile, ParseError> {
     let mut parser = TreeSitterParser::new()?;
-    parser.parse(lex_str(source, source_id)?)
+    parser.parse_cells(lex_str(source, source_id)?)
 }
 
 /// Parses an emitted M2 token stream into the complete typed source file.
@@ -193,6 +193,12 @@ impl ExternalCstNode for TreeSitterNode<'_, '_> {
         String::from_utf8_lossy(&self.source[self.normalized_node().byte_range()])
     }
 
+    fn is_extra(&self) -> bool {
+        self.node.is_extra()
+    }
+}
+
+impl Spanned for TreeSitterNode<'_, '_> {
     fn span(&self) -> Span {
         let node = self.normalized_node();
         let range = TextRange::new(
@@ -208,9 +214,5 @@ impl ExternalCstNode for TreeSitterNode<'_, '_> {
             ),
         );
         Span::new(self.source_id, range)
-    }
-
-    fn is_extra(&self) -> bool {
-        self.node.is_extra()
     }
 }

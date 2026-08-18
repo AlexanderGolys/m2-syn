@@ -5,9 +5,11 @@ mod syntax;
 mod tokens;
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Error, Fields, Member, Result, parse_macro_input};
+use std::collections::BTreeSet;
+
+use proc_macro2::{TokenStream as TokenStream2, TokenTree};
+use quote::{ToTokens, format_ident, quote};
+use syn::{Data, DeriveInput, Error, Fields, Member, Result, Type, parse_macro_input, parse_quote};
 
 #[proc_macro]
 pub fn syntax(input: TokenStream) -> TokenStream {
@@ -18,16 +20,22 @@ pub fn syntax(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
+/// Constructs an M2 token stream with recursive Rust interpolation.
+///
+/// `$(expression)` emits any value implementing `m2_syn::ToTokens`.
+/// `$[pattern in iterator] { template }` repeats a recursively quoted template
+/// with an explicit Rust `for` loop.
 pub fn quote_m2(input: TokenStream) -> TokenStream {
     quote_m2::expand(input)
 }
 
 #[proc_macro]
+/// Quotes M2 syntax and parses it as the type inferred at the call site.
 pub fn parse_quote_m2(input: TokenStream) -> TokenStream {
     let input = TokenStream2::from(input);
     quote!({
         let tokens = ::m2_syn::quote_m2!(#input);
-        ::m2_syn::parse2(tokens).expect("parse_quote_m2! input should parse")
+        ::m2_syn::parse1(tokens).expect("parse_quote_m2! input should parse")
     })
     .into()
 }
@@ -64,7 +72,22 @@ fn expand_spanned_members(
 fn expand_spanned(input: &DeriveInput) -> Result<TokenStream2> {
     let name = &input.ident;
     let span_ty = quote! {::m2_syn::Span};
-    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+    let mut generics = input.generics.clone();
+    let type_parameters = input
+        .generics
+        .type_params()
+        .map(|parameter| parameter.ident.to_string())
+        .collect::<BTreeSet<_>>();
+    for ty in spanned_field_types(input)
+        .into_iter()
+        .filter(|ty| type_mentions_parameter(ty, &type_parameters))
+    {
+        generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#ty: ::m2_syn::Spanned));
+    }
+    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     let body = match &input.data {
         Data::Struct(data) => {
             let members = data.fields.members().map(|member| {
@@ -135,4 +158,38 @@ fn expand_spanned(input: &DeriveInput) -> Result<TokenStream2> {
             }
         }
     })
+}
+
+fn type_mentions_parameter(ty: &Type, parameters: &BTreeSet<String>) -> bool {
+    fn stream_mentions_parameter(stream: TokenStream2, parameters: &BTreeSet<String>) -> bool {
+        stream.into_iter().any(|token| match token {
+            TokenTree::Ident(ident) => parameters.contains(&ident.to_string()),
+            TokenTree::Group(group) => stream_mentions_parameter(group.stream(), parameters),
+            TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+        })
+    }
+
+    stream_mentions_parameter(ty.to_token_stream(), parameters)
+}
+
+fn spanned_field_types(input: &DeriveInput) -> Vec<&Type> {
+    fn selected(fields: &Fields) -> Vec<&Type> {
+        fields
+            .iter()
+            .find(|field| field.ident.as_ref().is_some_and(|ident| ident == "span"))
+            .map_or_else(
+                || fields.iter().map(|field| &field.ty).collect(),
+                |field| vec![&field.ty],
+            )
+    }
+
+    match &input.data {
+        Data::Struct(data) => selected(&data.fields),
+        Data::Enum(data) => data
+            .variants
+            .iter()
+            .flat_map(|variant| selected(&variant.fields))
+            .collect(),
+        Data::Union(_) => Vec::new(),
+    }
 }

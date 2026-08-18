@@ -9,30 +9,32 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::option::Option;
 
-use crate::nodes::canonical_keyword_spelling;
+use crate::lexer::canonical_keyword_spelling;
 use crate::parse::{Lookahead, SignificantToken};
 use crate::{
     AngleBarList, AnyCell, Array, Assignment, AssignmentExpr, BinaryAssignment, BinaryExpression,
     BinaryInstallation, BinaryOperator, BindingPack, BreakStatement, CatchStatement, CellStream,
-    Collection, Component, ContinueStatement, DebugClause, DebugKeyword, ElseClause,
+    Collection, Component, ContinueStatement, DebugClause, DebugKeyword, DelimiterKind, ElseClause,
     EmptyComponent, EvaluatedAssignment, ExceptClause, Expr, ExpressionCell, FloatLiteral, ForLoop,
     IfStatement, IntegerLiteral, IterationRange, LambdaExpression, LambdaParameters, LexError,
     List, LiteralKind, LocalAssignment, LocalStructuredBinding, LoopBody, MutedCell, MutedGroup,
-    NakedSequence, NewStatement, OperatorExpr, OptionExpression, ParenthesizedExpression,
-    ParseStream, Parser, PostfixAssignment, PostfixExpression, PostfixInstallation,
-    PostfixOperator, PrefixAssignment, PrefixExpression, PrefixInstallation, PrefixOperator,
+    NakedSequence, NewStatement, OperatorExpr, OptionExpression, PREC_APPLICATION,
+    PREC_APPLICATION_RIGHT, PREC_CLOSER, PREC_COLLECTION, PREC_COMMA, PREC_CONTROL,
+    PREC_LOOP_CLAUSE, PREC_QUOTE, PREC_SEMICOLON, ParenthesizedExpression, Parse, ParseStream,
+    Parser, PostfixAssignment, PostfixExpression, PostfixInstallation, PostfixOperator,
+    PrefixAssignment, PrefixExpression, PrefixInstallation, PrefixOperator, Punctuated,
     QuoteExpression, QuoteSpecifier, RawStringContent, RawStringElement, RawStringLiteral,
     ReturnStatement, Sequence, SequenceCell, SourceFile, SourceId, Span, Spanned, StringContent,
     StringElement, StringLiteral, StructuredBinding, Symbol, ThenClause, ThrowStatement,
-    TokenStream, TokenTree, TrapStatement, TryFallback, TryStatement, WhileLoop, lex_str,
+    TokenParseError, TokenStream, TokenTree, TrapStatement, TryFallback, TryStatement, WhileLoop,
+    lex_str,
 };
 
-const PREC_CLOSER: u8 = 6;
-const PREC_SEMICOLON: u8 = 8;
-const PREC_COMMA: u8 = 10;
-const PREC_CONTROL: u8 = 12;
-const PREC_LOOP_CLAUSE: u8 = 16;
-const PREC_SPACE: u8 = 62;
+macro_rules! is_token {
+    ($token:expr, $($pattern:tt)*) => {
+        <Token![$($pattern)*] as crate::Token>::matches_token_tree($token)
+    };
+}
 
 /// The built-in parser implemented directly from Macaulay2's `P/B/U` table.
 #[derive(Debug, Default)]
@@ -47,17 +49,17 @@ impl NativeParser {
 impl Parser for NativeParser {
     type Error = NativeParseError;
 
-    fn parse(&mut self, tokens: CellStream) -> Result<SourceFile, Self::Error> {
+    fn parse_cells(&mut self, tokens: CellStream) -> Result<SourceFile, Self::Error> {
         parse_cells(tokens)
     }
 }
 
 pub fn parse_native(source: &str, source_id: SourceId) -> Result<SourceFile, NativeParseError> {
     let tokens = lex_str(source, source_id).map_err(NativeParseError::Lex)?;
-    NativeParser.parse(tokens)
+    NativeParser.parse_cells(tokens)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Spanned)]
 pub enum NativeParseError {
     Lex(LexError),
     Unexpected {
@@ -122,20 +124,6 @@ impl Error for NativeParseError {
     }
 }
 
-impl Spanned for NativeParseError {
-    fn span(&self) -> Span {
-        match self {
-            Self::Lex(error) => error.span(),
-            Self::Unexpected { span, .. }
-            | Self::MissingOperand { span, .. }
-            | Self::NewlineInApplication { span }
-            | Self::InvalidAssignmentTarget { span }
-            | Self::InvalidLambdaParameters { span }
-            | Self::Unsupported { span, .. } => *span,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 /// Parser-local instruction for interpreting a token in unary position.
 ///
@@ -145,44 +133,11 @@ impl Spanned for NativeParseError {
 enum UnaryAction {
     Atom,
     Prefix,
-    Statement(PrefixStatementKind),
-    If,
-    For,
-    While,
-    Try,
-    New,
+    Statement,
+    Control,
     Debug,
     Delimiter,
     Quote,
-    Error,
-}
-
-#[derive(Debug, Clone, Copy)]
-/// Parser-local selector for the prefix-statement routine.
-///
-/// Each variant corresponds to a generated `Token![..]` atom. The enum exists
-/// only to share operand parsing before the raw token is refined to its typed
-/// token and placed in the resulting CST node.
-enum PrefixStatementKind {
-    Break,
-    Continue,
-    Return,
-    Catch,
-    Throw,
-    Trap,
-}
-
-impl PrefixStatementKind {
-    fn value_is_optional(self) -> bool {
-        matches!(self, Self::Break | Self::Continue | Self::Return)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum BinaryAction {
-    Adjacent,
-    Binary,
-    Postfix,
     Error,
 }
 
@@ -192,7 +147,7 @@ struct ParseInfo {
     binary_strength: Option<u8>,
     unary_strength: Option<u8>,
     unary: UnaryAction,
-    binary: BinaryAction,
+    postfix: bool,
 }
 
 impl ParseInfo {
@@ -202,7 +157,7 @@ impl ParseInfo {
             binary_strength: None,
             unary_strength: None,
             unary: UnaryAction::Atom,
-            binary: BinaryAction::Adjacent,
+            postfix: false,
         }
     }
 
@@ -212,7 +167,7 @@ impl ParseInfo {
             binary_strength: Some(strength),
             unary_strength: None,
             unary: UnaryAction::Error,
-            binary: BinaryAction::Binary,
+            postfix: false,
         }
     }
 
@@ -222,7 +177,7 @@ impl ParseInfo {
             binary_strength: Some(binary_strength),
             unary_strength: Some(unary_strength),
             unary: UnaryAction::Prefix,
-            binary: BinaryAction::Binary,
+            postfix: false,
         }
     }
 
@@ -232,27 +187,37 @@ impl ParseInfo {
             binary_strength: None,
             unary_strength: Some(unary_strength),
             unary: UnaryAction::Prefix,
-            binary: BinaryAction::Adjacent,
+            postfix: false,
         }
     }
 
-    const fn statement(kind: PrefixStatementKind) -> Self {
+    const fn statement() -> Self {
         Self {
-            precedence: PREC_SPACE,
+            precedence: PREC_APPLICATION,
             binary_strength: None,
             unary_strength: Some(PREC_CONTROL),
-            unary: UnaryAction::Statement(kind),
-            binary: BinaryAction::Adjacent,
+            unary: UnaryAction::Statement,
+            postfix: false,
         }
     }
 
-    const fn control(unary: UnaryAction, unary_strength: u8) -> Self {
+    const fn control(unary_strength: u8) -> Self {
         Self {
-            precedence: PREC_SPACE,
+            precedence: PREC_APPLICATION,
             binary_strength: None,
             unary_strength: Some(unary_strength),
-            unary,
-            binary: BinaryAction::Adjacent,
+            unary: UnaryAction::Control,
+            postfix: false,
+        }
+    }
+
+    const fn debug() -> Self {
+        Self {
+            precedence: PREC_APPLICATION,
+            binary_strength: None,
+            unary_strength: Some(PREC_CONTROL),
+            unary: UnaryAction::Debug,
+            postfix: false,
         }
     }
 
@@ -262,7 +227,7 @@ impl ParseInfo {
             binary_strength: None,
             unary_strength: None,
             unary: UnaryAction::Error,
-            binary: BinaryAction::Postfix,
+            postfix: true,
         }
     }
 
@@ -272,7 +237,7 @@ impl ParseInfo {
             binary_strength: None,
             unary_strength: Some(PREC_CLOSER),
             unary: UnaryAction::Delimiter,
-            binary: BinaryAction::Adjacent,
+            postfix: false,
         }
     }
 
@@ -282,7 +247,17 @@ impl ParseInfo {
             binary_strength: None,
             unary_strength: None,
             unary: UnaryAction::Error,
-            binary: BinaryAction::Error,
+            postfix: false,
+        }
+    }
+
+    const fn quote(precedence: u8, unary_strength: u8) -> Self {
+        Self {
+            precedence,
+            binary_strength: None,
+            unary_strength: Some(unary_strength),
+            unary: UnaryAction::Quote,
+            postfix: false,
         }
     }
 }
@@ -305,11 +280,11 @@ impl Engine {
         self.skip_trivia();
         if matches!(self.peek(), Lookahead::End(_)) {
             return match delimiter.kind {
-                crate::DelimiterKind::Empty => Ok(None),
-                crate::DelimiterKind::Semicolon => Err(NativeParseError::Unexpected {
+                DelimiterKind::Empty => Ok(None),
+                DelimiterKind::Semicolon => Err(NativeParseError::Unexpected {
                     found: ";".into(),
                     expected: "a statement before `;`",
-                    span: delimiter.span2.span_close,
+                    span: delimiter.closing_span(),
                 }),
                 _ => Err(NativeParseError::Unexpected {
                     found: delimiter.kind.to_string(),
@@ -326,14 +301,14 @@ impl Engine {
         }
 
         let cell = match delimiter.kind {
-            crate::DelimiterKind::Semicolon => AnyCell::MutedCell(MutedCell::new(
+            DelimiterKind::Semicolon => AnyCell::MutedCell(MutedCell::new(
                 components,
-                Token![;](delimiter.span2.span_close),
+                Token![;](delimiter.closing_span()),
             )),
-            crate::DelimiterKind::Empty if comma => {
+            DelimiterKind::Empty if comma => {
                 AnyCell::SequenceCell(SequenceCell::new(NakedSequence::new(components)))
             }
-            crate::DelimiterKind::Empty => {
+            DelimiterKind::Empty => {
                 let value = self.only_expression(components)?;
                 AnyCell::ExpressionCell(ExpressionCell::new(value))
             }
@@ -348,39 +323,27 @@ impl Engine {
         Ok(Some(cell))
     }
 
-    fn parse_components(&mut self) -> Result<(Vec<Component>, bool), NativeParseError> {
-        let mut elements = Vec::new();
+    fn parse_components(&mut self) -> Result<(Punctuated<Component>, bool), NativeParseError> {
+        if self.at_end() || self.at_punctuation(";") {
+            return Ok((Punctuated::new(), false));
+        }
+
+        let first = if self.at_punctuation(",") {
+            Component::EmptyComponent(EmptyComponent::new("", self.peek().span()))
+        } else {
+            Component::Expr(self.parse_required(PREC_COMMA)?)
+        };
+        let mut elements = Punctuated::from_value(first);
         let mut has_comma = false;
-        let mut needs_component = true;
 
-        loop {
-            if let Some(comma) = self.take_punctuation(",") {
-                if needs_component {
-                    elements.push(Component::EmptyComponent(EmptyComponent::new(
-                        "",
-                        comma.span(),
-                    )));
-                }
-                has_comma = true;
-                needs_component = true;
-                continue;
-            }
-
-            if self.at_end() || self.at_punctuation(";") {
-                if has_comma && needs_component {
-                    elements.push(Component::EmptyComponent(EmptyComponent::new(
-                        "",
-                        self.peek().span(),
-                    )));
-                }
-                break;
-            }
-
-            if !needs_component {
-                break;
-            }
-            elements.push(Component::Expr(self.parse_required(PREC_COMMA)?));
-            needs_component = false;
+        while let Some(comma) = self.take_punctuation(",") {
+            has_comma = true;
+            let next = if self.at_end() || self.at_punctuation(";") || self.at_punctuation(",") {
+                Component::EmptyComponent(EmptyComponent::new("", self.peek().span()))
+            } else {
+                Component::Expr(self.parse_required(PREC_COMMA)?)
+            };
+            elements.push(typed_token(comma), next);
         }
 
         Ok((elements, has_comma))
@@ -434,11 +397,14 @@ impl Engine {
                 })?;
                 PrefixExpression::new(operator, operand).into()
             }
-            UnaryAction::Statement(kind) => {
+            UnaryAction::Statement => {
                 let strength = info
                     .unary_strength
                     .expect("prefix statements have a unary binding strength");
-                let operand = if kind.value_is_optional() {
+                let operand = if is_token!(&token.token, break)
+                    || is_token!(&token.token, continue)
+                    || is_token!(&token.token, return)
+                {
                     self.parse_nullable(level.max(strength))?
                 } else {
                     self.parse_required(level.max(strength))
@@ -454,13 +420,23 @@ impl Engine {
                         })?
                         .into()
                 };
-                self.lower_prefix_statement(kind, token.token, operand)
+                self.lower_prefix_statement(token.token, operand)
             }
-            UnaryAction::If => self.parse_if_statement(token.token)?,
-            UnaryAction::For => self.parse_for_loop(token.token)?,
-            UnaryAction::While => self.parse_while_loop(token.token)?,
-            UnaryAction::Try => self.parse_try_statement(token.token)?,
-            UnaryAction::New => self.parse_new_statement(token.token)?,
+            UnaryAction::Control => {
+                if is_token!(&token.token, if) {
+                    self.parse_if_statement(token.token)?
+                } else if is_token!(&token.token, for) {
+                    self.parse_for_loop(token.token)?
+                } else if is_token!(&token.token, while) {
+                    self.parse_while_loop(token.token)?
+                } else if is_token!(&token.token, try) {
+                    self.parse_try_statement(token.token)?
+                } else if is_token!(&token.token, new) {
+                    self.parse_new_statement(token.token)?
+                } else {
+                    unreachable!("control actions are assigned only to control keywords")
+                }
+            }
             UnaryAction::Debug => self.parse_debug_clause(token.token)?,
             UnaryAction::Delimiter => self.parse_delimited(token.token)?,
             UnaryAction::Quote => {
@@ -471,14 +447,18 @@ impl Engine {
                         return Err(NativeParseError::MissingOperand { operator, span });
                     }
                 };
-                let specifier_spelling = parsing_spelling(&token.token).to_owned();
-                let specifier = match specifier_spelling.as_str() {
-                    "symbol" => QuoteSpecifier::Symbol(typed_token(token.token)),
-                    "local" => QuoteSpecifier::Local(typed_token(token.token)),
-                    "global" => QuoteSpecifier::Global(typed_token(token.token)),
-                    "threadVariable" => QuoteSpecifier::ThreadVariable(typed_token(token.token)),
-                    "threadLocal" => QuoteSpecifier::ThreadLocal(typed_token(token.token)),
-                    _ => unreachable!("quote actions are assigned to quote specifiers"),
+                let specifier = if is_token!(&token.token, symbol) {
+                    QuoteSpecifier::Symbol(typed_token(token.token))
+                } else if is_token!(&token.token, local) {
+                    QuoteSpecifier::Local(typed_token(token.token))
+                } else if is_token!(&token.token, global) {
+                    QuoteSpecifier::Global(typed_token(token.token))
+                } else if is_token!(&token.token, threadVariable) {
+                    QuoteSpecifier::ThreadVariable(typed_token(token.token))
+                } else if is_token!(&token.token, threadLocal) {
+                    QuoteSpecifier::ThreadLocal(typed_token(token.token))
+                } else {
+                    unreachable!("quote actions are assigned only to quote specifiers")
                 };
                 let quoted_span = quoted.span();
                 let Some(quoted_text) = token_spelling(&quoted).map(str::to_owned) else {
@@ -492,33 +472,33 @@ impl Engine {
         self.accumulate(result, level)
     }
 
-    fn lower_prefix_statement(
-        &self,
-        kind: PrefixStatementKind,
-        keyword: TokenTree,
-        value: Option<Expr>,
-    ) -> Expr {
-        match kind {
-            PrefixStatementKind::Break => BreakStatement::new(typed_token(keyword), value).into(),
-            PrefixStatementKind::Continue => {
-                ContinueStatement::new(typed_token(keyword), value).into()
-            }
-            PrefixStatementKind::Return => ReturnStatement::new(typed_token(keyword), value).into(),
-            PrefixStatementKind::Catch => CatchStatement::new(
+    fn lower_prefix_statement(&self, keyword: TokenTree, value: Option<Expr>) -> Expr {
+        if is_token!(&keyword, break) {
+            BreakStatement::new(typed_token(keyword), value).into()
+        } else if is_token!(&keyword, continue) {
+            ContinueStatement::new(typed_token(keyword), value).into()
+        } else if is_token!(&keyword, return) {
+            ReturnStatement::new(typed_token(keyword), value).into()
+        } else if is_token!(&keyword, catch) {
+            CatchStatement::new(
                 typed_token(keyword),
                 value.expect("catch statements require a value"),
             )
-            .into(),
-            PrefixStatementKind::Throw => ThrowStatement::new(
+            .into()
+        } else if is_token!(&keyword, throw) {
+            ThrowStatement::new(
                 typed_token(keyword),
                 value.expect("throw statements require a value"),
             )
-            .into(),
-            PrefixStatementKind::Trap => TrapStatement::new(
+            .into()
+        } else if is_token!(&keyword, trap) {
+            TrapStatement::new(
                 typed_token(keyword),
                 value.expect("trap statements require a value"),
             )
-            .into(),
+            .into()
+        } else {
+            unreachable!("statement actions are assigned only to statement keywords")
         }
     }
 
@@ -804,50 +784,44 @@ impl Engine {
             let Lookahead::Token(operator) = self.consume() else {
                 unreachable!("the token just peeked is consumable")
             };
-            left = match info.binary {
-                BinaryAction::Adjacent => {
-                    if operator.crossed_newline {
-                        return Err(NativeParseError::NewlineInApplication {
+            left = if let Some(strength) = info.binary_strength {
+                let right = self.parse_required(strength).map_err(|error| {
+                    if matches!(error, NativeParseError::MissingOperand { .. }) {
+                        NativeParseError::MissingOperand {
+                            operator: token_description(&operator.token),
                             span: operator.token.span(),
-                        });
-                    }
-                    let adjacency_span = operator.leading_span;
-                    let right = self.parse_consumed(operator, PREC_SPACE - 1)?;
-                    BinaryExpression::new(
-                        left,
-                        BinaryOperator::from(Token![SPACE](adjacency_span)),
-                        right,
-                    )
-                    .into()
-                }
-                BinaryAction::Binary => {
-                    let strength = info.binary_strength.expect("binary operators have B");
-                    let right = self.parse_required(strength).map_err(|error| {
-                        if matches!(error, NativeParseError::MissingOperand { .. }) {
-                            NativeParseError::MissingOperand {
-                                operator: token_description(&operator.token),
-                                span: operator.token.span(),
-                            }
-                        } else {
-                            error
                         }
-                    })?;
-                    self.lower_binary(left, operator.token, right)?
+                    } else {
+                        error
+                    }
+                })?;
+                self.lower_binary(left, operator.token, right)?
+            } else if info.postfix {
+                let span = operator.token.span();
+                let spelling = token_description(&operator.token);
+                let operator = PostfixOperator::from_token_tree(operator.token).ok_or(
+                    NativeParseError::Unsupported {
+                        syntax: spelling,
+                        span,
+                    },
+                )?;
+                PostfixExpression::new(left, operator).into()
+            } else if !matches!(info.unary, UnaryAction::Error) {
+                if operator.crossed_newline {
+                    return Err(NativeParseError::NewlineInApplication {
+                        span: operator.token.span(),
+                    });
                 }
-                BinaryAction::Postfix => {
-                    let span = operator.token.span();
-                    let spelling = token_description(&operator.token);
-                    let operator = PostfixOperator::from_token_tree(operator.token).ok_or(
-                        NativeParseError::Unsupported {
-                            syntax: spelling,
-                            span,
-                        },
-                    )?;
-                    PostfixExpression::new(left, operator).into()
-                }
-                BinaryAction::Error => {
-                    return Err(self.unexpected(operator.token, "an operator"));
-                }
+                let adjacency_span = operator.leading_span;
+                let right = self.parse_consumed(operator, PREC_APPLICATION_RIGHT)?;
+                BinaryExpression::new(
+                    left,
+                    BinaryOperator::from(Token![SPACE](adjacency_span)),
+                    right,
+                )
+                .into()
+            } else {
+                return Err(self.unexpected(operator.token, "an operator"));
             };
         }
     }
@@ -857,7 +831,7 @@ impl Engine {
             return Err(self.unexpected(token, "a delimited group"));
         };
         let kind = group.delim_kind();
-        let delimiter_span = group.double_span();
+        let delimiter_span = group.span();
         let mut contents = Self::new(group.into_stream());
         let mut muted = Vec::new();
         let (elements, comma) = loop {
@@ -875,34 +849,34 @@ impl Engine {
         }
 
         let expression: Expr = match kind {
-            crate::DelimiterKind::Empty | crate::DelimiterKind::Semicolon => {
+            DelimiterKind::Empty | DelimiterKind::Semicolon => {
                 return Err(NativeParseError::Unsupported {
                     syntax: format!("{} cell delimiter in expression position", kind),
                     span: delimiter_span.span(),
                 });
             }
-            crate::DelimiterKind::Bracket => {
+            DelimiterKind::Bracket => {
                 let mut value = Array::new(muted, elements);
                 value.delimiter = <Delimiter![[]] as crate::DelimiterToken>::new(delimiter_span);
                 value.into()
             }
-            crate::DelimiterKind::Brace => {
+            DelimiterKind::Brace => {
                 let mut value = List::new(muted, elements);
                 value.delimiter = <Delimiter![{}] as crate::DelimiterToken>::new(delimiter_span);
                 value.into()
             }
-            crate::DelimiterKind::AngleBar => {
+            DelimiterKind::AngleBar => {
                 let mut value = AngleBarList::new(muted, elements);
                 value.delimiter =
                     <Delimiter![< | | >] as crate::DelimiterToken>::new(delimiter_span);
                 value.into()
             }
-            crate::DelimiterKind::Parenthesis if !muted.is_empty() || comma => {
+            DelimiterKind::Parenthesis if !muted.is_empty() || comma => {
                 let mut value = Sequence::new(muted, elements);
                 value.delimiter = <Delimiter![()] as crate::DelimiterToken>::new(delimiter_span);
                 value.into()
             }
-            crate::DelimiterKind::Parenthesis => {
+            DelimiterKind::Parenthesis => {
                 let value = match elements.len() {
                     0 => None,
                     1 => Some(contents.only_expression(elements)?),
@@ -1037,15 +1011,16 @@ impl Engine {
         Ok(Expr::AssignmentExpr(result))
     }
 
-    fn only_expression(&self, mut components: Vec<Component>) -> Result<Expr, NativeParseError> {
-        match components.pop() {
-            Some(Component::Expr(value)) if components.is_empty() => Ok(value),
-            Some(value) => Err(NativeParseError::Unexpected {
+    fn only_expression(&self, components: Punctuated<Component>) -> Result<Expr, NativeParseError> {
+        let mut components = components.into_iter();
+        match (components.next(), components.next()) {
+            (Some(Component::Expr(value)), None) => Ok(value),
+            (Some(value), _) => Err(NativeParseError::Unexpected {
                 found: "a sequence".into(),
                 expected: "one expression",
                 span: value.span(),
             }),
-            None => Err(NativeParseError::MissingOperand {
+            (None, _) => Err(NativeParseError::MissingOperand {
                 operator: "empty expression".into(),
                 span: self.input.eof_span(),
             }),
@@ -1105,6 +1080,44 @@ fn parse_cells(cells: CellStream) -> Result<SourceFile, NativeParseError> {
         }
     }
     Ok(SourceFile::new(elements))
+}
+
+impl Parse for Expr {
+    fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
+        let tokens = input.by_ref().collect::<TokenStream>();
+        let mut engine = Engine::new(tokens);
+        engine.skip_trivia();
+        let value = engine
+            .parse_required(PREC_CLOSER)
+            .map_err(token_parse_error)?;
+        engine.skip_trivia();
+        match engine.peek() {
+            Lookahead::End(_) => Ok(value),
+            Lookahead::Token(token) => Err(TokenParseError::TrailingToken {
+                found: token_description(&token.token),
+                span: token.token.span(),
+            }),
+        }
+    }
+}
+
+impl Parse for SourceFile {
+    fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
+        let source_id = input
+            .peek()
+            .and_then(|token| token.span().source().ok())
+            .unwrap_or_else(SourceId::fresh);
+        let source = input.by_ref().collect::<TokenStream>().to_string();
+        parse_native(&source, source_id).map_err(token_parse_error)
+    }
+}
+
+fn token_parse_error(error: NativeParseError) -> TokenParseError {
+    let span = error.span();
+    TokenParseError::Syntax {
+        message: error.to_string(),
+        span,
+    }
 }
 
 fn token_spelling(token: &TokenTree) -> Option<&str> {
@@ -1178,123 +1191,90 @@ fn lambda_parameters(expression: Expr) -> Option<LambdaParameters> {
 fn parse_info(token: &TokenTree) -> ParseInfo {
     if let TokenTree::Group(group) = token {
         return match group.delim_kind() {
-            crate::DelimiterKind::Empty | crate::DelimiterKind::Semicolon => {
-                ParseInfo::stop(PREC_CLOSER)
+            DelimiterKind::Empty | DelimiterKind::Semicolon => ParseInfo::stop(PREC_CLOSER),
+            DelimiterKind::Bracket | DelimiterKind::AngleBar => {
+                ParseInfo::delimiter(PREC_COLLECTION)
             }
-            crate::DelimiterKind::Bracket | crate::DelimiterKind::AngleBar => {
-                ParseInfo::delimiter(56)
-            }
-            crate::DelimiterKind::Parenthesis | crate::DelimiterKind::Brace => {
-                ParseInfo::delimiter(PREC_SPACE)
+            DelimiterKind::Parenthesis | DelimiterKind::Brace => {
+                ParseInfo::delimiter(PREC_APPLICATION)
             }
         };
     }
 
     let text = parsing_spelling(token);
-    match text {
-        ";" => ParseInfo::stop(PREC_SEMICOLON),
-        "," => ParseInfo::stop(PREC_COMMA),
-        "else" | "then" | "do" | "list" | "except" => ParseInfo::stop(PREC_CONTROL),
-        "=" | ":=" | "<-" | "->" | "=>" | ">>" => ParseInfo::binary(14, 13),
-        "when" | "of" | "in" | "from" | "to" => ParseInfo::stop(PREC_LOOP_CLAUSE),
-        "<<" => ParseInfo::prefix_binary(18, 18, 18),
-        "|-" => ParseInfo::prefix_binary(20, 20, 20),
-        "===>" => ParseInfo::binary(22, 21),
-        "<===" => ParseInfo::prefix_binary(22, 21, 22),
-        "<==>" => ParseInfo::binary(24, 23),
-        "==>" => ParseInfo::binary(26, 25),
-        "<==" => ParseInfo::prefix_binary(26, 25, 26),
-        "or" => ParseInfo::binary(28, 27),
-        "??" => ParseInfo::prefix_binary(28, 27, 28),
-        "xor" => ParseInfo::binary(30, 29),
-        "and" => ParseInfo::binary(32, 31),
-        "not" => ParseInfo::prefix(34, 34),
-        "<" | ">" | "<=" | ">=" | "?" | "~" => ParseInfo::prefix_binary(36, 35, 36),
-        "===" | "==" | "=!=" | "!=" => ParseInfo::binary(36, 35),
-        "||" => ParseInfo::binary(38, 38),
-        ":" => ParseInfo::binary(40, 39),
-        "|" => ParseInfo::binary(42, 42),
-        "^^" => ParseInfo::binary(44, 44),
-        "&" => ParseInfo::binary(46, 46),
-        ".." | "..<" => ParseInfo::binary(48, 48),
-        "-" | "+" => ParseInfo::prefix_binary(50, 50, 50),
-        "++" => ParseInfo::binary(50, 50),
-        "·" => ParseInfo::binary(52, 52),
-        "**" | "⊠" | "⧢" => ParseInfo::binary(54, 54),
-        "\\" | "\\\\" => ParseInfo::binary(58, 57),
-        "*" => ParseInfo::prefix_binary(58, 58, 58),
-        "/" | "%" | "//" => ParseInfo::binary(58, 58),
-        "@" => ParseInfo::binary(60, 59),
-        "SPACE" => ParseInfo::binary(PREC_SPACE, PREC_SPACE - 1),
-        "break" => ParseInfo::statement(PrefixStatementKind::Break),
-        "continue" => ParseInfo::statement(PrefixStatementKind::Continue),
-        "return" => ParseInfo::statement(PrefixStatementKind::Return),
-        "catch" => ParseInfo::statement(PrefixStatementKind::Catch),
-        "throw" => ParseInfo::statement(PrefixStatementKind::Throw),
-        "trap" => ParseInfo::statement(PrefixStatementKind::Trap),
-        "if" => ParseInfo::control(UnaryAction::If, PREC_CONTROL),
-        "for" => ParseInfo::control(UnaryAction::For, PREC_LOOP_CLAUSE),
-        "while" => ParseInfo::control(UnaryAction::While, PREC_CONTROL),
-        "try" => ParseInfo::control(UnaryAction::Try, PREC_CONTROL),
-        "TEST" | "time" | "timing" | "elapsedTime" | "elapsedTiming" | "breakpoint" | "profile"
-        | "shield" | "step" | "finish" => ParseInfo::control(UnaryAction::Debug, PREC_CONTROL),
-        "new" => ParseInfo::control(UnaryAction::New, PREC_LOOP_CLAUSE),
-        "(*)" => ParseInfo::postfix(64),
-        "@@" | "@@?" => ParseInfo::binary(66, 66),
-        "^~" | "_~" | "_*" | "^*" => ParseInfo::postfix(68),
-        "^" | "^>" | "^>=" | "^<" | "^<=" | "^**" | "|_" | "_" | "_>" | "_>=" | "_<" | "_<="
-        | "#?" | "." | ".?" => ParseInfo::binary(70, 70),
-        "#" => ParseInfo::prefix_binary(70, 70, PREC_SPACE - 1),
-        "!" | "^!" | "_!" => ParseInfo::postfix(72),
-        "symbol" | "global" | "threadVariable" | "threadLocal" | "local" => ParseInfo {
-            precedence: PREC_SPACE,
-            binary_strength: None,
-            unary_strength: Some(74),
-            unary: UnaryAction::Quote,
-            binary: BinaryAction::Adjacent,
-        },
-        spelling if is_augmented_assignment(spelling) => ParseInfo::binary(14, 13),
-        _ => match token {
-            TokenTree::Ident(_) | TokenTree::Literal(_) => ParseInfo::atom(PREC_SPACE),
-            _ => ParseInfo::stop(PREC_SPACE),
-        },
+    if let Some(info) = __m2_syn_parse_info!(text, ParseInfo) {
+        return info;
     }
-}
 
-fn is_augmented_assignment(spelling: &str) -> bool {
-    matches!(
-        spelling,
-        "%=" | "&="
-            | "*="
-            | "**="
-            | "+="
-            | "++="
-            | "-="
-            | "..="
-            | "..<="
-            | "/="
-            | "//="
-            | "<==>="
-            | "===>="
-            | "==>="
-            | ">>="
-            | "??="
-            | "@="
-            | "@@="
-            | "@@?="
-            | "\\="
-            | "\\\\="
-            | "^="
-            | "^**="
-            | "^^="
-            | "_="
-            | "|="
-            | "|-="
-            | "|_="
-            | "||="
-            | "~="
-            | "·="
-            | "⊠="
-            | "⧢="
-    )
+    if is_token!(token, ;) {
+        return ParseInfo::stop(PREC_SEMICOLON);
+    }
+    if is_token!(token, ,) {
+        return ParseInfo::stop(PREC_COMMA);
+    }
+    if is_token!(token, else)
+        || is_token!(token, then)
+        || is_token!(token, do)
+        || is_token!(token, list)
+        || is_token!(token, except)
+    {
+        return ParseInfo::stop(PREC_CONTROL);
+    }
+    if is_token!(token, when)
+        || is_token!(token, of)
+        || is_token!(token, in)
+        || is_token!(token, from)
+        || is_token!(token, to)
+    {
+        return ParseInfo::stop(PREC_LOOP_CLAUSE);
+    }
+
+    if is_token!(token, break)
+        || is_token!(token, continue)
+        || is_token!(token, return)
+        || is_token!(token, catch)
+        || is_token!(token, throw)
+        || is_token!(token, trap)
+    {
+        return ParseInfo::statement();
+    }
+
+    let control_strength = if is_token!(token, for) || is_token!(token, new) {
+        Some(PREC_LOOP_CLAUSE)
+    } else if is_token!(token, if) || is_token!(token, while) || is_token!(token, try) {
+        Some(PREC_CONTROL)
+    } else {
+        None
+    };
+    if let Some(strength) = control_strength {
+        return ParseInfo::control(strength);
+    }
+
+    if is_token!(token, TEST)
+        || is_token!(token, time)
+        || is_token!(token, timing)
+        || is_token!(token, elapsedTime)
+        || is_token!(token, elapsedTiming)
+        || is_token!(token, breakpoint)
+        || is_token!(token, profile)
+        || is_token!(token, shield)
+        || is_token!(token, step)
+        || is_token!(token, finish)
+    {
+        return ParseInfo::debug();
+    }
+
+    if is_token!(token, symbol)
+        || is_token!(token, global)
+        || is_token!(token, threadVariable)
+        || is_token!(token, threadLocal)
+        || is_token!(token, local)
+    {
+        return ParseInfo::quote(PREC_APPLICATION, PREC_QUOTE);
+    }
+
+    match token {
+        TokenTree::Ident(_) | TokenTree::Literal(_) => ParseInfo::atom(PREC_APPLICATION),
+        _ => ParseInfo::stop(PREC_APPLICATION),
+    }
 }

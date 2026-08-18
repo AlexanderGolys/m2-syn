@@ -1,8 +1,8 @@
 use m2_syn::{
-    Array, BinaryExpression, BinaryOperator, DelimiterKind, DelimiterToken, DoubleSpan, Expr,
-    OperatorExpr, PrefixOperator, SourceId, Span, Spanned, Symbol, SyntaxNode, TextPoint,
-    TextRange, ToTokens, TokenParseError, TokenTree, TriviaKind, fold::Fold, parse_quote_m2,
-    parse_tokens, parse2, quote_m2, visit::Visit, visit_mut::VisitMut,
+    Array, BinaryExpression, BinaryOperator, DelimiterKind, DelimiterToken, Expr, OperatorExpr,
+    PrefixOperator, Punctuated, SourceId, Span, Spanned, Symbol, SyntaxNode, TextPoint, TextRange,
+    ToTokens, TokenParseError, TokenTree, TriviaKind, fold::Fold, parse_quote_m2, parse_tokens,
+    parse1, quote_m2, visit::Visit, visit_mut::VisitMut,
 };
 
 fn span(start: usize, end: usize) -> Span {
@@ -131,7 +131,7 @@ fn one_token_type_can_belong_to_multiple_operator_categories() {
 fn typed_tokens_parse_back_from_their_raw_emission() {
     let original = multiply(0);
     let emitted = original.to_token_stream();
-    let parsed: m2_syn::Token![*] = parse2(emitted.clone()).unwrap();
+    let parsed: m2_syn::Token![*] = parse1(emitted.clone()).unwrap();
 
     assert_eq!(parsed, original);
     assert_eq!(parsed.to_token_stream(), emitted);
@@ -149,14 +149,14 @@ fn token_constructor_accepts_any_supported_span_source() {
 
 #[test]
 fn delimiter_macro_names_generated_typed_delimiter_atoms() {
-    let span2 = DoubleSpan::new(span(0, 1), span(2, 3));
-    let delimiter: m2_syn::Delimiter![()] = m2_syn::Delimiter![()](span2);
+    let group_span = span(0, 3);
+    let delimiter: m2_syn::Delimiter![()] = m2_syn::Delimiter![()](group_span);
 
     assert_eq!(
         <m2_syn::Delimiter![()] as DelimiterToken>::KIND,
         DelimiterKind::Parenthesis
     );
-    assert_eq!(delimiter.span2(), span2);
+    assert_eq!(delimiter.span(), group_span);
     assert_eq!(
         <m2_syn::Delimiter![] as DelimiterToken>::KIND,
         DelimiterKind::Empty
@@ -169,12 +169,12 @@ fn delimiter_macro_names_generated_typed_delimiter_atoms() {
 
 #[test]
 fn delimited_nodes_store_typed_delimiters_and_flatten_to_raw_groups() {
-    let array = Array::new(Vec::new(), Vec::new());
+    let array = Array::new(Vec::new(), Punctuated::new());
     assert_eq!(
         <m2_syn::Delimiter![[]] as DelimiterToken>::KIND,
         DelimiterKind::Bracket
     );
-    assert_eq!(array.delimiter.span2(), DoubleSpan::detached());
+    assert_eq!(array.delimiter.span(), Span::detached());
     assert!(matches!(
         array.to_token_stream().into_iter().next(),
         Some(TokenTree::Group(group)) if group.delim_kind() == DelimiterKind::Bracket
@@ -192,13 +192,13 @@ fn parse_quote_infers_and_parses_a_typed_token() {
 }
 
 #[test]
-fn parse2_rejects_wrong_and_trailing_tokens() {
+fn parse1_rejects_wrong_and_trailing_tokens() {
     assert!(matches!(
-        parse2::<m2_syn::Token![+]>(quote_m2!(*)),
+        parse1::<m2_syn::Token![+]>(quote_m2!(*)),
         Err(TokenParseError::UnexpectedToken { .. })
     ));
     assert!(matches!(
-        parse2::<m2_syn::Token![+]>(quote_m2!(+ *)),
+        parse1::<m2_syn::Token![+]>(quote_m2!(+ *)),
         Err(TokenParseError::TrailingToken { .. })
     ));
 }
@@ -226,6 +226,80 @@ fn quote_builds_an_m2_token_stream_with_interpolation() {
         TokenTree::Trivia(ref trivia) if trivia.kind() == TriviaKind::Whitespace
     ));
     assert!(matches!(tokens[8], TokenTree::Ident(_)));
+}
+
+#[test]
+fn quote_composes_interpolated_fragments_by_their_actual_boundaries() {
+    let plus = m2_syn::Token![+](Span::detached());
+    let value = symbol("value", 0);
+    let tokens = quote_m2! { left $(plus) $(value) };
+
+    assert_eq!(tokens.to_code(), "left+value");
+    assert!(matches!(
+        tokens.iter().nth(1),
+        Some(TokenTree::Punct(token)) if token.text() == "+"
+    ));
+}
+
+#[test]
+fn quote_repetition_is_an_explicit_rust_loop_with_recursive_interpolation() {
+    let values = [symbol("a", 0), symbol("b", 1)];
+    let plus = m2_syn::Token![+](Span::detached());
+    let constant = symbol("z", 2);
+    let tokens = quote_m2! {
+        $[value in &values] {
+            $(value) $(plus) $(constant);
+        }
+    };
+
+    assert_eq!(tokens.to_code(), "a+z;b+z;");
+}
+
+#[test]
+fn quote_recurses_through_groups_around_interpolated_values() {
+    let value = symbol("value", 0);
+    let tokens = quote_m2! { apply ($(value)) };
+
+    assert_eq!(tokens.to_code(), "apply (value)");
+    assert!(matches!(
+        tokens.iter().nth(2),
+        Some(TokenTree::Group(group))
+            if group.delim_kind() == DelimiterKind::Parenthesis
+                && matches!(group.stream().iter().next(), Some(TokenTree::Ident(_)))
+    ));
+}
+
+#[test]
+fn quote_builds_balanced_angle_bar_groups_recursively() {
+    let value = symbol("value", 0);
+    let tokens = quote_m2! { <|<|$(value)|>|> };
+
+    assert_eq!(tokens.to_code(), "<|<|value|>|>");
+    assert!(matches!(
+        tokens.iter().next(),
+        Some(TokenTree::Group(outer))
+            if outer.delim_kind() == DelimiterKind::AngleBar
+                && matches!(
+                    outer.stream().iter().next(),
+                    Some(TokenTree::Group(inner))
+                        if inner.delim_kind() == DelimiterKind::AngleBar
+                )
+    ));
+}
+
+#[test]
+fn quote_supports_nested_explicit_repetitions() {
+    let rows = [
+        [symbol("a", 0), symbol("b", 1)],
+        [symbol("c", 2), symbol("d", 3)],
+    ];
+    let tokens = quote_m2! {
+        $[row in &rows] {
+            ($[value in row] { $(value), });
+        }
+    };
+
+    assert_eq!(tokens.to_code(), "(a,b,);(c,d,);");
 }
 
 #[test]

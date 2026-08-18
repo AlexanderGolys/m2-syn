@@ -6,7 +6,10 @@
 
 use std::fmt::{Display, Formatter};
 
-use crate::{Group, Span, Spanned, TokenStream};
+use crate::{
+    Group, Parse, ParseStream, Punct, Span, Spanned, TextPoint, TextRange, ToTokens,
+    TokenParseError, TokenStream, TokenTree,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// The six delimiter families recognized by raw syntax containers.
@@ -24,58 +27,99 @@ pub enum DelimiterKind {
     AngleBar,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Spanned)]
-/// Independent source spans for a syntax container's opening and closing boundaries.
-pub struct DoubleSpan {
-    pub span_open: Span,
-    pub span_close: Span,
-}
-
-impl DoubleSpan {
-    pub fn new(span_open: Span, span_close: Span) -> Self {
-        Self {
-            span_open,
-            span_close,
-        }
-    }
-    pub fn join(&self) -> Span {
-        self.span_open.join(self.span_close)
-    }
-
-    pub fn detached() -> Self {
-        Self::new(Span::detached(), Span::detached())
-    }
-}
-
 /// A generated typed refinement of one raw delimiter kind.
 ///
 /// Delimiter atoms are the container analogue of `Token![..]`: the typed CST
 /// stores the precise delimiter family, while [`Group`] and
 /// [`crate::CellBlock`] carry the erased raw representation.
-pub trait DelimiterToken: Spanned + Sized {
+pub trait DelimiterToken: Parse + Spanned + ToTokens + Sized {
     const KIND: DelimiterKind;
 
-    fn new(span: DoubleSpan) -> Self;
-    fn span2(&self) -> DoubleSpan;
+    fn new(span: Span) -> Self;
 
     fn surround(&self, output: &mut TokenStream, contents: TokenStream) {
-        output.push_group(Group::new(
-            Delimiter::new(Self::KIND, self.span2()),
-            contents,
-        ));
+        Delimiter::new(Self::KIND, self.span()).surround(output, contents);
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Spanned)]
 /// Type-erased delimiter data stored by a raw [`Group`].
 pub struct Delimiter {
     pub kind: DelimiterKind,
-    pub span2: DoubleSpan,
+    /// The complete span of the delimited container.
+    pub span: Span,
 }
 
 impl Delimiter {
-    pub fn new(kind: DelimiterKind, span2: DoubleSpan) -> Self {
-        Self { kind, span2 }
+    pub fn new(kind: DelimiterKind, span: Span) -> Self {
+        Self { kind, span }
+    }
+
+    /// Returns the opening delimiter span derived from the container span.
+    pub fn opening_span(self) -> Span {
+        boundary_span(self.span, Boundary::Opening, self.kind.opening().len())
+    }
+
+    /// Returns the closing delimiter span derived from the container span.
+    pub fn closing_span(self) -> Span {
+        boundary_span(self.span, Boundary::Closing, self.kind.closing().len())
+    }
+
+    /// Emits `contents` with this delimiter's concrete token-tree shape.
+    pub fn surround(&self, output: &mut TokenStream, contents: TokenStream) {
+        match self.kind {
+            DelimiterKind::Empty => output.extend([contents]),
+            DelimiterKind::Semicolon => {
+                output.extend([contents]);
+                output.push_punct(Punct::new(";", self.closing_span()));
+            }
+            DelimiterKind::Parenthesis
+            | DelimiterKind::Bracket
+            | DelimiterKind::Brace
+            | DelimiterKind::AngleBar => output.push_group(Group::new(*self, contents)),
+        }
+    }
+}
+
+/// Parses one delimiter atom without any contained syntax.
+#[doc(hidden)]
+pub fn parse_delimiter<D: DelimiterToken>(input: &mut ParseStream) -> Result<D, TokenParseError> {
+    match D::KIND {
+        DelimiterKind::Empty => {
+            let span = input
+                .peek()
+                .map(|token| boundary_before(token.span()))
+                .unwrap_or_else(|| input.eof_span());
+            Ok(D::new(span))
+        }
+        DelimiterKind::Semicolon => {
+            let semicolon = <Token![;]>::parse(input)?;
+            Ok(D::new(semicolon.span()))
+        }
+        kind => {
+            let Some(token) = input.next_token() else {
+                return Err(TokenParseError::UnexpectedEnd {
+                    expected: kind.opening(),
+                    span: input.eof_span(),
+                });
+            };
+            let span = token.span();
+            let TokenTree::Group(group) = token else {
+                return Err(TokenParseError::UnexpectedToken {
+                    expected: kind.opening(),
+                    found: token.spelling().unwrap_or("trivia").to_owned(),
+                    span,
+                });
+            };
+            if group.delim_kind() != kind || !group.stream().is_empty() {
+                return Err(TokenParseError::UnexpectedToken {
+                    expected: kind.opening(),
+                    found: group.delim_kind().opening().to_owned(),
+                    span,
+                });
+            }
+            Ok(D::new(group.span()))
+        }
     }
 }
 
@@ -113,8 +157,50 @@ impl DelimiterKind {
     }
 }
 
-impl Spanned for Delimiter {
-    fn span(&self) -> Span {
-        self.span2.join()
+#[derive(Clone, Copy)]
+enum Boundary {
+    Opening,
+    Closing,
+}
+
+fn boundary_span(span: Span, boundary: Boundary, width: usize) -> Span {
+    let Ok(range) = span.range() else {
+        return Span::detached();
+    };
+    let (Some(start), Some(end)) = (range.start(), range.end()) else {
+        return Span::detached();
+    };
+    if end.byte.saturating_sub(start.byte) < width {
+        return span;
     }
+
+    let range = match boundary {
+        Boundary::Opening => TextRange::new(start, shifted(start, width)),
+        Boundary::Closing => TextRange::new(shifted_back(end, width), end),
+    };
+    match span {
+        Span::FileLocated { source, .. } => Span::new(source, range),
+        Span::LocalRefFrame { .. } => Span::in_tmp_file(range),
+        Span::Detached => Span::detached(),
+    }
+}
+
+fn shifted(mut point: TextPoint, width: usize) -> TextPoint {
+    point.byte = point.byte.saturating_add(width);
+    point.column = point.column.saturating_add(width as u32);
+    point
+}
+
+fn shifted_back(mut point: TextPoint, width: usize) -> TextPoint {
+    point.byte = point.byte.saturating_sub(width);
+    point.column = point.column.saturating_sub(width as u32);
+    point
+}
+
+fn boundary_before(span: Span) -> Span {
+    span.source()
+        .ok()
+        .zip(span.start_point().ok())
+        .map(|(source, point)| Span::new(source, TextRange::from_point(point)))
+        .unwrap_or_else(Span::detached)
 }

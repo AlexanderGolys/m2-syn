@@ -3,9 +3,9 @@ use std::convert::Infallible;
 use std::vec::IntoIter;
 
 use m2_syn::{
-    CSTNodeClassLabel, CellStream, ExternalCstChild, ExternalCstNode, NativeParser, Parse,
-    ParseStream, Parser, SourceFile, SourceId, Span, Symbol, Token, TreeSitterParser, lex_str,
-    parse_with, quote_m2, reconstruct,
+    CSTNodeClassLabel, CellStream, Expr, ExternalCstChild, ExternalCstNode, NativeParser, Parse,
+    ParseStream, Parser, SourceFile, SourceId, Span, Spanned, Symbol, ToTokens, Token,
+    TreeSitterParser, lex_str, parse_quote_m2, parse_with, quote_m2, reconstruct,
 };
 
 struct EmptyFileParser;
@@ -13,7 +13,7 @@ struct EmptyFileParser;
 impl Parser for EmptyFileParser {
     type Error = Infallible;
 
-    fn parse(&mut self, _tokens: CellStream) -> Result<SourceFile, Self::Error> {
+    fn parse_cells(&mut self, _tokens: CellStream) -> Result<SourceFile, Self::Error> {
         Ok(SourceFile::new(Vec::new()))
     }
 }
@@ -23,7 +23,7 @@ struct SymbolParser;
 impl Parser<Symbol> for SymbolParser {
     type Error = Infallible;
 
-    fn parse(&mut self, tokens: CellStream) -> Result<Symbol, Self::Error> {
+    fn parse_cells(&mut self, tokens: CellStream) -> Result<Symbol, Self::Error> {
         Ok(Symbol::new(tokens.to_string(), Span::detached()))
     }
 }
@@ -57,7 +57,16 @@ fn token_parse_stream_supports_speculative_parsing() {
 
     input.advance_to(&fork);
     let _: Token![*] = Parse::parse(&mut input).unwrap();
-    assert!(input.is_empty());
+    assert!(input.is_eof());
+}
+
+#[test]
+fn generated_expression_and_source_roots_parse_quoted_tokens() {
+    let expression: Expr = parse_quote_m2!(left + right);
+    let file: SourceFile = parse_quote_m2!(left; right);
+
+    assert_eq!(expression.to_code(), "left + right");
+    assert_eq!(file.to_code(), "left;\nright");
 }
 
 #[derive(Clone)]
@@ -77,7 +86,9 @@ impl ExternalCstNode for SymbolCst {
     fn text(&self) -> Cow<'_, str> {
         Cow::Borrowed("from_cst")
     }
+}
 
+impl Spanned for SymbolCst {
     fn span(&self) -> Span {
         Span::detached()
     }

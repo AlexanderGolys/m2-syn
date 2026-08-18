@@ -191,6 +191,10 @@ impl TypeShape {
                 let visit = inner.visit(quote!(value), true);
                 quote!(for value in #value { #visit })
             }
+            Self::Punctuated(inner) => {
+                let visit = inner.visit(quote!(value), true);
+                quote!(for value in #value { #visit })
+            }
         }
     }
 
@@ -209,6 +213,10 @@ impl TypeShape {
                 quote!(if let Some(value) = (#value).as_mut() { #visit })
             }
             Self::Repeated(inner) => {
+                let visit = inner.visit_mut(quote!(value), true);
+                quote!(for value in #value { #visit })
+            }
+            Self::Punctuated(inner) => {
                 let visit = inner.visit_mut(quote!(value), true);
                 quote!(for value in #value { #visit })
             }
@@ -232,6 +240,10 @@ impl TypeShape {
             Self::Repeated(inner) => {
                 let folded = inner.fold(quote!(value), true);
                 quote!(#value.into_iter().map(|value| #folded).collect())
+            }
+            Self::Punctuated(inner) => {
+                let folded = inner.fold(quote!(value), true);
+                quote!(#value.map(|value| #folded))
             }
         }
     }

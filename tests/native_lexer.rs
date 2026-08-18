@@ -42,14 +42,15 @@ fn public_token_stream_exposes_nested_groups_and_delimiter_spans() {
     assert!(cell.next().is_none());
     assert_eq!(parenthesized.delim_kind(), DelimiterKind::Parenthesis);
 
-    let spans = parenthesized.double_span();
-    assert_eq!(spans.span_open.start_point().unwrap().byte, 0);
-    assert_eq!(spans.span_open.end_point().unwrap().byte, 1);
-    assert_eq!(
-        spans.span_close.start_point().unwrap().byte,
-        source.len() - 1
-    );
-    assert_eq!(spans.span_close.end_point().unwrap().byte, source.len());
+    let span = parenthesized.span();
+    assert_eq!(span.start_point().unwrap().byte, 0);
+    assert_eq!(span.end_point().unwrap().byte, source.len());
+    let opening = parenthesized.delimiter().opening_span();
+    let closing = parenthesized.delimiter().closing_span();
+    assert_eq!(opening.start_point().unwrap().byte, 0);
+    assert_eq!(opening.end_point().unwrap().byte, 1);
+    assert_eq!(closing.start_point().unwrap().byte, source.len() - 1);
+    assert_eq!(closing.end_point().unwrap().byte, source.len());
 }
 
 #[test]
@@ -80,8 +81,8 @@ fn top_level_cells_use_empty_and_semicolon_delimiters() {
     assert_eq!(cells[0].delim_kind(), DelimiterKind::Semicolon);
     assert_eq!(
         cells[0]
-            .double_span()
-            .span_close
+            .delimiter()
+            .closing_span()
             .start_point()
             .unwrap()
             .byte,

@@ -1,6 +1,6 @@
 use m2_syn::{
     AnyCell, BinaryOperator, Collection, Expr, LiteralKind, NativeParseError, OperatorExpr,
-    SourceId, Spanned, ToCellStream, ToTokens, TokenTree, lex_str, parse_native, parse_with,
+    SourceId, Spanned, ToCells, ToTokens, TokenTree, lex_str, parse_native, parse_with,
 };
 
 fn expression(source: &str) -> Expr {

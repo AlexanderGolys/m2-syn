@@ -232,19 +232,19 @@ fn fold_bng_eql(&mut self, node: Token![!=]) -> Token![!=] {
         fn fold_ubs(&mut self, node: Token![_]) -> Token![_] {
             $crate::fold::fold_ubs(self, node)
         }
-        fn fold_ubs_eql(&mut self, node: Token![_ =]) -> Token![_ =] {
+        fn fold_ubs_eql(&mut self, node: Token![_=]) -> Token![_=] {
             $crate::fold::fold_ubs_eql(self, node)
         }
-        fn fold_ubs_lst(&mut self, node: Token![_ <]) -> Token![_ <] {
+        fn fold_ubs_lst(&mut self, node: Token![_<]) -> Token![_<] {
             $crate::fold::fold_ubs_lst(self, node)
         }
-        fn fold_ubs_lst_eql(&mut self, node: Token![_ <=]) -> Token![_ <=] {
+        fn fold_ubs_lst_eql(&mut self, node: Token![_<=]) -> Token![_<=] {
             $crate::fold::fold_ubs_lst_eql(self, node)
         }
-        fn fold_ubs_gst(&mut self, node: Token![_ >]) -> Token![_ >] {
+        fn fold_ubs_gst(&mut self, node: Token![_>]) -> Token![_>] {
             $crate::fold::fold_ubs_gst(self, node)
         }
-        fn fold_ubs_gst_eql(&mut self, node: Token![_ >=]) -> Token![_ >=] {
+        fn fold_ubs_gst_eql(&mut self, node: Token![_>=]) -> Token![_>=] {
             $crate::fold::fold_ubs_gst_eql(self, node)
         }
         fn fold_pip(&mut self, node: Token![|]) -> Token![|] {
@@ -259,10 +259,10 @@ fn fold_bng_eql(&mut self, node: Token![!=]) -> Token![!=] {
         fn fold_pip_sub_eql(&mut self, node: Token![|-=]) -> Token![|-=] {
             $crate::fold::fold_pip_sub_eql(self, node)
         }
-        fn fold_pip_ubs(&mut self, node: Token![| _]) -> Token![| _] {
+        fn fold_pip_ubs(&mut self, node: Token![|_]) -> Token![|_] {
             $crate::fold::fold_pip_ubs(self, node)
         }
-        fn fold_pip_ubs_eql(&mut self, node: Token![| _ =]) -> Token![| _ =] {
+        fn fold_pip_ubs_eql(&mut self, node: Token![|_=]) -> Token![|_=] {
             $crate::fold::fold_pip_ubs_eql(self, node)
         }
         fn fold_pip_pip(&mut self, node: Token![||]) -> Token![||] {
@@ -322,13 +322,13 @@ fn fold_bng_eql(&mut self, node: Token![!=]) -> Token![!=] {
         fn fold_crt_tld(&mut self, node: Token![^~]) -> Token![^~] {
             $crate::fold::fold_crt_tld(self, node)
         }
-        fn fold_ubs_bng(&mut self, node: Token![_ !]) -> Token![_ !] {
+        fn fold_ubs_bng(&mut self, node: Token![_!]) -> Token![_!] {
             $crate::fold::fold_ubs_bng(self, node)
         }
-        fn fold_ubs_mul(&mut self, node: Token![_ *]) -> Token![_ *] {
+        fn fold_ubs_mul(&mut self, node: Token![_*]) -> Token![_*] {
             $crate::fold::fold_ubs_mul(self, node)
         }
-        fn fold_ubs_tld(&mut self, node: Token![_ ~]) -> Token![_ ~] {
+        fn fold_ubs_tld(&mut self, node: Token![_~]) -> Token![_~] {
             $crate::fold::fold_ubs_tld(self, node)
         }
         fn fold_not(&mut self, node: Token![not]) -> Token![not] {
@@ -919,10 +919,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
         {
             node
         }
-        pub fn fold_lst_eql_eql_gst_eql<F>(
-            _folder: &mut F,
-            node: Token![<==>=],
-        ) -> Token![<==>=]
+        pub fn fold_lst_eql_eql_gst_eql<F>(_folder: &mut F, node: Token![<==>=]) -> Token![<==>=]
         where
             F: Fold + ?Sized,
         {
@@ -958,10 +955,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
         {
             node
         }
-        pub fn fold_eql_eql_eql_gst_eql<F>(
-            _folder: &mut F,
-            node: Token![===>=],
-        ) -> Token![===>=]
+        pub fn fold_eql_eql_eql_gst_eql<F>(_folder: &mut F, node: Token![===>=]) -> Token![===>=]
         where
             F: Fold + ?Sized,
         {
@@ -1153,31 +1147,31 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
         {
             node
         }
-        pub fn fold_ubs_eql<F>(_folder: &mut F, node: Token![_ =]) -> Token![_ =]
+        pub fn fold_ubs_eql<F>(_folder: &mut F, node: Token![_=]) -> Token![_=]
         where
             F: Fold + ?Sized,
         {
             node
         }
-        pub fn fold_ubs_lst<F>(_folder: &mut F, node: Token![_ <]) -> Token![_ <]
+        pub fn fold_ubs_lst<F>(_folder: &mut F, node: Token![_<]) -> Token![_<]
         where
             F: Fold + ?Sized,
         {
             node
         }
-        pub fn fold_ubs_lst_eql<F>(_folder: &mut F, node: Token![_ <=]) -> Token![_ <=]
+        pub fn fold_ubs_lst_eql<F>(_folder: &mut F, node: Token![_<=]) -> Token![_<=]
         where
             F: Fold + ?Sized,
         {
             node
         }
-        pub fn fold_ubs_gst<F>(_folder: &mut F, node: Token![_ >]) -> Token![_ >]
+        pub fn fold_ubs_gst<F>(_folder: &mut F, node: Token![_>]) -> Token![_>]
         where
             F: Fold + ?Sized,
         {
             node
         }
-        pub fn fold_ubs_gst_eql<F>(_folder: &mut F, node: Token![_ >=]) -> Token![_ >=]
+        pub fn fold_ubs_gst_eql<F>(_folder: &mut F, node: Token![_>=]) -> Token![_>=]
         where
             F: Fold + ?Sized,
         {
@@ -1207,13 +1201,13 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
         {
             node
         }
-        pub fn fold_pip_ubs<F>(_folder: &mut F, node: Token![| _]) -> Token![| _]
+        pub fn fold_pip_ubs<F>(_folder: &mut F, node: Token![|_]) -> Token![|_]
         where
             F: Fold + ?Sized,
         {
             node
         }
-        pub fn fold_pip_ubs_eql<F>(_folder: &mut F, node: Token![| _ =]) -> Token![| _ =]
+        pub fn fold_pip_ubs_eql<F>(_folder: &mut F, node: Token![|_=]) -> Token![|_=]
         where
             F: Fold + ?Sized,
         {
@@ -1333,19 +1327,19 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
         {
             node
         }
-        pub fn fold_ubs_bng<F>(_folder: &mut F, node: Token![_ !]) -> Token![_ !]
+        pub fn fold_ubs_bng<F>(_folder: &mut F, node: Token![_!]) -> Token![_!]
         where
             F: Fold + ?Sized,
         {
             node
         }
-        pub fn fold_ubs_mul<F>(_folder: &mut F, node: Token![_ *]) -> Token![_ *]
+        pub fn fold_ubs_mul<F>(_folder: &mut F, node: Token![_*]) -> Token![_*]
         where
             F: Fold + ?Sized,
         {
             node
         }
-        pub fn fold_ubs_tld<F>(_folder: &mut F, node: Token![_ ~]) -> Token![_ ~]
+        pub fn fold_ubs_tld<F>(_folder: &mut F, node: Token![_~]) -> Token![_~]
         where
             F: Fold + ?Sized,
         {
@@ -1690,11 +1684,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             NakedSequence {
-                elements: node
-                    .elements
-                    .into_iter()
-                    .map(|value| folder.fold_component(value))
-                    .collect(),
+                elements: node.elements.map(|value| folder.fold_component(value)),
             }
         }
         pub fn fold_muted_cell<F>(folder: &mut F, node: MutedCell) -> MutedCell
@@ -1702,12 +1692,8 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             MutedCell {
-                elements: node
-                    .elements
-                    .into_iter()
-                    .map(|value| folder.fold_component(value))
-                    .collect(),
-                _muted_cell_1: folder.fold_scl(node._muted_cell_1),
+                elements: node.elements.map(|value| folder.fold_component(value)),
+                semicolon: folder.fold_scl(node.semicolon),
             }
         }
         pub fn fold_muted_group<F>(folder: &mut F, node: MutedGroup) -> MutedGroup
@@ -1715,12 +1701,8 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             MutedGroup {
-                elements: node
-                    .elements
-                    .into_iter()
-                    .map(|value| folder.fold_component(value))
-                    .collect(),
-                _muted_group_1: folder.fold_scl(node._muted_group_1),
+                elements: node.elements.map(|value| folder.fold_component(value)),
+                semicolon: folder.fold_scl(node.semicolon),
             }
         }
         pub fn fold_array<F>(folder: &mut F, node: Array) -> Array
@@ -1733,11 +1715,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
                     .into_iter()
                     .map(|value| folder.fold_muted_group(value))
                     .collect(),
-                elements: node
-                    .elements
-                    .into_iter()
-                    .map(|value| folder.fold_component(value))
-                    .collect(),
+                elements: node.elements.map(|value| folder.fold_component(value)),
                 delimiter: node.delimiter,
             }
         }
@@ -1751,11 +1729,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
                     .into_iter()
                     .map(|value| folder.fold_muted_group(value))
                     .collect(),
-                elements: node
-                    .elements
-                    .into_iter()
-                    .map(|value| folder.fold_component(value))
-                    .collect(),
+                elements: node.elements.map(|value| folder.fold_component(value)),
                 delimiter: node.delimiter,
             }
         }
@@ -1769,11 +1743,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
                     .into_iter()
                     .map(|value| folder.fold_muted_group(value))
                     .collect(),
-                elements: node
-                    .elements
-                    .into_iter()
-                    .map(|value| folder.fold_component(value))
-                    .collect(),
+                elements: node.elements.map(|value| folder.fold_component(value)),
                 delimiter: node.delimiter,
             }
         }
@@ -1787,11 +1757,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
                     .into_iter()
                     .map(|value| folder.fold_muted_group(value))
                     .collect(),
-                elements: node
-                    .elements
-                    .into_iter()
-                    .map(|value| folder.fold_component(value))
-                    .collect(),
+                elements: node.elements.map(|value| folder.fold_component(value)),
                 delimiter: node.delimiter,
             }
         }
@@ -1994,7 +1960,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             StructuredBinding {
-                left: ::std::boxed::Box::new(folder.fold_binding_pack(*node.left)),
+                binding_pack: ::std::boxed::Box::new(folder.fold_binding_pack(*node.binding_pack)),
                 operator: folder.fold_eql(node.operator),
                 right: ::std::boxed::Box::new(folder.fold_expr(*node.right)),
             }
@@ -2007,7 +1973,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             LocalStructuredBinding {
-                left: ::std::boxed::Box::new(folder.fold_binding_pack(*node.left)),
+                binding_pack: ::std::boxed::Box::new(folder.fold_binding_pack(*node.binding_pack)),
                 operator: folder.fold_col_eql(node.operator),
                 right: ::std::boxed::Box::new(folder.fold_expr(*node.right)),
             }
@@ -2040,7 +2006,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             ThenClause {
-                _then_clause_0: folder.fold_then_keyword(node._then_clause_0),
+                keyword: folder.fold_then_keyword(node.keyword),
                 value: ::std::boxed::Box::new(folder.fold_expr(*node.value)),
             }
         }
@@ -2049,7 +2015,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             ElseClause {
-                _else_clause_0: folder.fold_else_keyword(node._else_clause_0),
+                keyword: folder.fold_else_keyword(node.keyword),
                 value: ::std::boxed::Box::new(folder.fold_expr(*node.value)),
             }
         }
@@ -2058,7 +2024,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             IfStatement {
-                _if_statement_0: folder.fold_if_keyword(node._if_statement_0),
+                keyword: folder.fold_if_keyword(node.keyword),
                 condition: ::std::boxed::Box::new(folder.fold_expr(*node.condition)),
                 then_clause: ::std::boxed::Box::new(folder.fold_then_clause(*node.then_clause)),
                 else_clause: node
@@ -2071,13 +2037,13 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             LoopBody {
-                _loop_body_0: node
-                    ._loop_body_0
+                list_keyword: node
+                    .list_keyword
                     .map(|value| folder.fold_list_keyword(value)),
                 listed_value: node
                     .listed_value
                     .map(|value| ::std::boxed::Box::new(folder.fold_expr(*value))),
-                _loop_body_2: node._loop_body_2.map(|value| folder.fold_do_keyword(value)),
+                do_keyword: node.do_keyword.map(|value| folder.fold_do_keyword(value)),
                 ignored_value: node
                     .ignored_value
                     .map(|value| ::std::boxed::Box::new(folder.fold_expr(*value))),
@@ -2088,21 +2054,17 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             IterationRange {
-                _iteration_range_0: node
-                    ._iteration_range_0
-                    .map(|value| folder.fold_in_keyword(value)),
+                in_keyword: node.in_keyword.map(|value| folder.fold_in_keyword(value)),
                 iterated_collection: node
                     .iterated_collection
                     .map(|value| ::std::boxed::Box::new(folder.fold_expr(*value))),
-                _iteration_range_2: node
-                    ._iteration_range_2
+                from_keyword: node
+                    .from_keyword
                     .map(|value| folder.fold_from_keyword(value)),
                 range_start: node
                     .range_start
                     .map(|value| ::std::boxed::Box::new(folder.fold_expr(*value))),
-                _iteration_range_4: node
-                    ._iteration_range_4
-                    .map(|value| folder.fold_to_keyword(value)),
+                to_keyword: node.to_keyword.map(|value| folder.fold_to_keyword(value)),
                 range_end: node
                     .range_end
                     .map(|value| ::std::boxed::Box::new(folder.fold_expr(*value))),
@@ -2113,13 +2075,13 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             ForLoop {
-                _for_loop_0: folder.fold_for_keyword(node._for_loop_0),
+                keyword: folder.fold_for_keyword(node.keyword),
                 variable: ::std::boxed::Box::new(folder.fold_symbol(*node.variable)),
                 range: node
                     .range
                     .map(|value| ::std::boxed::Box::new(folder.fold_iteration_range(*value))),
-                _for_loop_3: node
-                    ._for_loop_3
+                when_keyword: node
+                    .when_keyword
                     .map(|value| folder.fold_when_keyword(value)),
                 filter: node
                     .filter
@@ -2132,7 +2094,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             WhileLoop {
-                _while_loop_0: folder.fold_while_keyword(node._while_loop_0),
+                keyword: folder.fold_while_keyword(node.keyword),
                 condition: ::std::boxed::Box::new(folder.fold_expr(*node.condition)),
                 body: ::std::boxed::Box::new(folder.fold_loop_body(*node.body)),
             }
@@ -2142,16 +2104,14 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             NewStatement {
-                _new_statement_0: folder.fold_new_keyword(node._new_statement_0),
+                keyword: folder.fold_new_keyword(node.keyword),
                 class: ::std::boxed::Box::new(folder.fold_expr(*node.class)),
-                _new_statement_2: node
-                    ._new_statement_2
-                    .map(|value| folder.fold_of_keyword(value)),
+                of_keyword: node.of_keyword.map(|value| folder.fold_of_keyword(value)),
                 parent: node
                     .parent
                     .map(|value| ::std::boxed::Box::new(folder.fold_expr(*value))),
-                _new_statement_4: node
-                    ._new_statement_4
+                from_keyword: node
+                    .from_keyword
                     .map(|value| folder.fold_from_keyword(value)),
                 instance: node
                     .instance
@@ -2174,7 +2134,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             BreakStatement {
-                _break_statement_0: folder.fold_break_keyword(node._break_statement_0),
+                keyword: folder.fold_break_keyword(node.keyword),
                 value: node
                     .value
                     .map(|value| ::std::boxed::Box::new(folder.fold_expr(*value))),
@@ -2188,7 +2148,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             ContinueStatement {
-                _continue_statement_0: folder.fold_continue_keyword(node._continue_statement_0),
+                keyword: folder.fold_continue_keyword(node.keyword),
                 value: node
                     .value
                     .map(|value| ::std::boxed::Box::new(folder.fold_expr(*value))),
@@ -2199,7 +2159,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             ReturnStatement {
-                _return_statement_0: folder.fold_return_keyword(node._return_statement_0),
+                keyword: folder.fold_return_keyword(node.keyword),
                 value: node
                     .value
                     .map(|value| ::std::boxed::Box::new(folder.fold_expr(*value))),
@@ -2210,7 +2170,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             CatchStatement {
-                _catch_statement_0: folder.fold_catch_keyword(node._catch_statement_0),
+                keyword: folder.fold_catch_keyword(node.keyword),
                 value: ::std::boxed::Box::new(folder.fold_expr(*node.value)),
             }
         }
@@ -2219,7 +2179,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             ThrowStatement {
-                _throw_statement_0: folder.fold_throw_keyword(node._throw_statement_0),
+                keyword: folder.fold_throw_keyword(node.keyword),
                 value: ::std::boxed::Box::new(folder.fold_expr(*node.value)),
             }
         }
@@ -2228,7 +2188,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             TrapStatement {
-                _trap_statement_0: folder.fold_trap_keyword(node._trap_statement_0),
+                keyword: folder.fold_trap_keyword(node.keyword),
                 value: ::std::boxed::Box::new(folder.fold_expr(*node.value)),
             }
         }
@@ -2237,9 +2197,9 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             ExceptClause {
-                _except_clause_0: folder.fold_except_keyword(node._except_clause_0),
+                keyword: folder.fold_except_keyword(node.keyword),
                 exception: ::std::boxed::Box::new(folder.fold_symbol(*node.exception)),
-                _except_clause_2: folder.fold_do_keyword(node._except_clause_2),
+                do_keyword: folder.fold_do_keyword(node.do_keyword),
                 value: ::std::boxed::Box::new(folder.fold_expr(*node.value)),
             }
         }
@@ -2248,7 +2208,7 @@ pub fn fold_bng_eql<F>(_folder: &mut F, node: Token![!=]) -> Token![!=]
             F: Fold + ?Sized,
         {
             TryStatement {
-                _try_statement_0: folder.fold_try_keyword(node._try_statement_0),
+                keyword: folder.fold_try_keyword(node.keyword),
                 value: ::std::boxed::Box::new(folder.fold_expr(*node.value)),
                 then_clause: node
                     .then_clause

@@ -28,7 +28,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let source_path = repository.join("src/nodes.rs");
     let source = fs::read_to_string(&source_path)?;
     let input = syntax_input(&source, &source_path)?;
-    let generated = syntax::generate(input)?;
+    let generated = syntax::generate(input)
+        .map_err(|error| format!("failed to parse syntax schema: {error}"))?;
     let directory = repository.join("src/gen");
 
     if !check {
@@ -61,7 +62,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn syntax_input(source: &str, path: &Path) -> Result<TokenStream, Box<dyn Error>> {
-    let file = syn::parse_file(source)?;
+    let file = syn::parse_file(source)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
     file.items
         .into_iter()
         .find_map(|item| match item {
@@ -78,6 +80,26 @@ fn syntax_input(source: &str, path: &Path) -> Result<TokenStream, Box<dyn Error>
 }
 
 fn rustfmt(source: &str) -> Result<String, Box<dyn Error>> {
+    let source = source
+        .replace("macro_rules !", "macro_rules!")
+        .replace("matches ! (", "matches!(")
+        .replace("compile_error ! (", "compile_error!(")
+        .replace("$ crate", "$crate")
+        .replace(":: m2_syn :: Spanned", "::m2_syn::Spanned")
+        .replace("Token ! [", "Token![")
+        .replace("Delimiter ! [", "Delimiter![")
+        .replace("Delimiter![< | | >]", "Delimiter![<| |>]")
+        .replace("Token![_ =]", "Token![_=]")
+        .replace("Token![_ <]", "Token![_<]")
+        .replace("Token![_ <=]", "Token![_<=]")
+        .replace("Token![_ >]", "Token![_>]")
+        .replace("Token![_ >=]", "Token![_>=]")
+        .replace("Token![| _]", "Token![|_]")
+        .replace("Token![| _ =]", "Token![|_=]")
+        .replace("Token![_ !]", "Token![_!]")
+        .replace("Token![_ *]", "Token![_*]")
+        .replace("Token![_ ~]", "Token![_~]");
+    let source = format_macro_rules(&source);
     let mut child = Command::new("rustfmt")
         .args(["--edition", "2024", "--emit", "stdout"])
         .stdin(Stdio::piped())
@@ -97,5 +119,144 @@ fn rustfmt(source: &str) -> Result<String, Box<dyn Error>> {
         )
         .into());
     }
-    Ok(String::from_utf8(output.stdout)?.replace("Token ! [", "Token!["))
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn format_macro_rules(source: &str) -> String {
+    let mut formatted = String::with_capacity(source.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = source[cursor..].find("macro_rules!") {
+        let start = cursor + relative_start;
+        let Some(relative_opening) = source[start..].find('{') else {
+            break;
+        };
+        let opening = start + relative_opening;
+        let Some(closing) = matching_brace(source, opening) else {
+            break;
+        };
+
+        formatted.push_str(&source[cursor..=opening]);
+        formatted.push('\n');
+        for arm in macro_arms(&source[opening + 1..closing]) {
+            formatted.push_str("    ");
+            formatted.push_str(&normalize_macro_spacing(arm));
+            formatted.push_str(";\n");
+        }
+        formatted.push('}');
+        cursor = closing + 1;
+    }
+
+    formatted.push_str(&source[cursor..]);
+    formatted
+}
+
+fn matching_brace(source: &str, opening: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+
+    for (offset, character) in source[opening..].char_indices() {
+        if quoted {
+            escaped = character == '\\' && !escaped;
+            if character == '"' && !escaped {
+                quoted = false;
+            }
+            if character != '\\' {
+                escaped = false;
+            }
+            continue;
+        }
+        if character == '"' {
+            quoted = true;
+        } else if character == '{' {
+            depth += 1;
+        } else if character == '}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(opening + offset);
+            }
+        }
+    }
+    None
+}
+
+fn macro_arms(body: &str) -> Vec<&str> {
+    let mut arms = Vec::new();
+    let mut start = 0;
+    let (mut braces, mut brackets, mut parentheses) = (0, 0, 0);
+    let mut quoted = false;
+    let mut escaped = false;
+
+    for (offset, character) in body.char_indices() {
+        if quoted {
+            escaped = character == '\\' && !escaped;
+            if character == '"' && !escaped {
+                quoted = false;
+            }
+            if character != '\\' {
+                escaped = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => quoted = true,
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            '[' => brackets += 1,
+            ']' => brackets -= 1,
+            '(' => parentheses += 1,
+            ')' => parentheses -= 1,
+            ';' if braces == 0 && brackets == 0 && parentheses == 0 => {
+                let arm = body[start..offset].trim();
+                if !arm.is_empty() {
+                    arms.push(arm);
+                }
+                start = offset + 1;
+            }
+            _ => {}
+        }
+    }
+    arms
+}
+
+fn normalize_macro_spacing(arm: &str) -> String {
+    arm.replace("$crate :: ", "$crate::")
+        .replace("$ (", "$(")
+        .replace("$ spelling", "$spelling")
+        .replace("$ parse_info", "$parse_info")
+        .replace("$ unary_action", "$unary_action")
+        .replace("$ statement_kind", "$statement_kind")
+        .replace("$ unsupported", "$unsupported")
+        .replace(" : expr", ":expr")
+        .replace(" : ident", ":ident")
+        .replace(" : tt", ":tt")
+        .replace(") *", ")*")
+        .replace("compile_error ! (", "compile_error!(")
+        .replace("[{ }]", "[{}]")
+        .replace("[< | | >]", "[<| |>]")
+        .replace("[| _ =]", "[|_=]")
+        .replace("[_ ", "[_")
+        .replace(" _]", "_]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_macro_rules;
+
+    #[test]
+    fn generated_macro_arms_are_split_and_compact() {
+        let source = "macro_rules ! Example { [_ =] => { $ crate :: Item } ; \
+                      [$ ($ unsupported : tt) *] => { compile_error ! (\"nope\") } ; }";
+
+        assert_eq!(
+            format_macro_rules(
+                &source
+                    .replace("macro_rules !", "macro_rules!")
+                    .replace("$ crate", "$crate")
+            ),
+            "macro_rules! Example {\n    [_=] => { $crate::Item };\n    \
+             [$($unsupported:tt)*] => { compile_error!(\"nope\") };\n}"
+        );
+    }
 }

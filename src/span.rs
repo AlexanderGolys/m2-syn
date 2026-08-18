@@ -2,9 +2,27 @@ use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::ops::{BitAnd, BitOr, Bound, RangeBounds};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+const FIRST_SOURCE_ID: u64 = 1;
+static NEXT_SOURCE_ID: AtomicU64 = AtomicU64::new(FIRST_SOURCE_ID);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceId(pub u64);
+
+impl SourceId {
+    /// Allocates a process-unique identity for one parsed source.
+    pub fn fresh() -> Self {
+        let id = NEXT_SOURCE_ID
+            .fetch_update(
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+                |current| current.checked_add(1),
+            )
+            .expect("source id counter exhausted");
+        Self(id)
+    }
+}
 
 /// Complete describption of position in a text document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -190,6 +208,7 @@ impl Span {
 
     pub fn join(self, other: Self) -> Self {
         match (self, other) {
+            (Self::Detached, span) | (span, Self::Detached) => span,
             (
                 Self::FileLocated { source, range },
                 Self::FileLocated {
@@ -258,6 +277,12 @@ impl<T: Spanned> Spanned for Option<T> {
 impl<T: Spanned> Spanned for Vec<T> {
     fn span(&self) -> Span {
         Span::join_all(self.iter().map(Spanned::span))
+    }
+}
+
+impl<A: Spanned, B: Spanned> Spanned for (A, B) {
+    fn span(&self) -> Span {
+        self.0.span().join(self.1.span())
     }
 }
 

@@ -30,6 +30,9 @@ impl Spanned for Span {
 struct NotSpanned;
 
 #[derive(m2_syn_macros::Spanned)]
+struct GenericPair<T>(T, T);
+
+#[derive(m2_syn_macros::Spanned)]
 enum SpannedVariants {
     Named { marker: NotSpanned, span: Span },
     Tuple(Span, Span),
@@ -48,4 +51,9 @@ fn enum_variants_use_the_same_member_span_rules_as_structs() {
     assert_eq!(named.span(), named_span);
     assert_eq!(tuple.span(), Span(3, 13));
     assert_eq!(SpannedVariants::Unit.span(), Span::detached());
+}
+
+#[test]
+fn generic_fields_receive_the_required_spanned_bound() {
+    assert_eq!(GenericPair(Span(1, 2), Span(4, 8)).span(), Span(1, 8));
 }

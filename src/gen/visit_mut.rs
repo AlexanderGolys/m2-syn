@@ -232,19 +232,19 @@ fn visit_bng_eql_mut(&mut self, node: &mut Token![!=]) {
         fn visit_ubs_mut(&mut self, node: &mut Token![_]) {
             $crate::visit_mut::visit_ubs_mut(self, node);
         }
-        fn visit_ubs_eql_mut(&mut self, node: &mut Token![_ =]) {
+        fn visit_ubs_eql_mut(&mut self, node: &mut Token![_=]) {
             $crate::visit_mut::visit_ubs_eql_mut(self, node);
         }
-        fn visit_ubs_lst_mut(&mut self, node: &mut Token![_ <]) {
+        fn visit_ubs_lst_mut(&mut self, node: &mut Token![_<]) {
             $crate::visit_mut::visit_ubs_lst_mut(self, node);
         }
-        fn visit_ubs_lst_eql_mut(&mut self, node: &mut Token![_ <=]) {
+        fn visit_ubs_lst_eql_mut(&mut self, node: &mut Token![_<=]) {
             $crate::visit_mut::visit_ubs_lst_eql_mut(self, node);
         }
-        fn visit_ubs_gst_mut(&mut self, node: &mut Token![_ >]) {
+        fn visit_ubs_gst_mut(&mut self, node: &mut Token![_>]) {
             $crate::visit_mut::visit_ubs_gst_mut(self, node);
         }
-        fn visit_ubs_gst_eql_mut(&mut self, node: &mut Token![_ >=]) {
+        fn visit_ubs_gst_eql_mut(&mut self, node: &mut Token![_>=]) {
             $crate::visit_mut::visit_ubs_gst_eql_mut(self, node);
         }
         fn visit_pip_mut(&mut self, node: &mut Token![|]) {
@@ -259,10 +259,10 @@ fn visit_bng_eql_mut(&mut self, node: &mut Token![!=]) {
         fn visit_pip_sub_eql_mut(&mut self, node: &mut Token![|-=]) {
             $crate::visit_mut::visit_pip_sub_eql_mut(self, node);
         }
-        fn visit_pip_ubs_mut(&mut self, node: &mut Token![| _]) {
+        fn visit_pip_ubs_mut(&mut self, node: &mut Token![|_]) {
             $crate::visit_mut::visit_pip_ubs_mut(self, node);
         }
-        fn visit_pip_ubs_eql_mut(&mut self, node: &mut Token![| _ =]) {
+        fn visit_pip_ubs_eql_mut(&mut self, node: &mut Token![|_=]) {
             $crate::visit_mut::visit_pip_ubs_eql_mut(self, node);
         }
         fn visit_pip_pip_mut(&mut self, node: &mut Token![||]) {
@@ -322,13 +322,13 @@ fn visit_bng_eql_mut(&mut self, node: &mut Token![!=]) {
         fn visit_crt_tld_mut(&mut self, node: &mut Token![^~]) {
             $crate::visit_mut::visit_crt_tld_mut(self, node);
         }
-        fn visit_ubs_bng_mut(&mut self, node: &mut Token![_ !]) {
+        fn visit_ubs_bng_mut(&mut self, node: &mut Token![_!]) {
             $crate::visit_mut::visit_ubs_bng_mut(self, node);
         }
-        fn visit_ubs_mul_mut(&mut self, node: &mut Token![_ *]) {
+        fn visit_ubs_mul_mut(&mut self, node: &mut Token![_*]) {
             $crate::visit_mut::visit_ubs_mul_mut(self, node);
         }
-        fn visit_ubs_tld_mut(&mut self, node: &mut Token![_ ~]) {
+        fn visit_ubs_tld_mut(&mut self, node: &mut Token![_~]) {
             $crate::visit_mut::visit_ubs_tld_mut(self, node);
         }
         fn visit_not_mut(&mut self, node: &mut Token![not]) {
@@ -1059,27 +1059,27 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_ubs_eql_mut<V>(_visitor: &mut V, _node: &mut Token![_ =])
+        pub fn visit_ubs_eql_mut<V>(_visitor: &mut V, _node: &mut Token![_=])
         where
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_ubs_lst_mut<V>(_visitor: &mut V, _node: &mut Token![_ <])
+        pub fn visit_ubs_lst_mut<V>(_visitor: &mut V, _node: &mut Token![_<])
         where
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_ubs_lst_eql_mut<V>(_visitor: &mut V, _node: &mut Token![_ <=])
+        pub fn visit_ubs_lst_eql_mut<V>(_visitor: &mut V, _node: &mut Token![_<=])
         where
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_ubs_gst_mut<V>(_visitor: &mut V, _node: &mut Token![_ >])
+        pub fn visit_ubs_gst_mut<V>(_visitor: &mut V, _node: &mut Token![_>])
         where
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_ubs_gst_eql_mut<V>(_visitor: &mut V, _node: &mut Token![_ >=])
+        pub fn visit_ubs_gst_eql_mut<V>(_visitor: &mut V, _node: &mut Token![_>=])
         where
             V: VisitMut + ?Sized,
         {
@@ -1104,12 +1104,12 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_pip_ubs_mut<V>(_visitor: &mut V, _node: &mut Token![| _])
+        pub fn visit_pip_ubs_mut<V>(_visitor: &mut V, _node: &mut Token![|_])
         where
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_pip_ubs_eql_mut<V>(_visitor: &mut V, _node: &mut Token![| _ =])
+        pub fn visit_pip_ubs_eql_mut<V>(_visitor: &mut V, _node: &mut Token![|_=])
         where
             V: VisitMut + ?Sized,
         {
@@ -1209,17 +1209,17 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_ubs_bng_mut<V>(_visitor: &mut V, _node: &mut Token![_ !])
+        pub fn visit_ubs_bng_mut<V>(_visitor: &mut V, _node: &mut Token![_!])
         where
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_ubs_mul_mut<V>(_visitor: &mut V, _node: &mut Token![_ *])
+        pub fn visit_ubs_mul_mut<V>(_visitor: &mut V, _node: &mut Token![_*])
         where
             V: VisitMut + ?Sized,
         {
         }
-        pub fn visit_ubs_tld_mut<V>(_visitor: &mut V, _node: &mut Token![_ ~])
+        pub fn visit_ubs_tld_mut<V>(_visitor: &mut V, _node: &mut Token![_~])
         where
             V: VisitMut + ?Sized,
         {
@@ -1503,7 +1503,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             for value in &mut node.elements {
                 visitor.visit_component_mut(value);
             }
-            visitor.visit_scl_mut(&mut node._muted_cell_1);
+            visitor.visit_scl_mut(&mut node.semicolon);
         }
         pub fn visit_muted_group_mut<V>(visitor: &mut V, node: &mut MutedGroup)
         where
@@ -1512,7 +1512,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
             for value in &mut node.elements {
                 visitor.visit_component_mut(value);
             }
-            visitor.visit_scl_mut(&mut node._muted_group_1);
+            visitor.visit_scl_mut(&mut node.semicolon);
         }
         pub fn visit_array_mut<V>(visitor: &mut V, node: &mut Array)
         where
@@ -1692,7 +1692,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_binding_pack_mut((&mut node.left).as_mut());
+            visitor.visit_binding_pack_mut((&mut node.binding_pack).as_mut());
             visitor.visit_eql_mut(&mut node.operator);
             visitor.visit_expr_mut((&mut node.right).as_mut());
         }
@@ -1702,7 +1702,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         ) where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_binding_pack_mut((&mut node.left).as_mut());
+            visitor.visit_binding_pack_mut((&mut node.binding_pack).as_mut());
             visitor.visit_col_eql_mut(&mut node.operator);
             visitor.visit_expr_mut((&mut node.right).as_mut());
         }
@@ -1726,21 +1726,21 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_then_keyword_mut(&mut node._then_clause_0);
+            visitor.visit_then_keyword_mut(&mut node.keyword);
             visitor.visit_expr_mut((&mut node.value).as_mut());
         }
         pub fn visit_else_clause_mut<V>(visitor: &mut V, node: &mut ElseClause)
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_else_keyword_mut(&mut node._else_clause_0);
+            visitor.visit_else_keyword_mut(&mut node.keyword);
             visitor.visit_expr_mut((&mut node.value).as_mut());
         }
         pub fn visit_if_statement_mut<V>(visitor: &mut V, node: &mut IfStatement)
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_if_keyword_mut(&mut node._if_statement_0);
+            visitor.visit_if_keyword_mut(&mut node.keyword);
             visitor.visit_expr_mut((&mut node.condition).as_mut());
             visitor.visit_then_clause_mut((&mut node.then_clause).as_mut());
             if let Some(value) = (&mut node.else_clause).as_mut() {
@@ -1751,13 +1751,13 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            if let Some(value) = (&mut node._loop_body_0).as_mut() {
+            if let Some(value) = (&mut node.list_keyword).as_mut() {
                 visitor.visit_list_keyword_mut(value);
             }
             if let Some(value) = (&mut node.listed_value).as_mut() {
                 visitor.visit_expr_mut((value).as_mut());
             }
-            if let Some(value) = (&mut node._loop_body_2).as_mut() {
+            if let Some(value) = (&mut node.do_keyword).as_mut() {
                 visitor.visit_do_keyword_mut(value);
             }
             if let Some(value) = (&mut node.ignored_value).as_mut() {
@@ -1768,19 +1768,19 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            if let Some(value) = (&mut node._iteration_range_0).as_mut() {
+            if let Some(value) = (&mut node.in_keyword).as_mut() {
                 visitor.visit_in_keyword_mut(value);
             }
             if let Some(value) = (&mut node.iterated_collection).as_mut() {
                 visitor.visit_expr_mut((value).as_mut());
             }
-            if let Some(value) = (&mut node._iteration_range_2).as_mut() {
+            if let Some(value) = (&mut node.from_keyword).as_mut() {
                 visitor.visit_from_keyword_mut(value);
             }
             if let Some(value) = (&mut node.range_start).as_mut() {
                 visitor.visit_expr_mut((value).as_mut());
             }
-            if let Some(value) = (&mut node._iteration_range_4).as_mut() {
+            if let Some(value) = (&mut node.to_keyword).as_mut() {
                 visitor.visit_to_keyword_mut(value);
             }
             if let Some(value) = (&mut node.range_end).as_mut() {
@@ -1791,12 +1791,12 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_for_keyword_mut(&mut node._for_loop_0);
+            visitor.visit_for_keyword_mut(&mut node.keyword);
             visitor.visit_symbol_mut((&mut node.variable).as_mut());
             if let Some(value) = (&mut node.range).as_mut() {
                 visitor.visit_iteration_range_mut((value).as_mut());
             }
-            if let Some(value) = (&mut node._for_loop_3).as_mut() {
+            if let Some(value) = (&mut node.when_keyword).as_mut() {
                 visitor.visit_when_keyword_mut(value);
             }
             if let Some(value) = (&mut node.filter).as_mut() {
@@ -1808,7 +1808,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_while_keyword_mut(&mut node._while_loop_0);
+            visitor.visit_while_keyword_mut(&mut node.keyword);
             visitor.visit_expr_mut((&mut node.condition).as_mut());
             visitor.visit_loop_body_mut((&mut node.body).as_mut());
         }
@@ -1816,15 +1816,15 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_new_keyword_mut(&mut node._new_statement_0);
+            visitor.visit_new_keyword_mut(&mut node.keyword);
             visitor.visit_expr_mut((&mut node.class).as_mut());
-            if let Some(value) = (&mut node._new_statement_2).as_mut() {
+            if let Some(value) = (&mut node.of_keyword).as_mut() {
                 visitor.visit_of_keyword_mut(value);
             }
             if let Some(value) = (&mut node.parent).as_mut() {
                 visitor.visit_expr_mut((value).as_mut());
             }
-            if let Some(value) = (&mut node._new_statement_4).as_mut() {
+            if let Some(value) = (&mut node.from_keyword).as_mut() {
                 visitor.visit_from_keyword_mut(value);
             }
             if let Some(value) = (&mut node.instance).as_mut() {
@@ -1844,7 +1844,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_break_keyword_mut(&mut node._break_statement_0);
+            visitor.visit_break_keyword_mut(&mut node.keyword);
             if let Some(value) = (&mut node.value).as_mut() {
                 visitor.visit_expr_mut((value).as_mut());
             }
@@ -1853,7 +1853,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_continue_keyword_mut(&mut node._continue_statement_0);
+            visitor.visit_continue_keyword_mut(&mut node.keyword);
             if let Some(value) = (&mut node.value).as_mut() {
                 visitor.visit_expr_mut((value).as_mut());
             }
@@ -1862,7 +1862,7 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_return_keyword_mut(&mut node._return_statement_0);
+            visitor.visit_return_keyword_mut(&mut node.keyword);
             if let Some(value) = (&mut node.value).as_mut() {
                 visitor.visit_expr_mut((value).as_mut());
             }
@@ -1871,37 +1871,37 @@ pub fn visit_bng_eql_mut<V>(_visitor: &mut V, _node: &mut Token![!=])
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_catch_keyword_mut(&mut node._catch_statement_0);
+            visitor.visit_catch_keyword_mut(&mut node.keyword);
             visitor.visit_expr_mut((&mut node.value).as_mut());
         }
         pub fn visit_throw_statement_mut<V>(visitor: &mut V, node: &mut ThrowStatement)
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_throw_keyword_mut(&mut node._throw_statement_0);
+            visitor.visit_throw_keyword_mut(&mut node.keyword);
             visitor.visit_expr_mut((&mut node.value).as_mut());
         }
         pub fn visit_trap_statement_mut<V>(visitor: &mut V, node: &mut TrapStatement)
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_trap_keyword_mut(&mut node._trap_statement_0);
+            visitor.visit_trap_keyword_mut(&mut node.keyword);
             visitor.visit_expr_mut((&mut node.value).as_mut());
         }
         pub fn visit_except_clause_mut<V>(visitor: &mut V, node: &mut ExceptClause)
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_except_keyword_mut(&mut node._except_clause_0);
+            visitor.visit_except_keyword_mut(&mut node.keyword);
             visitor.visit_symbol_mut((&mut node.exception).as_mut());
-            visitor.visit_do_keyword_mut(&mut node._except_clause_2);
+            visitor.visit_do_keyword_mut(&mut node.do_keyword);
             visitor.visit_expr_mut((&mut node.value).as_mut());
         }
         pub fn visit_try_statement_mut<V>(visitor: &mut V, node: &mut TryStatement)
         where
             V: VisitMut + ?Sized,
         {
-            visitor.visit_try_keyword_mut(&mut node._try_statement_0);
+            visitor.visit_try_keyword_mut(&mut node.keyword);
             visitor.visit_expr_mut((&mut node.value).as_mut());
             if let Some(value) = (&mut node.then_clause).as_mut() {
                 visitor.visit_then_clause_mut((value).as_mut());

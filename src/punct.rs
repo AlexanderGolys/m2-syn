@@ -12,7 +12,7 @@ type Semicolon = Token![;];
 ///
 /// Empty components evaluate as null but emit no token text. Their spans mark
 /// the source position at which the omitted component occurs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Spanned)]
 pub struct Empty {
     span: Span,
 }
@@ -24,9 +24,13 @@ impl Empty {
     }
 }
 
-impl Spanned for Empty {
-    fn span(&self) -> Span {
-        self.span
+impl Parse for Empty {
+    fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
+        let span = input
+            .peek()
+            .map(|token| empty_before(token.span()))
+            .unwrap_or_else(|| input.eof_span());
+        Ok(Self::new(span))
     }
 }
 
@@ -35,7 +39,7 @@ impl ToTokens for Empty {
 }
 
 /// One value together with its following punctuation, or the unpunctuated end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Spanned)]
 pub enum Pair<S, P = Comma> {
     Punctuated(S, P),
     End(S),
@@ -58,11 +62,78 @@ impl<S, P> Pair<S, P> {
     }
 }
 
+impl<S, P> Parse for Pair<S, P>
+where
+    S: Parse,
+    P: Parse,
+{
+    fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
+        let value = S::parse(input)?;
+        let mut fork = input.fork();
+        match P::parse(&mut fork) {
+            Ok(punctuation) => {
+                input.advance_to(&fork);
+                Ok(Self::Punctuated(value, punctuation))
+            }
+            Err(_) => Ok(Self::End(value)),
+        }
+    }
+}
+
+impl<S: ToTokens, P: ToTokens> ToTokens for Pair<S, P> {
+    fn to_tokens(&self, output: &mut TokenStream) {
+        match self {
+            Self::Punctuated(value, punctuation) => {
+                value.to_tokens(output);
+                punctuation.to_tokens(output);
+            }
+            Self::End(value) => value.to_tokens(output),
+        }
+    }
+}
+
+/// Names or constructs a comma-punctuated sequence.
+///
+/// - `punct!(T)` names `Punctuated<T>`.
+/// - `punct!()` constructs an empty sequence.
+/// - `punct!(value first)` constructs one value.
+/// - `punct!(pairs first; comma => second, ...)` constructs a sequence while
+///   retaining every supplied typed comma and its span.
+#[macro_export]
+macro_rules! punct {
+    () => {
+        $crate::Punctuated::new()
+    };
+    (value $value:expr) => {
+        $crate::Punctuated::from_value($value)
+    };
+    (pairs $first:expr; $($punctuation:expr => $next:expr),+ $(,)?) => {{
+        let mut values = $crate::Punctuated::from_value($first);
+        $(values.push($punctuation, $next);)+
+        values
+    }};
+    ($value:ty) => {
+        $crate::Punctuated<$value>
+    };
+}
+
 /// A sequence of syntax values separated by typed comma tokens.
 ///
 /// Ordinary iteration exposes only values. Use [`Punctuated::pairs`] or
 /// [`Punctuated::into_pairs`] when punctuation and its spans are significant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// ```
+/// use m2_syn::{Span, ToTokens};
+///
+/// type Pluses = m2_syn::punct!(m2_syn::Token![+]);
+/// let comma = m2_syn::Token![,](Span::detached());
+/// let values: Pluses = m2_syn::punct!(
+///     pairs m2_syn::Token![+](Span::detached());
+///     comma => m2_syn::Token![+](Span::detached()),
+/// );
+/// assert_eq!(values.to_m2(), "+,+");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Spanned)]
 pub struct Punctuated<S> {
     inner: Vec<(S, Comma)>,
     last: Option<Box<S>>,
@@ -145,11 +216,37 @@ impl<S> Punctuated<S> {
         self.inner.push((*previous, punctuation));
         self.last = Some(Box::new(next));
     }
+
+    /// Transforms the values while retaining every comma token and its span.
+    pub fn map<T>(self, mut map: impl FnMut(S) -> T) -> Punctuated<T> {
+        Punctuated {
+            inner: self
+                .inner
+                .into_iter()
+                .map(|(value, comma)| (map(value), comma))
+                .collect(),
+            last: self.last.map(|value| Box::new(map(*value))),
+        }
+    }
 }
 
 impl<S> Default for Punctuated<S> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<S> FromIterator<S> for Punctuated<S> {
+    fn from_iter<T: IntoIterator<Item = S>>(iter: T) -> Self {
+        let mut iter = iter.into_iter();
+        let Some(first) = iter.next() else {
+            return Self::new();
+        };
+        let mut values = Self::from_value(first);
+        for value in iter {
+            values.push(Token![,](Span::detached()), value);
+        }
+        values
     }
 }
 
@@ -159,7 +256,7 @@ where
 {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
         let mut values = Self::new();
-        if input.is_empty() {
+        if input.is_eof() {
             return Ok(values);
         }
 
@@ -178,7 +275,7 @@ where
             .is_some_and(<Comma as Token>::matches_token_tree)
         {
             let punctuation = Comma::parse(input)?;
-            let next = if input.is_empty()
+            let next = if input.is_eof()
                 || input.peek().is_some_and(|token| {
                     <Comma as Token>::matches_token_tree(token)
                         || <Semicolon as Token>::matches_token_tree(token)
@@ -194,16 +291,6 @@ where
             values.push(punctuation, next);
         }
         Ok(values)
-    }
-}
-
-impl<S: Spanned> Spanned for Punctuated<S> {
-    fn span(&self) -> Span {
-        Span::join_all(
-            self.iter()
-                .map(Spanned::span)
-                .chain(self.inner.iter().map(|(_, punctuation)| punctuation.span())),
-        )
     }
 }
 

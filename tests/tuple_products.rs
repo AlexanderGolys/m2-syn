@@ -1,16 +1,23 @@
 use std::borrow::Cow;
 
-use m2_syn::{CSTNodeClassLabel, ExternalCstChild, ExternalCstNode, Reconstruct, Span, syntax};
+use m2_syn::{
+    CSTNodeClassLabel, ExternalCstChild, ExternalCstNode, Reconstruct, Span, Spanned, syntax,
+};
 
 syntax! {
+    precedence: {}
+    augmented: (14, 13)
     tokens {}
     keywords: {}
     markers: {}
     punct: {}
 
-    Left ::= leaf
-    Right ::= leaf
-    Pair ::= (Left, Right)
+    struct Left;
+    struct Right;
+    struct Pair {
+        left: (_) Left,
+        right: (_) Right,
+    }
 }
 
 #[derive(Clone)]
@@ -50,20 +57,22 @@ impl ExternalCstNode for Node {
     fn text(&self) -> Cow<'_, str> {
         Cow::Borrowed(self.name)
     }
+}
 
+impl Spanned for Node {
     fn span(&self) -> Span {
         Span::detached()
     }
 }
 
 #[test]
-fn tuple_product_fields_default_to_unfielded_children() {
+fn positional_fields_reconstruct_from_unnamed_cst_children() {
     let pair = Pair::reconstruct(Node {
         name: "pair",
         children: vec![Node::leaf("left"), Node::leaf("right")],
     })
     .unwrap();
 
-    assert_eq!(pair._pair_0.text, "left");
-    assert_eq!(pair._pair_1.text, "right");
+    assert_eq!(pair.left.text, "left");
+    assert_eq!(pair.right.text, "right");
 }

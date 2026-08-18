@@ -1,12 +1,12 @@
 //! Value-returning bodies with semicolon-terminated discarded statements.
 
 use crate::cst::Token;
-use crate::{Parse, ParseStream, Span, Spanned, ToTokens, TokenParseError, TokenStream};
+use crate::{Parse, ParseStream, Spanned, ToTokens, TokenParseError, TokenStream};
 
 type Semicolon = Token![;];
 
 /// A statement whose value is discarded by a trailing semicolon.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Spanned)]
 pub struct Terminated<S> {
     pub statement: S,
     pub semicolon: Semicolon,
@@ -24,13 +24,8 @@ impl<S> Terminated<S> {
 
 impl<S: Parse> Parse for Terminated<S> {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
+        reject_empty_statement(input)?;
         Ok(Self::new(S::parse(input)?, Parse::parse(input)?))
-    }
-}
-
-impl<S: Spanned> Spanned for Terminated<S> {
-    fn span(&self) -> Span {
-        self.statement.span().join(self.semicolon.span())
     }
 }
 
@@ -45,7 +40,7 @@ impl<S: ToTokens> ToTokens for Terminated<S> {
 ///
 /// This is analogous to a Rust block: every terminated statement is evaluated
 /// for effects, while the unterminated tail supplies the body's value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Spanned)]
 pub struct Body<S> {
     pub statements: Vec<Terminated<S>>,
     pub tail: Option<S>,
@@ -61,7 +56,8 @@ impl<S> Body<S> {
 impl<S: Parse> Parse for Body<S> {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
         let mut statements = Vec::new();
-        while !input.is_empty() {
+        while !input.is_eof() {
+            reject_empty_statement(input)?;
             let statement = S::parse(input)?;
             if input
                 .peek()
@@ -76,15 +72,18 @@ impl<S: Parse> Parse for Body<S> {
     }
 }
 
-impl<S: Spanned> Spanned for Body<S> {
-    fn span(&self) -> Span {
-        Span::join_all(
-            self.statements
-                .iter()
-                .map(Spanned::span)
-                .chain(self.tail.iter().map(Spanned::span)),
-        )
-    }
+fn reject_empty_statement(input: &ParseStream) -> Result<(), TokenParseError> {
+    let Some(token) = input
+        .peek()
+        .filter(|token| <Semicolon as Token>::matches_token_tree(token))
+    else {
+        return Ok(());
+    };
+    Err(TokenParseError::UnexpectedToken {
+        expected: "a statement before `;`",
+        found: ";".to_owned(),
+        span: token.span(),
+    })
 }
 
 impl<S: ToTokens> ToTokens for Body<S> {

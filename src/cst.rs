@@ -11,7 +11,7 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use crate::{Span, Spanned, TokenTree};
+use crate::{Spanned, TokenTree};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Backend-local node identity used only during external CST reconstruction.
@@ -42,7 +42,7 @@ pub struct ExternalCstChild<N> {
 ///
 /// This trait is deliberately confined to parser adapters. Its homogeneous
 /// child iterator must not be used to model or walk the typed syntax graph.
-pub trait ExternalCstNode: Sized {
+pub trait ExternalCstNode: Sized + Spanned {
     type Children<'syntax>: Iterator<Item = ExternalCstChild<Self>>
     where
         Self: 'syntax;
@@ -50,8 +50,6 @@ pub trait ExternalCstNode: Sized {
     fn identity(&self) -> CSTNodeClassLabel<'_>;
     fn children(&self) -> Self::Children<'_>;
     fn text(&self) -> Cow<'_, str>;
-    fn span(&self) -> Span;
-
     fn is_extra(&self) -> bool {
         false
     }

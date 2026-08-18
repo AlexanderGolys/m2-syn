@@ -5,7 +5,7 @@ mod traversal;
 
 use crate::tokens::{OperatorKind, TokenDefinitions};
 use proc_macro2::{Ident, TokenStream};
-use quote::{format_ident, quote};
+use quote::{ToTokens as _, format_ident, quote};
 use std::collections::{BTreeMap, BTreeSet};
 use syn::parse::{Parse, ParseStream};
 use syn::{Attribute, Error, Member, Result, Token, Visibility};
@@ -98,7 +98,7 @@ struct FieldDefinition {
 
 enum FieldSource {
     Named(String),
-    Unfielded,
+    Positional,
 }
 
 #[derive(Clone, Copy)]
@@ -167,6 +167,7 @@ enum TypeShape {
     Base(TokenStream, Ident),
     Optional(Box<Self>),
     Repeated(Box<Self>),
+    Punctuated(Box<Self>),
 }
 
 impl TypeShape {
@@ -181,7 +182,9 @@ impl TypeShape {
     fn base_ident(&self) -> &Ident {
         match self {
             Self::Base(_, ident) => ident,
-            Self::Optional(inner) | Self::Repeated(inner) => inner.base_ident(),
+            Self::Optional(inner) | Self::Repeated(inner) | Self::Punctuated(inner) => {
+                inner.base_ident()
+            }
         }
     }
 }
@@ -320,7 +323,13 @@ impl Syntax {
             .unwrap_or_else(|| to_snake_case(&name.to_string()));
         match &definition.fields {
             StructFields::Leaf => {
+                let output = if name == "EmptyComponent" {
+                    format_ident!("_output")
+                } else {
+                    format_ident!("output")
+                };
                 let emit = match name.to_string().as_str() {
+                    "EmptyComponent" => quote! {},
                     "FloatLiteral" => quote! {
                         output.push_literal(::m2_syn::Literal::new(
                             ::m2_syn::LiteralKind::Float,
@@ -356,6 +365,11 @@ impl Syntax {
                         ));
                     },
                 };
+                let pretty_text = if name == "EmptyComponent" {
+                    quote!("∅")
+                } else {
+                    quote!(&self.text)
+                };
                 Ok(quote! {
 
                 #(#attrs)*
@@ -372,8 +386,18 @@ impl Syntax {
                 }
 
                 impl ::m2_syn::ToTokens for #name {
-                    fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
+                    fn to_tokens(&self, #output: &mut ::m2_syn::TokenStream) {
                         #emit
+                    }
+                }
+
+                impl ::m2_syn::PrettyTree for #name {
+                    fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                        ::m2_syn::PrettyNode::token(
+                            stringify!(#name),
+                            #pretty_text,
+                            ::m2_syn::Spanned::span(self),
+                        )
                     }
                 }
 
@@ -445,11 +469,9 @@ impl Syntax {
                     })
                     .collect::<Vec<_>>();
                 let constructor_fields = fields.iter().map(|field| &field.binding);
-                let constructor_delimiter = typed_delimiter.as_ref().map(|ty| {
-                    quote!(let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(
-                        ::m2_syn::DoubleSpan::new(span, span),
-                    );)
-                });
+                let constructor_delimiter = typed_delimiter.as_ref().map(
+                    |ty| quote!(let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(span);),
+                );
                 let delimiter_member = typed_delimiter.as_ref().map(|_| quote!(delimiter,));
                 let constructor_value = if constructor_delimiter.is_some() {
                     quote!({
@@ -479,11 +501,9 @@ impl Syntax {
                     .map(|field| field.reconstruct(token_like))
                     .collect::<Result<Vec<_>>>()?;
                 let reconstructed_fields = fields.iter().map(|field| &field.binding);
-                let reconstruct_delimiter = typed_delimiter.as_ref().map(|ty| {
-                    quote!(let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(
-                        ::m2_syn::DoubleSpan::new(span, span),
-                    );)
-                });
+                let reconstruct_delimiter = typed_delimiter.as_ref().map(
+                    |ty| quote!(let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(span);),
+                );
                 let reconstruct_span = typed_delimiter
                     .as_ref()
                     .map(|_| quote!(let span = node.span();));
@@ -502,6 +522,16 @@ impl Syntax {
                     .iter()
                     .map(|field| field.to_tokens(field_separator))
                     .collect::<Result<Vec<_>>>()?;
+                let pretty_fields = fields.iter().map(|field| {
+                    let member = &field.member;
+                    let label = member.to_token_stream().to_string();
+                    quote! {
+                        node.push(#label, &self.#member);
+                    }
+                });
+                let pretty_delimiter = typed_delimiter
+                    .as_ref()
+                    .map(|_| quote!(node.push("delimiter", self.delimiter);));
                 let emit_contents = match definition.delimiter {
                     Some(DelimiterKind::String) => quote! {
                         output.push_literal(::m2_syn::Literal::new(
@@ -544,6 +574,18 @@ impl Syntax {
                             let mut contents = ::m2_syn::TokenStream::new();
                             #(#print_fields)*
                             #emit_contents
+                        }
+                    }
+
+                    impl ::m2_syn::PrettyTree for #name {
+                        fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                            let mut node = ::m2_syn::PrettyNode::syntax(
+                                stringify!(#name),
+                                ::m2_syn::Spanned::span(self),
+                            );
+                            #(#pretty_fields)*
+                            #pretty_delimiter
+                            node
                         }
                     }
 
@@ -782,7 +824,7 @@ impl FieldDefinition {
         let ty = element.source_type();
         let field_match = match &self.source {
             FieldSource::Named(field) => quote!(child.field == Some(#field)),
-            FieldSource::Unfielded => quote!(child.field.is_none()),
+            FieldSource::Positional => quote!(child.field.is_none()),
         };
         Some(quote!(node.children().any(|child| {
             #field_match && <#ty as ::m2_syn::Reconstruct<N>>::matches(&child.node)
@@ -803,17 +845,26 @@ impl FieldDefinition {
             (FieldSource::Named(field), Cardinality::Repeated) => {
                 quote!(children.repeated_field(#field))
             }
-            (FieldSource::Unfielded, Cardinality::Required) => {
+            (FieldSource::Named(field), Cardinality::Punctuated) => {
+                quote!(children.repeated_field(#field))
+            }
+            (FieldSource::Positional, Cardinality::Required) => {
                 quote!(children.required_matching::<#base_type>()?)
             }
-            (FieldSource::Unfielded, Cardinality::Optional) => {
+            (FieldSource::Positional, Cardinality::Optional) => {
                 quote!(children.optional_matching::<#base_type>())
             }
-            (FieldSource::Unfielded, Cardinality::Repeated) => {
+            (FieldSource::Positional, Cardinality::Repeated) => {
+                quote!(children.repeated_matching::<#base_type>())
+            }
+            (FieldSource::Positional, Cardinality::Punctuated) => {
                 quote!(children.repeated_matching::<#base_type>())
             }
         };
-        let stored_element = element.stored_shape(token_like, cardinality == Cardinality::Repeated);
+        let stored_element = element.stored_shape(
+            token_like,
+            matches!(cardinality, Cardinality::Repeated | Cardinality::Punctuated),
+        );
         Ok(match cardinality {
             Cardinality::Required => {
                 let reconstructed = quote!(
@@ -840,6 +891,16 @@ impl FieldDefinition {
                         Ok::<_, ::m2_syn::ReconstructError>(#value)
                     })
                     .collect::<Result<::std::vec::Vec<_>, _>>()?;)
+            }
+            Cardinality::Punctuated => {
+                let value = stored_element.wrap_value(quote!(value));
+                quote!(let #binding = #selected
+                    .into_iter()
+                    .map(|node| {
+                        let value = <#base_type as ::m2_syn::Reconstruct<N>>::reconstruct(node)?;
+                        Ok::<_, ::m2_syn::ReconstructError>(#value)
+                    })
+                    .collect::<Result<::m2_syn::Punctuated<_>, _>>()?;)
             }
         })
     }
@@ -875,6 +936,9 @@ impl FieldDefinition {
                     }
                 }
             }
+            Cardinality::Punctuated => quote! {
+                ::m2_syn::ToTokens::to_tokens(&self.#member, &mut field_output);
+            },
         };
         let separator = (!self.attached && !field_separator.is_empty()).then_some(field_separator);
         let separate = separator.map(|separator| {
@@ -946,6 +1010,7 @@ enum Cardinality {
     Required,
     Optional,
     Repeated,
+    Punctuated,
 }
 
 #[derive(Clone)]
@@ -954,6 +1019,7 @@ enum StoredShape {
     Boxed(Box<Self>),
     Optional(Box<Self>),
     Repeated(Box<Self>),
+    Punctuated(Box<Self>),
 }
 
 impl TypeShape {
@@ -967,6 +1033,10 @@ impl TypeShape {
             Self::Repeated(inner) => {
                 let inner = inner.source_type();
                 quote!(::std::vec::Vec<#inner>)
+            }
+            Self::Punctuated(inner) => {
+                let inner = inner.source_type();
+                quote!(::m2_syn::Punctuated<#inner>)
             }
         }
     }
@@ -990,6 +1060,9 @@ impl TypeShape {
             }
             Self::Repeated(inner) => {
                 StoredShape::Repeated(Box::new(inner.stored_shape(token_like, true)))
+            }
+            Self::Punctuated(inner) => {
+                StoredShape::Punctuated(Box::new(inner.stored_shape(token_like, true)))
             }
         }
     }
@@ -1029,6 +1102,10 @@ impl TypeShape {
                     converted_values
                 })
             }
+            (Self::Punctuated(source), StoredShape::Punctuated(target)) => {
+                let converted = source.convert_value(target, quote!(value));
+                quote!(#value.map(|value| #converted))
+            }
             _ => quote!(#value),
         }
     }
@@ -1037,7 +1114,8 @@ impl TypeShape {
         match (self, stored) {
             (Self::Base(_, _), StoredShape::Base(_, _)) => true,
             (Self::Optional(source), StoredShape::Optional(target))
-            | (Self::Repeated(source), StoredShape::Repeated(target)) => {
+            | (Self::Repeated(source), StoredShape::Repeated(target))
+            | (Self::Punctuated(source), StoredShape::Punctuated(target)) => {
                 source.conversion_is_identity(target)
             }
             _ => false,
@@ -1047,16 +1125,30 @@ impl TypeShape {
     fn cardinality(&self) -> Result<(Cardinality, &Self)> {
         match self {
             Self::Optional(inner)
-                if !matches!(inner.as_ref(), Self::Optional(_) | Self::Repeated(_)) =>
+                if !matches!(
+                    inner.as_ref(),
+                    Self::Optional(_) | Self::Repeated(_) | Self::Punctuated(_)
+                ) =>
             {
                 Ok((Cardinality::Optional, inner))
             }
             Self::Repeated(inner)
-                if !matches!(inner.as_ref(), Self::Optional(_) | Self::Repeated(_)) =>
+                if !matches!(
+                    inner.as_ref(),
+                    Self::Optional(_) | Self::Repeated(_) | Self::Punctuated(_)
+                ) =>
             {
                 Ok((Cardinality::Repeated, inner))
             }
-            Self::Optional(_) | Self::Repeated(_) => Err(Error::new(
+            Self::Punctuated(inner)
+                if !matches!(
+                    inner.as_ref(),
+                    Self::Optional(_) | Self::Repeated(_) | Self::Punctuated(_)
+                ) =>
+            {
+                Ok((Cardinality::Punctuated, inner))
+            }
+            Self::Optional(_) | Self::Repeated(_) | Self::Punctuated(_) => Err(Error::new(
                 self.base_ident().span(),
                 "nested Option and Vec fields need an explicit reconstruction strategy",
             )),
@@ -1081,6 +1173,10 @@ impl StoredShape {
                 let inner = inner.ty();
                 quote!(::std::vec::Vec<#inner>)
             }
+            Self::Punctuated(inner) => {
+                let inner = inner.ty();
+                quote!(::m2_syn::Punctuated<#inner>)
+            }
         }
     }
 
@@ -1091,7 +1187,7 @@ impl StoredShape {
                 let value = inner.wrap_value(value);
                 quote!(::std::boxed::Box::new(#value))
             }
-            Self::Optional(_) | Self::Repeated(_) => value,
+            Self::Optional(_) | Self::Repeated(_) | Self::Punctuated(_) => value,
         }
     }
 
@@ -1110,6 +1206,10 @@ impl StoredShape {
                 let visit = inner.visit(quote!(value));
                 quote!(for value in #value { #visit })
             }
+            Self::Punctuated(inner) => {
+                let visit = inner.visit(quote!(value));
+                quote!(for value in #value { #visit })
+            }
         }
     }
 
@@ -1125,6 +1225,10 @@ impl StoredShape {
                 quote!(if let Some(value) = (#value).as_mut() { #visit })
             }
             Self::Repeated(inner) => {
+                let visit = inner.visit_mut(quote!(value));
+                quote!(for value in #value { #visit })
+            }
+            Self::Punctuated(inner) => {
                 let visit = inner.visit_mut(quote!(value));
                 quote!(for value in #value { #visit })
             }
@@ -1149,6 +1253,10 @@ impl StoredShape {
                 let folded = inner.fold(quote!(value));
                 quote!(#value.into_iter().map(|value| #folded).collect())
             }
+            Self::Punctuated(inner) => {
+                let folded = inner.fold(quote!(value));
+                quote!(#value.map(|value| #folded))
+            }
         }
     }
 }
@@ -1166,6 +1274,19 @@ fn expand_enum(definition: &EnumDefinition, tokens: &TokenDefinitions) -> TokenS
     let token_arms = definition.variants.iter().map(|variant| {
         let variant = &variant.name;
         quote!(Self::#variant(node) => ::m2_syn::ToTokens::to_tokens(node, output))
+    });
+    let pretty_arms = definition.variants.iter().map(|variant| {
+        let variant = &variant.name;
+        quote! {
+            Self::#variant(value) => {
+                ::m2_syn::PrettyNode::variant(
+                    stringify!(#name),
+                    stringify!(#variant),
+                    ::m2_syn::Spanned::span(self),
+                    ::m2_syn::PrettyTree::pretty_tree(value),
+                )
+            }
+        }
     });
     let matches = definition
         .variants
@@ -1264,6 +1385,12 @@ fn expand_enum(definition: &EnumDefinition, tokens: &TokenDefinitions) -> TokenS
             }
         }
 
+        impl ::m2_syn::PrettyTree for #name {
+            fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                match self { #(#pretty_arms,)* #borrowed_fallback }
+            }
+        }
+
         impl<N> ::m2_syn::Reconstruct<N> for #name
         where
             N: ::m2_syn::ExternalCstNode,
@@ -1312,15 +1439,17 @@ mod tests {
     #[test]
     fn staged_tokens_feed_one_lookup_macro_and_operator_enums() {
         let syntax: Syntax = parse2(quote! {
+            precedence: {}
+            augmented: (14, 13)
             tokens {
-                [+] {pref, bin, aug}
-                [!] {post}
+                [+] { pref, bin, aug } (50, 50, 50)
+                [!] { post } (72, _, _)
             }
             keywords: { [if] }
             markers: {}
             punct: { [,] }
 
-            Leaf ::= leaf
+            struct Leaf;
         })
         .unwrap();
         let expansion = syntax.expand().unwrap().combined();
@@ -1328,6 +1457,14 @@ mod tests {
         let expansion = expansion.to_string();
 
         assert_eq!(expansion.matches("macro_rules ! Token").count(), 1);
+        assert_eq!(
+            expansion
+                .matches("macro_rules ! __m2_syn_parse_info")
+                .count(),
+            1
+        );
+        assert!(expansion.contains("prefix_binary"));
+        assert!(expansion.contains("postfix"));
         assert!(expansion.contains("enum PrefixOperator"));
         assert!(expansion.contains("enum BinaryOperator"));
         assert!(expansion.contains("enum PostfixOperator"));

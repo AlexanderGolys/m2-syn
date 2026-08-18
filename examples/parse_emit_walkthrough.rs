@@ -1,6 +1,6 @@
 use m2_syn::{
     IdentToken, Parse, ParseStream, Span, Spanned, ToTokens, TokenParseError, TokenStream,
-    TokenTree, parse2, quote_m2,
+    TokenTree, parse1, quote_m2,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,14 +62,14 @@ fn main() -> Result<(), TokenParseError> {
     let quoted = quote_m2!(left + right);
     println!("1. quote_m2! produced:\n{quoted:#?}\n");
 
-    let parsed: Addition = parse2(quoted)?;
+    let parsed: Addition = parse1(quoted)?;
     println!("2. Parse produced:\n{parsed:#?}\n");
 
     let emitted = parsed.to_token_stream();
     println!("3. ToTokens produced:\n{emitted:#?}\n");
     println!("4. Display merged those tokens as: {emitted}");
 
-    let reparsed: Addition = parse2(emitted)?;
+    let reparsed: Addition = parse1(emitted)?;
     assert_eq!(reparsed, parsed);
 
     Ok(())

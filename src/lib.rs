@@ -12,6 +12,7 @@ pub mod lexer;
 pub mod native;
 pub mod parse;
 mod parsed_file;
+pub mod pretty;
 pub mod punct;
 mod span;
 mod token_stream;
@@ -24,7 +25,7 @@ pub use treesitter::{ParseError, TreeSitterParser, parse_file, parse_tokens};
 
 pub use parse::{
     FragmentParseError, Parse, ParseStream, Parser, TokenParseError, parse_fragment_str,
-    parse_with, parse2, reconstruct,
+    parse_with, parse1, reconstruct,
 };
 
 pub use body::{Body, Terminated};
@@ -38,10 +39,13 @@ pub use m2_syn_macros::{Spanned, parse_quote_m2, quote_m2, syntax};
 pub use native::{NativeParseError, NativeParser, parse_native};
 pub use nodes::*;
 pub use parsed_file::ParsedFile;
+pub use pretty::{PrettyNode, PrettyOptions, PrettyReport, PrettyTree};
 pub use punct::Punctuated;
 pub use span::{MissingData, SourceId, Span, Spanned, TextPoint, TextRange};
-pub use token_stream::delim::{Delimiter, DelimiterKind, DelimiterToken, DoubleSpan};
+#[doc(hidden)]
+pub use token_stream::delim::parse_delimiter;
+pub use token_stream::delim::{Delimiter, DelimiterKind, DelimiterToken};
 pub use token_stream::{
-    CellBlock, CellStream, Group, IdentToken, Literal, LiteralKind, Punct, ToCellStream, ToTokens,
+    CellBlock, CellStream, Group, IdentToken, Literal, LiteralKind, Punct, ToCells, ToTokens,
     TokenStream, TokenTree, Trivia, TriviaKind,
 };

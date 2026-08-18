@@ -1,9 +1,11 @@
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Result};
 
 use crate::{Span, Spanned};
 
+use super::{ToTokens, TokenStream};
+
 /// One maximal-munch M2 punctuation token.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Spanned)]
 pub struct Punct {
     text: String,
     span: Span,
@@ -22,14 +24,14 @@ impl Punct {
     }
 }
 
-impl Spanned for Punct {
-    fn span(&self) -> Span {
-        self.span
+impl Display for Punct {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
+        formatter.write_str(self.text())
     }
 }
 
-impl Display for Punct {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.text())
+impl ToTokens for Punct {
+    fn to_tokens(&self, output: &mut TokenStream) {
+        output.push_punct(self.clone());
     }
 }

@@ -5,85 +5,104 @@ macro_rules! syntax_schema {
 // This inert invocation is the single source of truth consumed by the
 // generator. The checked-in expansion is included below.
 syntax_schema! {
-    tokens {
-        [!=]        {bin}
-        [#]         {pref, bin}
-        [#?]		{bin}
-        [%]			{bin, aug}
-        [&]			{bin, aug}
-        [*]			{bin, pref, aug}
-        [**]		{bin, aug}
-        [+]			{bin, pref, aug}
-        [++]		{bin, aug}
-        [-]			{pref, bin, aug}
-        [->]		{}
-        [.]			{bin}
-        [..]		{bin, aug}
-        [..<]		{bin, aug}
-        [.?]		{bin}
-        [/]			{bin, aug}
-        [/ /]		{bin, aug}
-        [:]			{bin, aug}
-        [<]			{pref, bin}
-        [<-]		{}
-        [<<]		{pref, bin, aug}
-        [<=]		{pref, bin}
-        [<==]		{pref, bin}
-        [<===]		{pref, bin}
-        [<==>]		{bin, aug}
-        [=]			{}
-        [=!=]		{bin}
-        [==]		{bin}
-        [===]		{bin}
-        [===>]		{bin, aug}
-        [==>]		{bin, aug}
-        [=>]		{}
-        [>]			{pref, bin}
-        [>=]		{pref, bin}
-        [>>]		{bin, aug}
-        [?]			{pref, bin}
-        [??]		{pref, bin, aug}
-        [@]			{bin, aug}
-        [@@]		{bin, aug}
-        [@@?]		{bin, aug}
-        ["\\"]		{bin, aug}
-        ["\\\\"]    {bin, aug}
-        [^]			{bin, aug}
-        [^**]		{bin, aug}
-        [^<]		{bin}
-        [^<=]		{bin}
-        [^>]		{bin}
-        [^>=]		{bin}
-        [^^]		{bin, aug}
-        [_]			{bin, aug}
-        [_<]		{bin}
-        [_<=]		{bin}
-        [_>]		{bin}
-        [_>=]		{bin}
-        [|]			{bin, aug}
-        [|-]		{pref, bin, aug}
-        [|_]		{bin, aug}
-        [||]		{bin, aug}
-        [~]			{pref, bin, aug}
-        ["·"]		{bin, aug}
-        ["⊠"]		{bin, aug}
-        ["⧢"]		{bin, aug}
-        [and]		{bin}
-        [or]		{bin}
-        [SPACE]		{bin}
-        [xor]		{bin}
-        [!]			{post}
-        [(*)]		{post}
-        [^!]		{post}
-        [^*]		{post}
-        [^~]		{post}
-        [_!]		{post}
-        [_*]		{post}
-        [_~]		{post}
-        [not]		{pref}
+    // Structural precedences with no single owning operator token; consumed
+    // directly by the native parser. Operator tokens below carry their own
+    // precedence numbers inline instead of naming a shared table entry.
+    precedence: {
+        PREC_CLOSER = 6,
+        PREC_SEMICOLON = 8,
+        PREC_COMMA = 10,
+        PREC_CONTROL = 12,
+        PREC_LOOP_CLAUSE = 16,
+        PREC_COLLECTION = 56,
+        PREC_APPLICATION_RIGHT = 61,
+        PREC_APPLICATION = 62,
+        PREC_QUOTE = 74,
     }
 
-    keywords: {
+    augmented: (14, 13)
+
+    // Each row carries (precedence, binary_strength, unary_strength); `_`
+    // marks a slot the row's flags don't use.
+    tokens {
+        [!=]       { bin }             (36, 35, _)
+        [#]        { bin, pref }       (70, 70, 61)
+        [#?]       { bin }             (70, 70, _)
+        [%]        { bin, aug }        (58, 58, _)
+        [&]        { bin, aug }        (46, 46, _)
+        [*]        { bin, pref, aug }  (58, 58, 58)
+        [**]       { bin, aug }        (54, 54, _)
+        [+]        { bin, pref, aug }  (50, 50, 50)
+        [++]       { bin, aug }        (50, 50, _)
+        [-]        { bin, pref, aug }  (50, 50, 50)
+        [->]       { infix }           (14, 13, _)
+        [.]        { bin }             (70, 70, _)
+        [..]       { bin, aug }        (48, 48, _)
+        [..<]      { bin, aug }        (48, 48, _)
+        [.?]       { bin }             (70, 70, _)
+        [/]        { bin, aug }        (58, 58, _)
+        [/ /]      { bin, aug }        (58, 58, _)
+        [:]        { bin, aug }        (40, 39, _)
+        [<]        { bin, pref }       (36, 35, 36)
+        [<-]       { infix }           (14, 13, _)
+        [<<]       { bin, pref, aug }  (18, 18, 18)
+        [<=]       { bin, pref }       (36, 35, 36)
+        [<==]      { bin, pref }       (26, 25, 26)
+        [<===]     { bin, pref }       (22, 21, 22)
+        [<==>]     { bin, aug }        (24, 23, _)
+        [=]        { infix }           (14, 13, _)
+        [=!=]      { bin }             (36, 35, _)
+        [==]       { bin }             (36, 35, _)
+        [===]      { bin }             (36, 35, _)
+        [===>]     { bin, aug }        (22, 21, _)
+        [==>]      { bin, aug }        (26, 25, _)
+        [=>]       { infix }           (14, 13, _)
+        [>]        { bin, pref }       (36, 35, 36)
+        [>=]       { bin, pref }       (36, 35, 36)
+        [>>]       { bin, aug }        (14, 13, _)
+        [?]        { bin, pref }       (36, 35, 36)
+        [??]       { bin, pref, aug }  (28, 27, 28)
+        [@]        { bin, aug }        (60, 59, _)
+        [@@]       { bin, aug }        (66, 66, _)
+        [@@?]      { bin, aug }        (66, 66, _)
+        ["\\"]     { bin, aug }        (58, 57, _)
+        ["\\\\"]   { bin, aug }        (58, 57, _)
+        [^]        { bin, aug }        (70, 70, _)
+        [^**]      { bin, aug }        (70, 70, _)
+        [^<]       { bin }             (70, 70, _)
+        [^<=]      { bin }             (70, 70, _)
+        [^>]       { bin }             (70, 70, _)
+        [^>=]      { bin }             (70, 70, _)
+        [^^]       { bin, aug }        (44, 44, _)
+        [_]        { bin, aug }        (70, 70, _)
+        [_<]       { bin }             (70, 70, _)
+        [_<=]      { bin }             (70, 70, _)
+        [_>]       { bin }             (70, 70, _)
+        [_>=]      { bin }             (70, 70, _)
+        [|]        { bin, aug }        (42, 42, _)
+        [|-]       { bin, pref, aug }  (20, 20, 20)
+        [|_]       { bin, aug }        (70, 70, _)
+        [||]       { bin, aug }        (38, 38, _)
+        [~]        { bin, pref, aug }  (36, 35, 36)
+        ["·"]      { bin, aug }        (52, 52, _)
+        ["⊠"]      { bin, aug }        (54, 54, _)
+        ["⧢"]      { bin, aug }        (54, 54, _)
+        [and]      { bin }             (32, 31, _)
+        [or]       { bin }             (28, 27, _)
+        [SPACE]    { bin }             (62, 61, _)
+        [xor]      { bin }             (30, 29, _)
+        [!]        { post }            (72, _, _)
+        [(*)]      { post }            (64, _, _)
+        [^!]       { post }            (72, _, _)
+        [^*]       { post }            (68, _, _)
+        [^~]       { post }            (68, _, _)
+        [_!]       { post }            (72, _, _)
+        [_*]       { post }            (68, _, _)
+        [_~]       { post }            (68, _, _)
+        [not]      { pref }            (34, _, 34)
+    }
+
+    keywords {
         [break] [breakpoint] [catch] [continue]
         [do] [elapsedTime] [elapsedTiming] [else] [except] [finish]
         [for] [from] [global] [if] [in] [list] [local]
@@ -93,225 +112,260 @@ syntax_schema! {
         [try] [when] [while]
     }
 
-    markers: {}
+    markers {}
 
-    punct: {
+    punct {
         [;], [,]
     }
-
     // Leaf nodes retain their source text. Their concrete names are obtained by
     // converting the Rust name to snake_case, matching grammar.js.
-    Symbol ::= leaf
-    BlockComment ::= leaf
-    LineComment ::= leaf
-    EmptyComponent ::= leaf
-    EscapeSequence ::= leaf
-    FloatLiteral ::= leaf
-    IntegerLiteral ::= leaf
-    RawStringContent ::= leaf
-    StringContent ::= leaf
+    struct Symbol;
+    struct BlockComment;
+    struct LineComment;
+    struct EmptyComponent;
+    struct EscapeSequence;
+    struct FloatLiteral;
+    struct IntegerLiteral;
+    struct RawStringContent;
+    struct StringContent;
 
-    // Unlabelled items correspond to unfielded CST children. The generator may
-    // give them artificial Rust field names, but those names are not CST fields.
-    SourceFile ::= (elements: unfielded lines(AnyCell))
+    // `(_)` marks a field addressed positionally rather than by a CST field
+    // name. The generator may still give it an artificial Rust name, but
+    // that name is not a CST field.
+    struct SourceFile {
+        elements: (_ lines) Vec<AnyCell>
+    }
 
-    ExpressionCell ::= node(cell,
-        value: unfielded Expr,
-    )
+    #[cst(kind = cell)]
+    struct ExpressionCell {
+        value: (_) Expr
+    }
 
-    SequenceCell ::= node(cell,
-        value: unfielded NakedSequence,
-    )
+    #[cst(kind = cell)]
+    struct SequenceCell {
+        value: (_) NakedSequence
+    }
 
-    NakedSequence ::= (elements: unfielded punct(Component))
+    struct NakedSequence {
+        elements: (_) Punctuated<Component>
+    }
 
-    MutedCell ::= node(muted,
-        elements: unfielded punct(Component),
-        Token![;],
-    )
+    #[cst(kind = muted)]
+    struct MutedCell {
+        elements: (_) Punctuated<Component>,
+        semicolon: (_) Token![;],
+    }
 
-    MutedGroup ::= node(muted,
-        elements: unfielded punct(Component),
-        Token![;],
-    )
+    #[cst(kind = muted)]
+    struct MutedGroup {
+        elements: (_) Punctuated<Component>,
+        semicolon: (_) Token![;],
+    }
 
-    Array ::= bracket(
-        muted: unfielded [MutedGroup],
-        elements: unfielded punct(Component),
-    )
+    #[delimiter(bracket)]
+    struct Array {
+        muted: (_) Vec<MutedGroup>,
+        elements: (_) Punctuated<Component>,
+    }
 
-    List ::= brace(
-        muted: unfielded [MutedGroup],
-        elements: unfielded punct(Component),
-    )
+    #[delimiter(brace)]
+    struct List {
+        muted: (_) Vec<MutedGroup>,
+        elements: (_) Punctuated<Component>,
+    }
 
-    AngleBarList ::= angle_bar(
-        muted: unfielded [MutedGroup],
-        elements: unfielded punct(Component),
-    )
+    #[delimiter(angle_bar)]
+    struct AngleBarList {
+        muted: (_) Vec<MutedGroup>,
+        elements: (_) Punctuated<Component>,
+    }
 
-    Sequence ::= paren(
-        muted: unfielded [MutedGroup],
-        elements: unfielded punct(Component),
-    )
+    #[delimiter(parenthesis)]
+    struct Sequence {
+        muted: (_) Vec<MutedGroup>,
+        elements: (_) Punctuated<Component>,
+    }
 
-    ParenthesizedExpression ::= paren(
-        muted: unfielded [MutedGroup],
-        value: unfielded Expr?,
-    )
+    #[delimiter(parenthesis)]
+    struct ParenthesizedExpression {
+        muted: (_) Vec<MutedGroup>,
+        value: (_) Expr?,
+    }
 
-    StringLiteral ::= string(elements: unfielded [StringElement])
-    RawStringLiteral ::= raw_string(elements: unfielded [RawStringElement])
+    #[delimiter(string)]
+    struct StringLiteral {
+        elements: (_) Vec<StringElement>,
+    }
 
-    BinaryExpression ::= (
+    #[delimiter(raw_string)]
+    struct RawStringLiteral {
+        elements: (_) Vec<RawStringElement>,
+    }
+
+    struct BinaryExpression {
         left: Expr,
         operator: BinaryOperator,
         right: Expr,
-    )
+    }
 
-    AdjacentExpression ::= node(adjacent_expression,
+    #[cst(kind = adjacent_expression)]
+    struct AdjacentExpression {
         left: Expr,
         right: Expr,
-    )
+    }
 
-    PrefixExpression ::= (
+    struct PrefixExpression {
         operator: PrefixOperator,
         operand: Expr,
-    )
+    }
 
-    PostfixExpression ::= (
+    struct PostfixExpression {
         operand: Expr,
         operator: PostfixOperator,
-    )
+    }
 
-    LambdaExpression ::= (
+    struct LambdaExpression {
         parameters: LambdaParameters,
         operator: Token![->],
         body: Expr,
-    )
+    }
 
-    Assignment ::= node(assignment,
+    #[cst(kind = assignment)]
+    struct Assignment {
         left: Symbol,
         operator: Token![=],
         right: Expr,
-    )
+    }
 
-    LocalAssignment ::= node(local_assignment,
+    #[cst(kind = local_assignment)]
+    struct LocalAssignment {
         left: Symbol,
         operator: Token![:=],
         right: Expr,
-    )
+    }
 
-    BinaryAssignment ::= (
+    struct BinaryAssignment {
         left: BinaryExpression,
         operator: Token![=],
         right: Expr,
-    )
+    }
 
-    BinaryInstallation ::= (
+    struct BinaryInstallation {
         left: BinaryExpression,
         operator: Token![:=],
         right: Expr,
-    )
+    }
 
-    PrefixAssignment ::= (
+    struct PrefixAssignment {
         left: PrefixExpression,
         operator: Token![=],
         right: Expr,
-    )
+    }
 
-    PrefixInstallation ::= (
+    struct PrefixInstallation {
         left: PrefixExpression,
         operator: Token![:=],
         right: Expr,
-    )
+    }
 
-    PostfixAssignment ::= (
+    struct PostfixAssignment {
         left: PostfixExpression,
         operator: Token![=],
         right: Expr,
-    )
+    }
 
-    PostfixInstallation ::= (
+    struct PostfixInstallation {
         left: PostfixExpression,
         operator: Token![:=],
         right: Expr,
-    )
+    }
 
-    StructuredBinding ::= node(assignment,
-        left: BindingPack,
+    // grammar.js gives the binding pack its own CST field name,
+    // `binding_pack`, instead of the `left` used by every other assignment
+    // form.
+    struct StructuredBinding {
+        binding_pack: BindingPack,
         operator: Token![=],
         right: Expr,
-    )
+    }
 
-    LocalStructuredBinding ::= node(local_assignment,
-        left: BindingPack,
+    struct LocalStructuredBinding {
+        binding_pack: BindingPack,
         operator: Token![:=],
         right: Expr,
-    )
+    }
 
-    EvaluatedAssignment ::= (
+    struct EvaluatedAssignment {
         left: Expr,
         operator: Token![<-],
         right: Expr,
-    )
+    }
 
-    OptionExpression ::= node(option,
+    #[cst(kind = option)]
+    struct OptionExpression {
         left: Expr,
         operator: Token![=>],
         right: Expr,
-    )
+    }
 
-    ThenClause ::= (
-        Token![then],
-        value: unfielded Expr,
-    )
+    struct ThenClause {
+        keyword: (_) Token![then],
+        value: (_) Expr,
+    }
 
-    ElseClause ::= (
-        Token![else],
-        value: unfielded Expr,
-    )
+    struct ElseClause {
+        keyword: (_) Token![else],
+        value: (_) Expr,
+    }
 
-    IfStatement ::= (
-        Token![if],
+    struct IfStatement {
+        keyword: (_) Token![if],
         condition: Expr,
-        then_clause: unfielded ThenClause,
-        else_clause: unfielded ElseClause?,
-    )
+        then_clause: (_) ThenClause,
+        else_clause: (_) ElseClause?,
+    }
 
-    LoopBody ::= (
-        (Token![list], listed_value: Expr)?,
-        (Token![do], ignored_value: Expr)?,
-    )
+    struct LoopBody {
+        list_keyword: (_) Token![list]?,
+        listed_value: Expr?,
+        do_keyword: (_) Token![do]?,
+        ignored_value: Expr?,
+    }
 
-    IterationRange ::= (
-        (Token![in], iterated_collection: Expr)?,
-        (Token![from], range_start: Expr)?,
-        (Token![to], range_end: Expr)?,
-    )
+    struct IterationRange {
+        in_keyword: (_) Token![in]?,
+        iterated_collection: Expr?,
+        from_keyword: (_) Token![from]?,
+        range_start: Expr?,
+        to_keyword: (_) Token![to]?,
+        range_end: Expr?,
+    }
 
-    ForLoop ::= (
-        Token![for],
+    struct ForLoop {
+        keyword: (_) Token![for],
         variable: Symbol,
-        range: unfielded IterationRange?,
-        (Token![when], filter: Expr)?,
-        body: unfielded LoopBody,
-    )
+        range: (_) IterationRange?,
+        when_keyword: (_) Token![when]?,
+        filter: Expr?,
+        body: (_) LoopBody,
+    }
 
-    WhileLoop ::= (
-        Token![while],
+    struct WhileLoop {
+        keyword: (_) Token![while],
         condition: Expr,
-        body: unfielded LoopBody,
-    )
+        body: (_) LoopBody,
+    }
 
-    NewStatement ::= (
-        Token![new],
+    struct NewStatement {
+        keyword: (_) Token![new],
         class: Expr,
-        (Token![of], parent: Expr)?,
-        (Token![from], instance: Expr)?,
-    )
+        of_keyword: (_) Token![of]?,
+        parent: Expr?,
+        from_keyword: (_) Token![from]?,
+        instance: Expr?,
+    }
 
-    DebugKeyword ::= {
+    enum DebugKeyword {
         Token![step],
         Token![finish],
         Token![shield],
@@ -324,40 +378,61 @@ syntax_schema! {
         Token![profile],
     }
 
-    DebugClause ::= (
+    struct DebugClause {
         keyword: DebugKeyword,
-        value: unfielded Expr?,
-    )
+        value: (_) Expr?,
+    }
 
-    BreakStatement ::= (Token![break], value: unfielded Expr?)
-    ContinueStatement ::= (Token![continue], value: unfielded Expr?)
-    ReturnStatement ::= (Token![return], value: unfielded Expr?)
-    CatchStatement ::= (Token![catch], value: unfielded Expr)
-    ThrowStatement ::= (Token![throw], value: unfielded Expr)
-    TrapStatement ::= (Token![trap], value: unfielded Expr)
+    struct BreakStatement {
+        keyword: (_) Token![break],
+        value: (_) Expr?,
+    }
 
-    ExceptClause ::= (
-        Token![except],
+    struct ContinueStatement {
+        keyword: (_) Token![continue],
+        value: (_) Expr?,
+    }
+
+    struct ReturnStatement {
+        keyword: (_) Token![return],
+        value: (_) Expr?,
+    }
+
+    struct CatchStatement {
+        keyword: (_) Token![catch],
+        value: (_) Expr,
+    }
+
+    struct ThrowStatement {
+        keyword: (_) Token![throw],
+        value: (_) Expr,
+    }
+
+    struct TrapStatement {
+        keyword: (_) Token![trap],
+        value: (_) Expr,
+    }
+
+    struct ExceptClause {
+        keyword: (_) Token![except],
         exception: Symbol,
-        Token![do],
-        value: unfielded Expr,
-    )
+        do_keyword: (_) Token![do],
+        value: (_) Expr,
+    }
 
-
-
-    TryFallback ::= {
+    enum TryFallback {
         ExceptClause,
         ElseClause,
     }
 
-    TryStatement ::= (
-        Token![try],
-        value: unfielded Expr,
-        then_clause: unfielded ThenClause?,
+    struct TryStatement {
+        keyword: (_) Token![try],
+        value: (_) Expr,
+        then_clause: (_) ThenClause?,
         fallback: TryFallback?,
-    )
+    }
 
-    QuoteSpecifier ::= {
+    enum QuoteSpecifier {
         Token![symbol],
         Token![local],
         Token![global],
@@ -365,38 +440,38 @@ syntax_schema! {
         Token![threadLocal],
     }
 
-    QuoteExpression ::= (
-        specifier: unfielded QuoteSpecifier,
+    struct QuoteExpression {
+        specifier: (_) QuoteSpecifier,
         token: Symbol,
-    )
+    }
 
-    AnyCell ::= {
+    enum AnyCell {
         ExpressionCell,
         SequenceCell,
         MutedCell,
     }
 
-    Component ::= {
+    enum Component {
         EmptyComponent,
         Expr,
     }
 
-    SequenceElement ::= {
+    enum SequenceElement {
         Component,
         MutedGroup,
     }
 
-    StringElement ::= {
+    enum StringElement {
         EscapeSequence,
         StringContent,
     }
 
-    RawStringElement ::= {
+    enum RawStringElement {
         EscapeSequence,
         RawStringContent,
     }
 
-    Collection ::= {
+    enum Collection {
         ParenthesizedExpression,
         Sequence,
         List,
@@ -404,7 +479,7 @@ syntax_schema! {
         AngleBarList,
     }
 
-    BindingPack ::= {
+    enum BindingPack {
         ParenthesizedExpression,
         Sequence,
         List,
@@ -412,7 +487,7 @@ syntax_schema! {
         AngleBarList,
     }
 
-    LambdaParameters ::= {
+    enum LambdaParameters {
         Symbol,
         ParenthesizedExpression,
         Sequence,
@@ -421,14 +496,14 @@ syntax_schema! {
         AngleBarList,
     }
 
-    OperatorExpr ::= {
+    enum OperatorExpr {
         AdjacentExpression,
         BinaryExpression,
         PrefixExpression,
         PostfixExpression,
     }
 
-    AssignmentExpr ::= {
+    enum AssignmentExpr {
         Assignment,
         LocalAssignment,
         BinaryAssignment,
@@ -442,7 +517,7 @@ syntax_schema! {
         EvaluatedAssignment,
     }
 
-    Expr ::= {
+    enum Expr {
         Collection,
         OperatorExpr,
         AssignmentExpr,
@@ -468,7 +543,7 @@ syntax_schema! {
         Symbol,
     }
 
-    SyntaxNode ::= {
+    enum SyntaxNode {
         SourceFile,
         AnyCell,
         Expr,
@@ -481,83 +556,127 @@ include!("gen/visit.rs");
 include!("gen/visit_mut.rs");
 include!("gen/fold.rs");
 
-pub(crate) fn canonical_keyword_spelling(spelling: &str) -> &str {
-    let Some(keyword) = spelling.strip_prefix("Core$") else {
-        return spelling;
-    };
-    if GENERATED_KEYWORD_SPELLINGS.contains(&keyword) {
-        keyword
-    } else {
-        spelling
-    }
-}
-
 /// An expression evaluated in global scope.
 ///
 /// Rust Analyzer presents the implementations below as the concrete type
 /// hierarchy for cells.
-pub trait CellNode: ::m2_syn::Spanned + ::m2_syn::ToTokens {}
+pub trait CellNode: ::m2_syn::Spanned + ::m2_syn::ToTokens {
+    /// Returns the global cell delimiter represented by this typed node.
+    fn cell_delimiter(&self) -> ::m2_syn::DelimiterKind;
+}
 
-impl CellNode for AnyCell {}
-impl CellNode for ExpressionCell {}
-impl CellNode for SequenceCell {}
-impl CellNode for MutedCell {}
+impl CellNode for AnyCell {
+    fn cell_delimiter(&self) -> ::m2_syn::DelimiterKind {
+        match self {
+            Self::ExpressionCell(_) | Self::SequenceCell(_) => ::m2_syn::DelimiterKind::Empty,
+            Self::MutedCell(_) => ::m2_syn::DelimiterKind::Semicolon,
+        }
+    }
+}
 
-impl ::m2_syn::ToCellStream for SourceFile {
-    fn to_cell_stream(&self, source_id: ::m2_syn::SourceId) -> ::m2_syn::CellStream {
-        let cells = self
-            .elements
-            .iter()
-            .enumerate()
-            .map(|(index, cell)| {
-                let mut stream = ::m2_syn::ToTokens::to_token_stream(cell);
-                let (kind, closing) = match cell {
-                    AnyCell::MutedCell(_) => {
-                        let semicolon =
-                            stream.pop().expect("a muted cell emits its semicolon last");
-                        (
-                            ::m2_syn::DelimiterKind::Semicolon,
-                            ::m2_syn::Spanned::span(&semicolon),
-                        )
-                    }
-                    AnyCell::ExpressionCell(_) | AnyCell::SequenceCell(_) => {
-                        let span = ::m2_syn::Spanned::span(cell);
-                        let closing = span
-                            .source()
-                            .ok()
-                            .zip(span.end_point().ok())
-                            .map(|(source, point)| {
-                                ::m2_syn::Span::new(source, ::m2_syn::TextRange::from_point(point))
-                            })
-                            .unwrap_or_else(::m2_syn::Span::detached);
-                        (::m2_syn::DelimiterKind::Empty, closing)
-                    }
-                };
-                if index != 0 {
-                    let mut with_leading_newline = ::m2_syn::TokenStream::new();
-                    with_leading_newline.push_trivia(::m2_syn::Trivia::new(
-                        ::m2_syn::TriviaKind::LineBreak,
-                        "\n",
-                        ::m2_syn::Span::detached(),
-                    ));
-                    with_leading_newline.extend([stream]);
-                    stream = with_leading_newline;
+impl CellNode for ExpressionCell {
+    fn cell_delimiter(&self) -> ::m2_syn::DelimiterKind {
+        ::m2_syn::DelimiterKind::Empty
+    }
+}
+
+impl CellNode for SequenceCell {
+    fn cell_delimiter(&self) -> ::m2_syn::DelimiterKind {
+        ::m2_syn::DelimiterKind::Empty
+    }
+}
+
+impl CellNode for MutedCell {
+    fn cell_delimiter(&self) -> ::m2_syn::DelimiterKind {
+        ::m2_syn::DelimiterKind::Semicolon
+    }
+}
+
+fn append_cell_node<T: CellNode>(node: &T, output: &mut ::m2_syn::CellStream) {
+    let kind = node.cell_delimiter();
+    let mut stream = ::m2_syn::ToTokens::to_token_stream(node);
+    if kind == ::m2_syn::DelimiterKind::Semicolon {
+        stream.pop().expect("a muted cell emits its semicolon last");
+    }
+    output.push(::m2_syn::CellBlock::new(
+        ::m2_syn::Delimiter::new(kind, ::m2_syn::Spanned::span(node)),
+        stream,
+    ));
+}
+
+macro_rules! impl_to_cells_for_cell_node {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ::m2_syn::ToCells for $ty {
+                fn to_cells(&self, output: &mut ::m2_syn::CellStream) {
+                    append_cell_node(self, output);
                 }
-                let span = ::m2_syn::Spanned::span(cell);
-                let opening = span
-                    .source()
-                    .ok()
-                    .zip(span.start_point().ok())
-                    .map(|(source, point)| {
-                        ::m2_syn::Span::new(source, ::m2_syn::TextRange::from_point(point))
-                    })
-                    .unwrap_or_else(::m2_syn::Span::detached);
-                ::m2_syn::CellBlock::new(
-                    ::m2_syn::Delimiter::new(kind, ::m2_syn::DoubleSpan::new(opening, closing)),
-                    stream,
-                )
-            })
-            .collect();
-        ::m2_syn::CellStream::new(cells, source_id)
+            }
+        )*
+    }
+}
+
+impl_to_cells_for_cell_node!(AnyCell, ExpressionCell, SequenceCell, MutedCell);
+
+impl ::m2_syn::ToCells for SourceFile {
+    fn to_cells(&self, output: &mut ::m2_syn::CellStream) {
+        ::m2_syn::ToCells::to_cells(&self.elements, output);
+    }
+}
+
+impl ::m2_syn::ToCells for Expr {
+    fn to_cells(&self, output: &mut ::m2_syn::CellStream) {
+        ::m2_syn::ToCells::to_cells(&::m2_syn::ToTokens::to_token_stream(self), output);
+    }
+}
+
+macro_rules! impl_to_cells_for_expr_node {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ::m2_syn::ToCells for $ty {
+                fn to_cells(&self, output: &mut ::m2_syn::CellStream) {
+                    ::m2_syn::ToCells::to_cells(
+                        &::m2_syn::ToTokens::to_token_stream(self),
+                        output,
+                    );
+                }
+            }
+        )*
+    };
+}
+
+impl_to_cells_for_expr_node!(
+    Collection,
+    OperatorExpr,
+    AssignmentExpr,
+    OptionExpression,
+    LambdaExpression,
+    IfStatement,
+    ForLoop,
+    WhileLoop,
+    TryStatement,
+    QuoteExpression,
+    NewStatement,
+    BreakStatement,
+    ContinueStatement,
+    ReturnStatement,
+    CatchStatement,
+    ThrowStatement,
+    TrapStatement,
+    DebugClause,
+    FloatLiteral,
+    IntegerLiteral,
+    RawStringLiteral,
+    StringLiteral,
+    Symbol,
+);
+
+impl ::m2_syn::ToCells for SyntaxNode {
+    fn to_cells(&self, output: &mut ::m2_syn::CellStream) {
+        match self {
+            Self::SourceFile(node) => ::m2_syn::ToCells::to_cells(node, output),
+            Self::AnyCell(node) => ::m2_syn::ToCells::to_cells(node, output),
+            Self::Expr(node) => ::m2_syn::ToCells::to_cells(node, output),
+        }
     }
 }

@@ -4,9 +4,8 @@ use std::iter;
 use proc_macro2::{Delimiter, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use syn::parse::{Parse as SynParse, ParseStream};
-use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{Error, LitStr, Result, Token, braced, bracketed, parse_str};
+use syn::{Error, Expr, LitStr, Result, Token, braced, bracketed, parenthesized, parse_str};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum OperatorKind {
@@ -25,70 +24,229 @@ impl OperatorKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum DeclarationKind {
-    Prefix,
-    Binary,
-    Postfix,
-    Augmented,
-}
-
-impl SynParse for DeclarationKind {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let ident: Ident = input.parse()?;
-        match ident.to_string().as_str() {
-            "pref" => Ok(Self::Prefix),
-            "bin" => Ok(Self::Binary),
-            "post" => Ok(Self::Postfix),
-            "aug" => Ok(Self::Augmented),
-            _ => Err(Error::new(
-                ident.span(),
-                "expected `pref`, `bin`, `post`, or `aug`",
-            )),
-        }
-    }
-}
-
-impl From<DeclarationKind> for Option<OperatorKind> {
-    fn from(value: DeclarationKind) -> Self {
-        match value {
-            DeclarationKind::Prefix => Some(OperatorKind::Prefix),
-            DeclarationKind::Binary => Some(OperatorKind::Binary),
-            DeclarationKind::Postfix => Some(OperatorKind::Postfix),
-            DeclarationKind::Augmented => None,
-        }
-    }
-}
-
 #[derive(Clone)]
 struct OperatorDeclaration {
     pattern: TokenStream,
     name: String,
     spelling: String,
-    kinds: BTreeSet<DeclarationKind>,
+    parse_info: ParseInfo,
 }
 
 impl SynParse for OperatorDeclaration {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let pattern_content;
         bracketed!(pattern_content in input);
-        let kinds_content;
-        braced!(kinds_content in input);
+        let info_content;
+        braced!(info_content in input);
 
         let pattern = pattern_content.parse()?;
-        let kinds = Punctuated::<DeclarationKind, Token![,]>::parse_terminated(&kinds_content)?
-            .into_iter()
-            .collect::<BTreeSet<_>>();
         let spelling = token_spelling(&pattern)?;
         let name = token_name(&pattern, NameStyle::Operator)?;
+        let flags: ParseFlags = info_content.parse()?;
+        let parse_info = flags.into_parse_info(input)?;
 
         Ok(Self {
             pattern,
             name,
             spelling,
-            kinds,
+            parse_info,
         })
     }
+}
+
+#[derive(Clone, Default)]
+struct ParseInfo {
+    binary: Option<(u8, u8)>,
+    prefix: Option<(u8, u8)>,
+    postfix: Option<u8>,
+    special: Option<(u8, u8)>,
+    augmented: bool,
+}
+
+impl ParseInfo {
+    fn operator_kinds(&self) -> BTreeSet<OperatorKind> {
+        let mut kinds = BTreeSet::new();
+        if self.prefix.is_some() {
+            kinds.insert(OperatorKind::Prefix);
+        }
+        if self.binary.is_some() {
+            kinds.insert(OperatorKind::Binary);
+        }
+        if self.postfix.is_some() {
+            kinds.insert(OperatorKind::Postfix);
+        }
+        kinds
+    }
+
+    fn expand(&self) -> Option<TokenStream> {
+        if let Some((precedence, strength)) = &self.special {
+            return Some(quote!($parse_info::binary(#precedence, #strength)));
+        }
+        if let Some(precedence) = &self.postfix {
+            return Some(quote!($parse_info::postfix(#precedence)));
+        }
+        match (&self.binary, &self.prefix) {
+            (Some((precedence, binary_strength)), Some((_, unary_strength))) => {
+                Some(quote!($parse_info::prefix_binary(
+                    #precedence,
+                    #binary_strength,
+                    #unary_strength,
+                )))
+            }
+            (Some((precedence, strength)), None) => {
+                Some(quote!($parse_info::binary(#precedence, #strength)))
+            }
+            (None, Some((precedence, unary_strength))) => {
+                Some(quote!($parse_info::prefix(#precedence, #unary_strength)))
+            }
+            (None, None) => None,
+        }
+    }
+
+    fn signature(&self) -> String {
+        self.expand()
+            .map_or_else(String::new, |value| value.to_string())
+    }
+}
+
+/// The bare `bin`/`pref`/`post`/`infix`/`aug` tags inside a token's `{...}`
+/// block. The precedence numbers that give these tags meaning live outside
+/// the braces, in the trailing `(precedence, binary_strength, unary_strength)`
+/// triple, so a shared precedence is written once per token instead of once
+/// per tag.
+#[derive(Default)]
+struct ParseFlags {
+    binary: bool,
+    prefix: bool,
+    postfix: bool,
+    infix: bool,
+    augmented: bool,
+}
+
+impl SynParse for ParseFlags {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let mut flags = Self::default();
+        while !input.is_empty() {
+            let name: Ident = input.parse()?;
+            let slot = match name.to_string().as_str() {
+                "bin" => &mut flags.binary,
+                "pref" => &mut flags.prefix,
+                "post" => &mut flags.postfix,
+                "infix" => &mut flags.infix,
+                "aug" => &mut flags.augmented,
+                _ => {
+                    return Err(Error::new(
+                        name.span(),
+                        "expected `bin`, `pref`, `post`, `infix`, or `aug`",
+                    ));
+                }
+            };
+            if std::mem::replace(slot, true) {
+                return Err(Error::new(name.span(), "duplicate parser metadata tag"));
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            } else if !input.is_empty() {
+                return Err(input.error("expected `,` between parser metadata tags"));
+            }
+        }
+        Ok(flags)
+    }
+}
+
+impl ParseFlags {
+    fn requires_precedence(&self) -> bool {
+        self.binary || self.prefix || self.postfix || self.infix
+    }
+
+    /// Consumes the trailing precedence triple from `input` (the token
+    /// declaration's outer stream, past the closing `}`) and combines it with
+    /// these flags into a full [`ParseInfo`].
+    fn into_parse_info(self, input: ParseStream<'_>) -> Result<ParseInfo> {
+        let ordinary_actions =
+            usize::from(self.binary || self.prefix) + usize::from(self.postfix);
+        if ordinary_actions + usize::from(self.infix) > 1 {
+            return Err(Error::new(
+                Span::call_site(),
+                "a token cannot combine operator, postfix, and special parser actions",
+            ));
+        }
+
+        let mut info = ParseInfo {
+            augmented: self.augmented,
+            ..ParseInfo::default()
+        };
+        if self.requires_precedence() {
+            let (precedence, binary_strength, unary_strength) = parse_precedence_triple(input)?;
+            if self.binary || self.infix {
+                let strength = binary_strength.ok_or_else(|| {
+                    Error::new(
+                        Span::call_site(),
+                        "`bin`/`infix` require a binary strength in the second precedence slot",
+                    )
+                })?;
+                if self.binary {
+                    info.binary = Some((precedence, strength));
+                } else {
+                    info.special = Some((precedence, strength));
+                }
+            } else if binary_strength.is_some() {
+                return Err(Error::new(
+                    Span::call_site(),
+                    "the binary strength slot is only used by `bin`/`infix`; write `_`",
+                ));
+            }
+            if self.prefix {
+                let strength = unary_strength.ok_or_else(|| {
+                    Error::new(
+                        Span::call_site(),
+                        "`pref` requires a unary strength in the third precedence slot",
+                    )
+                })?;
+                info.prefix = Some((precedence, strength));
+            } else if unary_strength.is_some() {
+                return Err(Error::new(
+                    Span::call_site(),
+                    "the unary strength slot is only used by `pref`; write `_`",
+                ));
+            }
+            if self.postfix {
+                info.postfix = Some(precedence);
+            }
+        }
+        Ok(info)
+    }
+}
+
+/// Parses the trailing `(precedence, binary_strength, unary_strength)` triple
+/// that follows a token's `{ bin, pref, ... }` flags. Each strength slot is
+/// either a `u8` literal or `_` for a flag that doesn't use it.
+fn parse_precedence_triple(input: ParseStream<'_>) -> Result<(u8, Option<u8>, Option<u8>)> {
+    let content;
+    parenthesized!(content in input);
+    let precedence = parse_precedence_slot(&content)?.ok_or_else(|| {
+        Error::new(
+            content.span(),
+            "the precedence slot is required and cannot be `_`",
+        )
+    })?;
+    content.parse::<Token![,]>()?;
+    let binary_strength = parse_precedence_slot(&content)?;
+    content.parse::<Token![,]>()?;
+    let unary_strength = parse_precedence_slot(&content)?;
+    if !content.is_empty() {
+        return Err(content.error("expected exactly three precedence slots"));
+    }
+    Ok((precedence, binary_strength, unary_strength))
+}
+
+fn parse_precedence_slot(input: ParseStream<'_>) -> Result<Option<u8>> {
+    if input.peek(Token![_]) {
+        input.parse::<Token![_]>()?;
+        return Ok(None);
+    }
+    let literal: syn::LitInt = input.parse()?;
+    Ok(Some(literal.base10_parse()?))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -129,12 +287,14 @@ pub(crate) struct TokenDefinition {
     pub(crate) pattern: TokenStream,
     pub(crate) spelling: String,
     pub(crate) operators: BTreeSet<OperatorKind>,
+    parse_info: ParseInfo,
     is_operator: bool,
     is_keyword: bool,
     raw_kind: RawTokenKind,
 }
 
 pub(crate) struct TokenDefinitions {
+    precedences: Vec<(Ident, Expr)>,
     definitions: Vec<TokenDefinition>,
 }
 
@@ -183,6 +343,8 @@ impl TokenDefinitions {
 
     pub(crate) fn expand(&self) -> TokenStream {
         let delimiters = expand_delimiters();
+        let precedence_names = self.precedences.iter().map(|(name, _)| name);
+        let precedence_values = self.precedences.iter().map(|(_, value)| value);
         let operator_spellings = self
             .definitions
             .iter()
@@ -215,38 +377,47 @@ impl TokenDefinitions {
             let (raw_new, raw_matches) = match definition.raw_kind {
                 RawTokenKind::Punct => (
                     quote!(::m2_syn::TokenTree::Punct(::m2_syn::Punct::new(#spelling, span))),
-                    quote!(matches!(token, ::m2_syn::TokenTree::Punct(token) if token.text() == #spelling)),
+                    quote! {
+                        match token {
+                            ::m2_syn::TokenTree::Punct(token) => token.text() == #spelling,
+                            _ => false,
+                        }
+                    },
                 ),
                 RawTokenKind::Ident => (
                     quote!(::m2_syn::TokenTree::Ident(::m2_syn::IdentToken::new(#spelling, span))),
-                    quote!(matches!(
-                        token,
-                        ::m2_syn::TokenTree::Ident(token)
-                            if token.text() == #spelling
-                                || token.text().strip_prefix("Core$") == Some(#spelling)
-                    )),
+                    quote! {
+                        match token {
+                            ::m2_syn::TokenTree::Ident(token) => {
+                                token.text() == #spelling
+                                    || token.text().strip_prefix("Core$") == Some(#spelling)
+                            }
+                            _ => false,
+                        }
+                    },
                 ),
                 RawTokenKind::Whitespace => (
                     quote!(::m2_syn::TokenTree::Trivia(::m2_syn::Trivia::new(
-                            ::m2_syn::TriviaKind::Whitespace,
-                            " ",
-                            span,
-                        ))),
-                    quote!(matches!(
-                        token,
-                        ::m2_syn::TokenTree::Trivia(token)
-                            if token.kind() == ::m2_syn::TriviaKind::Whitespace
-                                && !token.contains_line_break()
-                    ) || matches!(
-                        token,
-                        ::m2_syn::TokenTree::Ident(token) if token.text() == "SPACE"
-                    )),
+                        ::m2_syn::TriviaKind::Whitespace,
+                        " ",
+                        span,
+                    ))),
+                    quote! {
+                        match token {
+                            ::m2_syn::TokenTree::Trivia(token) => {
+                                token.kind() == ::m2_syn::TriviaKind::Whitespace
+                                    && !token.contains_line_break()
+                            }
+                            ::m2_syn::TokenTree::Ident(token) => token.text() == "SPACE",
+                            _ => false,
+                        }
+                    },
                 ),
             };
 
             quote! {
 
-                #[derive(Debug, Clone, PartialEq, Eq)]
+                #[derive(Debug, Clone, PartialEq, Eq, ::m2_syn::Spanned)]
                 pub struct #type_name {
                     raw: ::std::boxed::Box<::m2_syn::TokenTree>,
                 }
@@ -256,12 +427,6 @@ impl TokenDefinitions {
                 pub fn #type_name<S: ::m2_syn::Spanned>(span: S) -> #type_name {
                     let span = span.span();
                     #type_name { raw: ::std::boxed::Box::new(#raw_new) }
-                }
-
-                impl ::m2_syn::Spanned for #type_name {
-                    fn span(&self) -> ::m2_syn::Span {
-                        ::m2_syn::Spanned::span(&self.raw)
-                    }
                 }
 
                 impl ::m2_syn::Token for #type_name {
@@ -292,6 +457,16 @@ impl TokenDefinitions {
                     }
                 }
 
+                impl ::m2_syn::PrettyTree for #type_name {
+                    fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                        ::m2_syn::PrettyNode::token(
+                            ::std::format!("Token![{}]", <Self as ::m2_syn::Token>::SPELLING),
+                            <Self as ::m2_syn::Token>::SPELLING,
+                            ::m2_syn::Spanned::span(self),
+                        )
+                    }
+                }
+
                 impl<N> ::m2_syn::Reconstruct<N> for #type_name
                 where
                     N: ::m2_syn::ExternalCstNode,
@@ -318,8 +493,15 @@ impl TokenDefinitions {
             let pattern = &definition.pattern;
             quote! { [#pattern] => { $crate::#name }; }
         });
+        let parse_info_arms = self.definitions.iter().filter_map(|definition| {
+            let spelling = &definition.spelling;
+            let parse_info = definition.parse_info.expand()?;
+            Some(quote! { #spelling => Some(#parse_info), })
+        });
         quote! {
             #delimiters
+
+            #(pub(crate) const #precedence_names: u8 = #precedence_values;)*
 
             pub(crate) const GENERATED_OPERATOR_SPELLINGS: &[&str] = &[
                 #(#operator_spellings),*
@@ -346,10 +528,23 @@ impl TokenDefinitions {
                     compile_error!("token was not declared in `syntax!`")
                 };
             }
+
+            #[doc(hidden)]
+            #[macro_export]
+            macro_rules! __m2_syn_parse_info {
+                ($spelling:expr, $parse_info:ident) => {
+                    match $spelling {
+                        #(#parse_info_arms)*
+                        _ => None,
+                    }
+                };
+            }
         }
     }
 
     fn new(
+        precedences: Vec<(Ident, Expr)>,
+        augmented_parse_info: ParseInfo,
         operators: Vec<OperatorDeclaration>,
         plain: impl IntoIterator<Item = PlainDeclaration>,
     ) -> Result<Self> {
@@ -358,12 +553,7 @@ impl TokenDefinitions {
 
         for operator in operators {
             let raw_kind = raw_token_kind(&operator.spelling, &operator.pattern, false);
-            let categories = operator
-                .kinds
-                .iter()
-                .copied()
-                .filter_map(Option::<OperatorKind>::from)
-                .collect();
+            let categories = operator.parse_info.operator_kinds();
             insert_definition(
                 &mut definitions,
                 &mut names,
@@ -372,13 +562,14 @@ impl TokenDefinitions {
                     pattern: operator.pattern.clone(),
                     spelling: operator.spelling.clone(),
                     operators: categories,
+                    parse_info: operator.parse_info.clone(),
                     is_operator: true,
                     is_keyword: false,
                     raw_kind,
                 },
             )?;
 
-            if operator.kinds.contains(&DeclarationKind::Augmented) {
+            if operator.parse_info.augmented {
                 let pattern = augmented_pattern(&operator.pattern)?;
                 let name = format!("{}Eql", operator.name);
                 insert_definition(
@@ -388,7 +579,8 @@ impl TokenDefinitions {
                         name: ident(&name, pattern.span())?,
                         pattern,
                         spelling: format!("{}=", operator.spelling),
-                        operators: BTreeSet::from([OperatorKind::Binary]),
+                        operators: augmented_parse_info.operator_kinds(),
+                        parse_info: augmented_parse_info.clone(),
                         is_operator: true,
                         is_keyword: false,
                         raw_kind: RawTokenKind::Punct,
@@ -410,6 +602,7 @@ impl TokenDefinitions {
                     pattern: declaration.pattern,
                     spelling,
                     operators: BTreeSet::new(),
+                    parse_info: ParseInfo::default(),
                     is_operator: false,
                     is_keyword,
                     raw_kind,
@@ -417,7 +610,10 @@ impl TokenDefinitions {
             )?;
         }
 
-        Ok(Self { definitions })
+        Ok(Self {
+            precedences,
+            definitions,
+        })
     }
 }
 
@@ -425,59 +621,86 @@ fn expand_delimiters() -> TokenStream {
     let definitions = [
         (
             format_ident!("_EmptyDelimiter"),
-            quote!(::m2_syn::DelimiterKind::Empty),
+            quote!(DelimiterKind::Empty),
         ),
         (
             format_ident!("_SemicolonDelimiter"),
-            quote!(::m2_syn::DelimiterKind::Semicolon),
+            quote!(DelimiterKind::Semicolon),
         ),
         (
             format_ident!("_ParenthesisDelimiter"),
-            quote!(::m2_syn::DelimiterKind::Parenthesis),
+            quote!(DelimiterKind::Parenthesis),
         ),
         (
             format_ident!("_BracketDelimiter"),
-            quote!(::m2_syn::DelimiterKind::Bracket),
+            quote!(DelimiterKind::Bracket),
         ),
         (
             format_ident!("_BraceDelimiter"),
-            quote!(::m2_syn::DelimiterKind::Brace),
+            quote!(DelimiterKind::Brace),
         ),
         (
             format_ident!("_AngleBarDelimiter"),
-            quote!(::m2_syn::DelimiterKind::AngleBar),
+            quote!(DelimiterKind::AngleBar),
         ),
     ]
     .into_iter()
     .map(|(name, kind)| {
         quote! {
-            #[derive(Debug, Clone, Copy, PartialEq, Eq, ::m2_syn::Spanned)]
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, Spanned)]
             pub struct #name {
-                spans: ::m2_syn::DoubleSpan,
+                span: Span,
             }
 
             #[doc(hidden)]
             #[allow(non_snake_case)]
-            pub fn #name(span: ::m2_syn::DoubleSpan) -> #name {
-                <#name as ::m2_syn::DelimiterToken>::new(span)
+            pub fn #name<S: Spanned>(span: S) -> #name {
+                <#name as DelimiterToken>::new(span.span())
             }
 
-            impl ::m2_syn::DelimiterToken for #name {
-                const KIND: ::m2_syn::DelimiterKind = #kind;
+            impl DelimiterToken for #name {
+                const KIND: DelimiterKind = #kind;
 
-                fn new(span: ::m2_syn::DoubleSpan) -> Self {
-                    Self { spans: span }
+                fn new(span: Span) -> Self {
+                    Self { span }
                 }
+            }
 
-                fn span2(&self) -> ::m2_syn::DoubleSpan {
-                    self.spans
+            impl Parse for #name {
+                fn parse(
+                    input: &mut ParseStream,
+                ) -> Result<Self, TokenParseError> {
+                    parse_delimiter(input)
+                }
+            }
+
+            impl ToTokens for #name {
+                fn to_tokens(&self, output: &mut TokenStream) {
+                    self.surround(output, TokenStream::new());
+                }
+            }
+
+            impl PrettyTree for #name {
+                fn pretty_tree(&self) -> PrettyNode {
+                    PrettyNode::delimiter(Self::KIND, self.span())
                 }
             }
         }
     });
 
     quote! {
-        #(#definitions)*
+        #[doc(hidden)]
+        mod __m2_syn_delimiters {
+            use ::m2_syn::{
+                DelimiterKind, DelimiterToken, Parse, ParseStream, PrettyNode, PrettyTree, Span,
+                Spanned, ToTokens, TokenParseError, TokenStream, parse_delimiter,
+            };
+
+            #(#definitions)*
+        }
+
+        #[doc(hidden)]
+        pub use __m2_syn_delimiters::*;
 
         #[macro_export]
         macro_rules! Delimiter {
@@ -507,16 +730,64 @@ fn hidden_token_name(name: &Ident) -> Ident {
 
 impl SynParse for TokenDefinitions {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let precedences = parse_precedence_stage(input)?;
+        let augmented_parse_info = parse_augmented_stage(input)?;
         let operators = parse_operator_stage(input)?;
         let keywords = parse_plain_stage(input, "keywords", NameStyle::Keyword)?;
         let markers = parse_plain_stage(input, "markers", NameStyle::Marker)?;
         let punctuation = parse_plain_stage(input, "punct", NameStyle::Punctuation)?;
 
         Self::new(
+            precedences,
+            augmented_parse_info,
             operators,
             keywords.into_iter().chain(markers).chain(punctuation),
         )
     }
+}
+
+fn parse_precedence_stage(input: ParseStream<'_>) -> Result<Vec<(Ident, Expr)>> {
+    parse_stage_name(input, "precedence", true)?;
+    let content;
+    braced!(content in input);
+    let mut values = Vec::new();
+    while !content.is_empty() {
+        let name: Ident = content.parse()?;
+        content.parse::<Token![=]>()?;
+        let value: Expr = content.parse()?;
+        if !name.to_string().starts_with("PREC_") {
+            return Err(Error::new(
+                name.span(),
+                "precedence names must start with `PREC_`",
+            ));
+        }
+        if values.iter().any(|(existing, _)| existing == &name) {
+            return Err(Error::new(name.span(), "duplicate precedence name"));
+        }
+        values.push((name, value));
+        if content.peek(Token![,]) {
+            content.parse::<Token![,]>()?;
+        } else if !content.is_empty() {
+            return Err(content.error("expected `,` between precedence declarations"));
+        }
+    }
+    Ok(values)
+}
+
+fn parse_augmented_stage(input: ParseStream<'_>) -> Result<ParseInfo> {
+    parse_stage_name(input, "augmented", true)?;
+    let content;
+    parenthesized!(content in input);
+    let precedence: syn::LitInt = content.parse()?;
+    content.parse::<Token![,]>()?;
+    let strength: syn::LitInt = content.parse()?;
+    if !content.is_empty() {
+        return Err(content.error("expected exactly `(precedence, binary_strength)`"));
+    }
+    Ok(ParseInfo {
+        binary: Some((precedence.base10_parse()?, strength.base10_parse()?)),
+        ..ParseInfo::default()
+    })
 }
 
 fn parse_operator_stage(input: ParseStream<'_>) -> Result<Vec<OperatorDeclaration>> {
@@ -582,6 +853,19 @@ fn insert_definition(
             ));
         }
         existing.operators.extend(definition.operators);
+        if existing.parse_info.signature().is_empty() {
+            existing.parse_info = definition.parse_info;
+        } else if !definition.parse_info.signature().is_empty()
+            && existing.parse_info.signature() != definition.parse_info.signature()
+        {
+            return Err(Error::new(
+                definition.name.span(),
+                format!(
+                    "token `{}` has conflicting parser metadata",
+                    existing.spelling
+                ),
+            ));
+        }
         existing.is_operator |= definition.is_operator;
         existing.is_keyword |= definition.is_keyword;
         if existing.raw_kind != definition.raw_kind {
@@ -773,6 +1057,7 @@ fn punctuation_name(character: char) -> Result<&'static str> {
         '/' => Ok("Slh"),
         '_' => Ok("Ubs"),
         '\\' => Ok("Bsl"),
+        '`' => Ok("Btk"),
         '·' => Ok("Cdt"),
         '⊠' => Ok("Box"),
         '⧢' => Ok("Sfp"),
@@ -791,16 +1076,18 @@ mod tests {
 
     fn declarations() -> TokenDefinitions {
         parse2(quote! {
+            precedence: {}
+            augmented: (14, 13)
             tokens {
-                [+] {pref, bin, aug}
-                [!] {post}
-                [not] {pref}
-                [(*)] {post}
-                ["\\"] {bin, aug}
-                [SPACE] {bin}
+                [+] { pref, bin, aug } (50, 50, 50)
+                [!] { post } (72, _, _)
+                [not] { pref } (34, _, 34)
+                [(*)] { post } (64, _, _)
+                ["\\"] { bin, aug } (58, 57, _)
+                [SPACE] { bin } (62, 61, _)
             }
             keywords: { [if] [symbol] [threadLocal] [threadVariable] }
-            markers: {}
+            markers: { ["``"] }
             punct: { [;], [,] }
         })
         .unwrap()
@@ -815,6 +1102,7 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(names["Add"], "+");
+        assert_eq!(names["BtkBtk"], "``");
         assert_eq!(names["AddEql"], "+=");
         assert_eq!(names["BslEql"], "\\=");
         assert_eq!(names["Graded"], "(*)");
@@ -890,5 +1178,37 @@ mod tests {
         assert!(keywords.contains("symbol"));
         assert!(!keywords.contains("not"));
         assert!(!keywords.contains("SPACE"));
+    }
+
+    #[test]
+    fn precedence_triple_rejects_non_numeric_slots() {
+        let error = parse2::<TokenDefinitions>(quote! {
+            precedence: {}
+            augmented: (14, 13)
+            tokens { [+] { bin } (PREC_ADDITION, 50, _) }
+            keywords: {}
+            markers: {}
+            punct: {}
+        })
+        .err()
+        .expect("a named precedence value must be rejected");
+
+        assert!(error.to_string().contains("expected integer literal"));
+    }
+
+    #[test]
+    fn operator_and_postfix_actions_cannot_combine() {
+        let error = parse2::<TokenDefinitions>(quote! {
+            precedence: {}
+            augmented: (14, 13)
+            tokens { [+] { bin, post } (50, 50, _) }
+            keywords: {}
+            markers: {}
+            punct: {}
+        })
+        .err()
+        .expect("combining an operator and a postfix action must be rejected");
+
+        assert!(error.to_string().contains("cannot combine"));
     }
 }

@@ -10,10 +10,9 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-use crate::DoubleSpan;
 use crate::nodes::{
-    GENERATED_OPERATOR_SPELLINGS, GENERATED_POSTFIX_OPERATOR_SPELLINGS,
-    GENERATED_PUNCTUATION_SPELLINGS, canonical_keyword_spelling,
+    GENERATED_KEYWORD_SPELLINGS, GENERATED_OPERATOR_SPELLINGS,
+    GENERATED_POSTFIX_OPERATOR_SPELLINGS, GENERATED_PUNCTUATION_SPELLINGS,
 };
 use crate::token_stream::delim::Delimiter;
 use crate::{
@@ -22,6 +21,20 @@ use crate::{
 };
 
 const MAX_GROUP_DEPTH: usize = 256;
+
+/// Collapses an explicitly `Core$`-qualified identifier back to its bare
+/// spelling when that spelling is one of the generated keywords, matching
+/// M2's `Core$if` / `if` equivalence.
+pub(crate) fn canonical_keyword_spelling(spelling: &str) -> &str {
+    let Some(keyword) = spelling.strip_prefix("Core$") else {
+        return spelling;
+    };
+    if GENERATED_KEYWORD_SPELLINGS.contains(&keyword) {
+        keyword
+    } else {
+        spelling
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LexErrorKind {
@@ -37,7 +50,7 @@ pub enum LexErrorKind {
     UnterminatedBlockComment,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Spanned)]
 pub struct LexError {
     kind: LexErrorKind,
     span: Span,
@@ -46,12 +59,6 @@ pub struct LexError {
 impl LexError {
     pub fn kind(self) -> LexErrorKind {
         self.kind
-    }
-}
-
-impl Spanned for LexError {
-    fn span(&self) -> Span {
-        self.span
     }
 }
 
@@ -122,8 +129,15 @@ where
         }
         self.lookahead.get(distance).copied()
     }
+}
 
-    fn next(&mut self) -> Option<u8> {
+impl<I> Iterator for ByteCursor<I>
+where
+    I: Iterator<Item = u8>,
+{
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
         self.lookahead.pop_front().or_else(|| self.iterator.next())
     }
 }
@@ -274,7 +288,7 @@ where
                         }
                         let contents = std::mem::replace(&mut output, group.parent);
                         output.push_group(Group::new(
-                            Delimiter::new(kind, DoubleSpan::new(group.opening, closing)),
+                            Delimiter::new(kind, group.opening.join(closing)),
                             contents,
                         ));
                     }
@@ -780,7 +794,7 @@ where
         let stream = std::mem::take(output);
         let opening = self.span(*cell_start, *cell_start);
         cells.push(CellBlock::new(
-            Delimiter::new(kind, DoubleSpan::new(opening, closing)),
+            Delimiter::new(kind, opening.join(closing)),
             stream,
         ));
         *cell_start = self.point;
@@ -794,7 +808,7 @@ enum RequiredClause {
     ExceptBody,
 }
 
-fn newline_ends_cell(stream: &TokenStream) -> bool {
+pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
     let mut required_clauses = Vec::new();
     let mut last_text = None;
     let mut quote_next = false;
@@ -808,7 +822,7 @@ fn newline_ends_cell(stream: &TokenStream) -> bool {
                 last_text = None;
                 None
             }
-            TokenTree::Trivia(_) => None,
+            TokenTree::Trivia(_) | TokenTree::Eof(_) => None,
         };
 
         let Some(text) = text else {
@@ -1277,11 +1291,27 @@ mod tests {
         assert!(trees.next().is_none());
         assert_eq!(parenthesized.delim_kind(), DelimiterKind::Parenthesis);
 
-        let spans = parenthesized.double_span();
-        assert_eq!(spans.span_open.start_point().unwrap().byte, 0);
-        assert_eq!(spans.span_open.end_point().unwrap().byte, 1);
-        assert_eq!(spans.span_close.start_point().unwrap().byte, 14);
-        assert_eq!(spans.span_close.end_point().unwrap().byte, 15);
+        let span = parenthesized.span();
+        assert_eq!(span.start_point().unwrap().byte, 0);
+        assert_eq!(span.end_point().unwrap().byte, 15);
+        assert_eq!(
+            parenthesized
+                .delimiter()
+                .opening_span()
+                .end_point()
+                .unwrap()
+                .byte,
+            1
+        );
+        assert_eq!(
+            parenthesized
+                .delimiter()
+                .closing_span()
+                .start_point()
+                .unwrap()
+                .byte,
+            14
+        );
 
         let bracketed = parenthesized
             .stream()
@@ -1294,8 +1324,8 @@ mod tests {
         assert_eq!(bracketed.delim_kind(), DelimiterKind::Bracket);
         assert_eq!(
             bracketed
-                .double_span()
-                .span_open
+                .delimiter()
+                .opening_span()
                 .start_point()
                 .unwrap()
                 .byte,
@@ -1303,8 +1333,8 @@ mod tests {
         );
         assert_eq!(
             bracketed
-                .double_span()
-                .span_close
+                .delimiter()
+                .closing_span()
                 .start_point()
                 .unwrap()
                 .byte,
@@ -1320,11 +1350,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(angle_bar.delim_kind(), DelimiterKind::AngleBar);
-        let spans = angle_bar.double_span();
-        assert_eq!(spans.span_open.start_point().unwrap().byte, 8);
-        assert_eq!(spans.span_open.end_point().unwrap().byte, 10);
-        assert_eq!(spans.span_close.start_point().unwrap().byte, 11);
-        assert_eq!(spans.span_close.end_point().unwrap().byte, 13);
+        let opening = angle_bar.delimiter().opening_span();
+        let closing = angle_bar.delimiter().closing_span();
+        assert_eq!(opening.start_point().unwrap().byte, 8);
+        assert_eq!(opening.end_point().unwrap().byte, 10);
+        assert_eq!(closing.start_point().unwrap().byte, 11);
+        assert_eq!(closing.end_point().unwrap().byte, 13);
     }
 
     #[test]

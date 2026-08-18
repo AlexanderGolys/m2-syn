@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use m2_syn::visit::Visit;
 use m2_syn::{
     Array, BinaryExpression, BinaryOperator, Component, Expr, ForLoop, IfStatement, IntegerLiteral,
-    List, LoopBody, ParenthesizedExpression, ParseError, ReturnStatement, Sequence, SourceId,
-    StringLiteral, Symbol, WhileLoop, parse_file,
+    List, LoopBody, ParenthesizedExpression, ParseError, Punctuated, ReturnStatement, Sequence,
+    SourceId, StringLiteral, Symbol, WhileLoop, parse_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +71,7 @@ impl<C: InferenceContext> TypeChecker<'_, C> {
         self.results.pop().expect("expression produced one fact")
     }
 
-    fn components(&mut self, components: &[Component]) -> Vec<FactOf<C>> {
+    fn components(&mut self, components: &Punctuated<Component>) -> Vec<FactOf<C>> {
         components
             .iter()
             .filter_map(|component| match component {

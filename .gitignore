@@ -1,6 +1,2 @@
 /target
-**/*.rs.bk
-.DS_Store
-.env
-.env.*
-!.env.example
+/book/book

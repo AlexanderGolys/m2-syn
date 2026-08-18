@@ -1,0 +1,12 @@
+[book]
+title = "m2-syn"
+description = "A parser-independent typed syntax graph for Macaulay2"
+authors = ["Alexander Golys"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/AlexanderGolys/m2-syn"
+edit-url-template = "https://github.com/AlexanderGolys/m2-syn/edit/master/book/src/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"

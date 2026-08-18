@@ -1,7 +1,7 @@
 //! Tree-sitter parser adapter.
 //!
 //! Tree-sitter nodes remain backend-local. [`TreeSitterNode`] projects them
-//! through the temporary untyped [`CstNode`] reconstruction seam; no
+//! through the temporary untyped [`ExternalCstNode`] reconstruction seam; no
 //! Tree-sitter identity or child iterator is stored in the typed graph.
 
 use std::borrow::Cow;

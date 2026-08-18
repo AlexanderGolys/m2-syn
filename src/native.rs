@@ -1,8 +1,8 @@
-//! Direct construction of the typed graph from [`CellStream`](crate::CellStream).
+//! Direct construction of the typed graph from [`CellStream`].
 //!
 //! The native precedence engine owns parsing decisions only. Token storage,
 //! cursor position, trivia skipping, and newline detection belong to
-//! [`ParseStream`](crate::ParseStream), shared with generated [`Parse`](crate::Parse)
+//! [`ParseStream`], shared with generated [`Parse`]
 //! implementations.
 
 use std::error::Error;

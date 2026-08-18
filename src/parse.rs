@@ -21,7 +21,7 @@ use crate::{
 /// A parser backend that produces one typed syntax target.
 ///
 /// Backends may construct `T` directly or adapt their concrete syntax tree
-/// through [`CstNode`] and [`reconstruct`].
+/// through [`ExternalCstNode`] and [`reconstruct`].
 pub trait Parser<T = SourceFile> {
     type Error: Error;
 

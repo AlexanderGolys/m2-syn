@@ -1,5 +1,9 @@
 # m2-syn
 
+[![crates.io](https://img.shields.io/crates/v/m2-syn.svg)](https://crates.io/crates/m2-syn)
+[![docs.rs](https://img.shields.io/docsrs/m2-syn)](https://docs.rs/m2-syn)
+[![license](https://img.shields.io/crates/l/m2-syn.svg)](https://github.com/AlexanderGolys/m2-syn/blob/master/LICENSE)
+
 `m2-syn` is a parser-independent typed syntax graph for Macaulay2. One
 `syntax!` declaration describes the algebraic shape of the graph; generated
 implementations provide construction, traversal, source provenance, and
@@ -21,16 +25,20 @@ The current priority is the basic source pipeline:
 2. reconstruct the complete typed AST;
 3. emit normalized M2 that parses back to the same structure.
 
-The syntax model and development dependency follow the current grammar in the
-sibling `../tree-sitter-macaulay2` checkout. Published version `5.0.0` is
-substantially older; once the current grammar is released, its registry version
-can replace the sibling path without changing the parser API.
+The syntax model follows the grammar published as `tree-sitter-macaulay2`
+`6.0.0`; `Cargo.toml` pins that version but resolves it against the sibling
+`../tree-sitter-macaulay2` checkout during local development, so the two stay
+in lockstep without a registry round trip on every grammar change.
 
-Once broad round-tripping works, the next steps are to stabilize a primitive
-`quote_m2!`, then consider either an M2 `Core`-parser converter or another
-parser implementation. Those frontends may expose different concrete trees,
-so the typed graph and its generated APIs must remain parser-independent even
-while Tree-sitter is an unconditional dependency.
+Round-tripping through both the Tree-sitter and native parser backends works
+end to end, and `quote_m2!`/`parse_quote_m2!` are stable enough for everyday
+use (see [Quoting](#quoting)). The next steps are a converter from M2's own
+`Core` parser output and a macro-expansion engine built on the typed graph;
+`Core`'s own concrete tree is considerably less structured than either parser
+backend here (no named fields, several statement forms share one flat node
+shape distinguished only by which positional slots are populated), so the
+typed graph and its generated APIs must stay parser-independent rather than
+special-cased around it.
 
 Longer term, `m2-syn` should support semantic and typechecking walks,
 incremental analysis after referenced code changes, selected node metadata,
@@ -89,18 +97,19 @@ The ownership boundaries are intentionally narrow:
 
 ```text
 syntax! {
+    // Structural precedences with no single owning token; every operator
+    // below carries its own precedence inline instead.
     precedence: {
         PREC_CONTROL = 12,
-        PREC_ASSIGNMENT_RIGHT = 13,
-        PREC_ASSIGNMENT = 14,
-        PREC_ADDITION = 50,
     }
 
-    augmented: { bin(PREC_ASSIGNMENT, PREC_ASSIGNMENT_RIGHT) }
+    augmented: (14, 13)
 
     tokens {
-        [+] { bin(PREC_ADDITION, PREC_ADDITION), pref(PREC_ADDITION, PREC_ADDITION), aug }
-        [=] { infix(PREC_ASSIGNMENT, PREC_ASSIGNMENT_RIGHT) }
+        // (precedence, binary_strength, unary_strength); `_` marks a slot
+        // the row's flags don't use.
+        [+] { bin, pref, aug } (50, 50, 50)
+        [=] { infix }          (14, 13, _)
     }
     keywords: { [if] [then] [else] }
     markers: {}
@@ -115,8 +124,8 @@ syntax! {
     }
 
     enum Expr {
-        Binary(BinaryExpression),
-        Symbol(Symbol),
+        BinaryExpression,
+        Symbol,
     }
 }
 ```
@@ -129,27 +138,31 @@ files are reviewable build inputs and must not be edited directly.
 
 | Declaration | Syntax role | Generated shape |
 | --- | --- | --- |
-| `PREC_ADDITION = 50` | the numeric encoding of a named binding level | a crate-visible precedence constant |
-| `[+] { bin(PREC_ADDITION, PREC_ADDITION), pref(PREC_ADDITION, PREC_ADDITION), aug }` | binary and prefix binding plus augmented-token generation | token types, parser metadata, and inferred operator-enum membership |
-| `[=] { infix(PREC_ASSIGNMENT, PREC_ASSIGNMENT_RIGHT) }` | syntax-specific infix binding without generic operator membership | a typed token and parser metadata |
+| `PREC_CONTROL = 12` | a structural precedence with no single owning token, consumed directly by the native parser | a crate-visible precedence constant |
+| `[+] { bin, pref, aug } (50, 50, 50)` | binary and prefix binding plus augmented-token generation, precedence inline | token types, parser metadata, and inferred operator-enum membership |
+| `[=] { infix } (14, 13, _)` | syntax-specific infix binding without generic operator membership | a typed token and parser metadata |
 | `[else]` | a keyword already identified by its typed token | a typed keyword token |
 | `struct Name;` | named text leaf | `String` and `Span` |
 | `struct Name { left: Expr, ... }` | concrete product node | declared children |
-| `enum Name { Expr(Expr), ... }` | grouping category | one declared alternative per variant |
+| `enum Name { Expr, ... }` | grouping category; each bare variant names the type it wraps, so the wrapped name doubles as the variant name | one declared alternative per variant |
 | `Token![=]` | literal token field | the type selected by the generated `Token!` macro |
-| `Option<T>`, `Vec<T>`, `Punctuated<T>` | optional, repeated, or comma-punctuated children | the corresponding public wrapper type |
-| `#[cst(positional)]` | a child without a Tree-sitter field name | positional reconstruction from the next matching child |
+| `X?`, `Vec<T>`, `Punctuated<T>` | optional, repeated, or comma-punctuated children | the corresponding public wrapper type |
+| `(_)` | a child without a Tree-sitter field name | positional reconstruction from the next matching child |
+| `(_ lines)` | a positional `Vec<T>` child that's newline- rather than space-separated | positional reconstruction with line-separated emission |
 | `#[cst(kind = assignment)]` | a Rust name whose external CST node has another name | reconstruction from the named CST kind |
 | `#[delimiter(parenthesis)]` | a product enclosed by a delimiter family | a concrete node with its typed delimiter atom |
 
-The `precedence` stage is the only place where numeric binding values are
-written. Parser code and token declarations use the generated names, keeping
-the representation of the binding order out of parsing decisions. `bin(P, B)`
-declares left precedence and right binding strength, `pref(P, U)` declares left
-precedence and unary strength, and `post(P)` declares postfix precedence.
-`infix(P, B)` provides syntax-specific infix parsing without adding the token to
-the generic binary-operator enum. The `aug` tag generates the corresponding
-assignment token using the binding declared once in `augmented`.
+Each operator token carries its own `(precedence, binary_strength,
+unary_strength)` triple directly in `tokens { ... }`, with `_` for any slot
+its flags don't use — `bin`/`infix` use the binary-strength slot, `pref` uses
+the unary-strength slot, `post` uses neither. The separate `precedence` stage
+only holds names for structural precedences with no single owning operator
+token (delimiter/control-clause stoppers the native parser references
+directly); it is not a shared table operators look their numbers up in, so a
+level used by exactly one token is just written as a literal there and
+nowhere else. The `aug` tag generates the corresponding assignment token
+using the binding declared once in `augmented: (precedence,
+binary_strength)`.
 
 Direct recursive product fields are boxed automatically. Token types and
 categories containing only tokens remain inline. Constructors accept the
@@ -179,11 +192,14 @@ construct one while retaining every typed comma and its span. Every delimiter
 atom and each of these wrapper types implements both `Parse` and `ToTokens`, so
 they can be direct `parse_quote_m2!` targets.
 
-A field normally uses its Rust name as its CST field name. Mark it
-`#[cst(positional)]` when it should consume the next matching unlabelled child.
-The schema deliberately permits only named struct fields and one-field tuple
-enum variants, keeping both the declaration and generated API shaped like
-ordinary Rust.
+A field normally uses its Rust name as its CST field name. Mark it `(_)`
+when it should consume the next matching unlabelled child instead. The
+schema deliberately permits only named struct fields and bare-type enum
+variants — a variant never spells out a separate name, since it's always
+either the wrapped type's own name or, for a variant wrapping a token, that
+token's capitalized name — keeping both the declaration and generated API
+shaped like ordinary Rust rather than requiring the same fact to be written
+twice.
 
 ## Generated implementations
 
@@ -491,4 +507,4 @@ After changing `src/nodes.rs` or the generator, refresh the expansion with
 `cargo run -p m2-syn-macros --bin generate` and include the resulting
 `src/gen/` diff.
 
-`m2-syn` is licensed under the [GNU General Public License v3.0](LICENSE).
+`m2-syn` is licensed under the [GNU General Public License v3.0](https://github.com/AlexanderGolys/m2-syn/blob/master/LICENSE).

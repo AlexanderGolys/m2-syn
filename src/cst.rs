@@ -1,7 +1,7 @@
 //! Typed syntax traits and the compatibility bridge from external CSTs.
 //!
 //! [`Token`] and generated node fields are the typed graph.
-//! [`CstNode`] and [`Reconstruct`] are an adapter-only seam for parsers such as
+//! [`ExternalCstNode`] and [`Reconstruct`] are an adapter-only seam for parsers such as
 //! Tree-sitter that first produce an untyped concrete tree. They are not a
 //! traversal interface for the typed graph; use `Visit`, `VisitMut`, or `Fold`
 //! for that. A parser that can construct typed nodes directly does not need

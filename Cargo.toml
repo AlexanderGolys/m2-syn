@@ -12,6 +12,7 @@ repository = "https://github.com/AlexanderGolys/m2-syn"
 readme = "README.md"
 keywords = ["macaulay2", "syntax", "syn", "parse", "m2"]
 categories = ["development-tools::ffi", "parser-implementations"]
+exclude = ["AGENTS.md", "TODO.md", "book/"]
 
 [dependencies]
 m2-syn-macros = { version = "0.1.0", path = "m2-syn-macros" }

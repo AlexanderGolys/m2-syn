@@ -5,8 +5,16 @@ authors = ["Alexander Golys"]
 language = "en"
 src = "src"
 
+[preprocessor.tsitter]
+
+[preprocessor.tsitter.languages.macaulay2]
+library = "parsers/macaulay2.so"
+highlights = "queries/macaulay2/highlights.scm"
+aliases = ["m2", "macaulay2"]
+
 [output.html]
 git-repository-url = "https://github.com/AlexanderGolys/m2-syn"
 edit-url-template = "https://github.com/AlexanderGolys/m2-syn/edit/master/book/src/{path}"
 default-theme = "light"
 preferred-dark-theme = "navy"
+additional-css = ["theme/treesitter.css"]

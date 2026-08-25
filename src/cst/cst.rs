@@ -213,7 +213,7 @@ impl<N: ExternalCstNode> ChildCursor<N> {
             let closing = self.required_anonymous(kind.closing())?;
             return Ok(Delimiter::new(
                 kind,
-                DoubleSpan::new(opening.span(), closing.span()),
+                DoubleSpan::new(opening.expect_span(), closing.expect_span()),
             ));
         }
         Err(ReconstructError::MissingChild {

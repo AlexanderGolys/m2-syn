@@ -204,7 +204,10 @@ fn complete_source_files_retain_cells_and_boundary_nodes() {
     let source_file = parse_file(source).unwrap();
 
     assert_eq!(source_file.cells.len(), 3);
-    assert_eq!(source_file.eof.span(), Span::from_offset(source.len()));
+    assert_eq!(
+        source_file.eof.span().bounds(),
+        Some((source.len(), source.len()))
+    );
     assert_eq!(source_file.span().end(), Some(source.len()));
 }
 
@@ -215,15 +218,15 @@ fn both_backends_locate_virtual_cell_boundaries_after_the_separator() {
     let native = parse_native(source).unwrap();
 
     let expected = [
-        Span::from_offset(2),
-        Span::from_offset(6),
-        Span::from_offset(source.len()),
+        Some((2, 2)),
+        Some((6, 6)),
+        Some((source.len(), source.len())),
     ];
     assert_eq!(
         tree_sitter
             .cells
             .iter()
-            .map(|cell| cell.eoc.span())
+            .map(|cell| cell.eoc.span().bounds())
             .collect::<Vec<_>>(),
         expected
     );
@@ -231,7 +234,7 @@ fn both_backends_locate_virtual_cell_boundaries_after_the_separator() {
         native
             .cells
             .iter()
-            .map(|cell| cell.eoc.span())
+            .map(|cell| cell.eoc.span().bounds())
             .collect::<Vec<_>>(),
         expected
     );

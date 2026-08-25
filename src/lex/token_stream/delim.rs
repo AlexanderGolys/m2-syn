@@ -85,7 +85,7 @@ pub trait DelimiterToken: Parse + DelimiterValue {
 /// [`Delimiter::closing_span`] plain field reads instead of arithmetic that
 /// assumes the source layout. `DoubleSpan(open, close)` mirrors
 /// `proc_macro2`'s open/close pair for a `Group`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoubleSpan(pub Span, pub Span);
 
 impl DoubleSpan {
@@ -94,15 +94,21 @@ impl DoubleSpan {
         Self(open, close)
     }
 
-    /// A pair with no real boundaries, for synthetic or quoted delimiters
-    /// that were never lexed from source.
-    pub fn detached() -> Self {
-        Self(Span::detached(), Span::detached())
+    /// Creates a pair backed by the delimiter's synthetic source spelling.
+    pub fn synthetic(kind: DelimiterKind) -> Self {
+        let spelling = format!("{}{}", kind.opening(), kind.closing());
+        let span = Span::for_text(spelling);
+        let boundary = kind.opening().len();
+        Self(
+            span.subspan(0, boundary),
+            span.subspan(boundary, span.len().unwrap_or(boundary)),
+        )
     }
 
     /// Creates a delimiter whose closing token is missing at `eof`.
     pub fn unclosed(open: Span, eof: Offset) -> Self {
-        Self(open, Span::from_offset(eof))
+        let close = open.at(eof);
+        Self(open, close)
     }
 
     /// Returns the opening delimiter span.
@@ -122,7 +128,7 @@ impl DoubleSpan {
 }
 
 impl Spanned for DoubleSpan {
-    fn span(&self) -> Span {
+    fn try_span(&self) -> Option<Span> {
         self.0.join(self.1.clone())
     }
 }
@@ -159,8 +165,8 @@ impl Delimiter {
 }
 
 impl Spanned for Delimiter {
-    fn span(&self) -> Span {
-        self.spans.span()
+    fn try_span(&self) -> Option<Span> {
+        self.spans.try_span()
     }
 }
 
@@ -185,7 +191,7 @@ impl Parse for Delimiter {
             return Err(TokenParseError::unexpected(
                 "an empty delimited group",
                 group.delim_kind().opening(),
-                group.span(),
+                group.expect_span(),
             ));
         }
         Ok(group.delimiter().clone())
@@ -207,7 +213,7 @@ pub fn parse_delimiter<D: DelimiterToken>(input: &mut ParseStream) -> Result<D, 
         return Err(TokenParseError::unexpected(
             kind.opening(),
             kind.opening(),
-            group.span(),
+            group.expect_span(),
         ));
     }
     Ok(D::new(group.delimiter().spans.clone()))
@@ -222,7 +228,7 @@ pub(crate) fn parse_group(
         return Err(TokenParseError::unexpected(
             kind.opening(),
             group.delim_kind().opening(),
-            group.span(),
+            group.expect_span(),
         ));
     }
     Ok(group)

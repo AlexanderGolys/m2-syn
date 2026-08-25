@@ -57,7 +57,7 @@ impl ExternalCstNode for Node {
 
 impl Spanned for Node {
     fn span(&self) -> Span {
-        Span::detached()
+        Span::for_text("")
     }
 }
 

@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter, Result};
 use std::sync::Arc;
 use std::vec::IntoIter;
 
-use crate::{Span, Spanned, lexer::punctuation_would_merge};
+use crate::{Source, Span, Spanned, lexer::punctuation_would_merge};
 
 #[path = "token_stream/delim.rs"]
 pub mod delim;
@@ -33,20 +33,9 @@ pub struct LiteralToken {
     span: Span,
 }
 
-impl Display for LiteralToken {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
-        formatter.write_str(self.text())
-    }
-}
-
 impl LiteralToken {
-    /// Creates a literal token whose spelling is already available through its span.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `span` has no source backing.
+    /// Creates a literal token from its source span.
     pub fn from_span(kind: LiteralKind, span: Span) -> Self {
-        assert!(span.text().is_some(), "literal spans must name source text");
         Self { kind, span }
     }
 
@@ -54,7 +43,7 @@ impl LiteralToken {
     pub fn new(kind: LiteralKind, text: impl Into<Arc<str>>, span: Span) -> Self {
         Self {
             kind,
-            span: span.with_text(text),
+            span: span_for_spelling(text.into(), span),
         }
     }
 
@@ -62,11 +51,11 @@ impl LiteralToken {
     ///
     /// # Panics
     ///
-    /// Panics if this token's invariant that its span is source-backed was violated.
+    /// Panics when `sources` cannot resolve this token's span.
     pub fn text(&self) -> &str {
         self.span
             .text()
-            .expect("literal tokens must have source-backed spans")
+            .expect("literal spans must resolve to source text")
     }
 }
 
@@ -83,23 +72,15 @@ pub struct IdentToken {
 }
 
 impl IdentToken {
-    /// Creates an identifier whose spelling is already available through its span.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `span` has no source backing.
+    /// Creates an identifier from its source span.
     pub fn from_span(span: Span) -> Self {
-        assert!(
-            span.text().is_some(),
-            "identifier spans must name source text"
-        );
         Self { span }
     }
 
     /// Creates an identifier token.
     pub fn new(text: impl Into<Arc<str>>, span: Span) -> Self {
         Self {
-            span: span.with_text(text),
+            span: span_for_spelling(text.into(), span),
         }
     }
 
@@ -107,17 +88,11 @@ impl IdentToken {
     ///
     /// # Panics
     ///
-    /// Panics if this token's invariant that its span is source-backed was violated.
+    /// Panics when `sources` cannot resolve this token's span.
     pub fn text(&self) -> &str {
         self.span
             .text()
-            .expect("identifier tokens must have source-backed spans")
-    }
-}
-
-impl Display for IdentToken {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
-        formatter.write_str(self.text())
+            .expect("identifier spans must resolve to source text")
     }
 }
 
@@ -170,11 +145,17 @@ impl Lex for EocToken {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Spanned)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 /// A delimited raw token stream.
 pub struct TokenGroup {
     delimiter: Delimiter,
     stream: TokenStream,
+}
+
+impl Spanned for TokenGroup {
+    fn try_span(&self) -> Option<Span> {
+        self.delimiter.try_span()
+    }
 }
 
 impl TokenGroup {
@@ -204,16 +185,6 @@ impl TokenGroup {
     }
 }
 
-impl Display for TokenGroup {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
-        formatter.write_str(self.delim_kind().opening())?;
-        self.stream.fmt(formatter)?;
-        if self.delimiter.is_closed() {
-            formatter.write_str(self.delim_kind().closing())?;
-        }
-        Ok(())
-    }
-}
 impl Lex for TokenGroup {
     fn to_tokens(&self, output: &mut TokenStream) {
         output.0.push(TokenTree::Group(self.clone()));
@@ -243,13 +214,8 @@ pub struct Trivia {
 }
 
 impl Trivia {
-    /// Creates trivia whose spelling is already available through its span.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `span` has no source backing.
+    /// Creates trivia from its category and source span.
     pub fn from_span(kind: TriviaKind, span: Span) -> Self {
-        assert!(span.text().is_some(), "trivia spans must name source text");
         Self { kind, span }
     }
 
@@ -257,7 +223,7 @@ impl Trivia {
     pub fn new(kind: TriviaKind, text: impl Into<Arc<str>>, span: Span) -> Self {
         Self {
             kind,
-            span: span.with_text(text),
+            span: span_for_spelling(text.into(), span),
         }
     }
 
@@ -270,11 +236,11 @@ impl Trivia {
     ///
     /// # Panics
     ///
-    /// Panics if this token's invariant that its span is source-backed was violated.
+    /// Panics when `sources` cannot resolve this trivia's span.
     pub fn text(&self) -> &str {
         self.span
             .text()
-            .expect("trivia tokens must have source-backed spans")
+            .expect("trivia spans must resolve to source text")
     }
 
     /// Reports whether this trivia contains a line feed.
@@ -283,14 +249,19 @@ impl Trivia {
     }
 }
 
-impl Display for Trivia {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
-        formatter.write_str(self.text())
-    }
-}
 impl Lex for Trivia {
     fn to_tokens(&self, output: &mut TokenStream) {
         output.0.push(TokenTree::Trivia(self.clone()));
+    }
+}
+
+fn span_for_spelling(text: Arc<str>, span: Span) -> Span {
+    if span.text() == Some(text.as_ref()) {
+        span
+    } else {
+        let source = Source::with_file(span.file(), text);
+        let len = source.text().len();
+        Span::ranged(source, 0..len)
     }
 }
 
@@ -396,7 +367,7 @@ impl TokenStream {
         let Some(TokenTree::Eoc(marker)) = self.0.last_mut() else {
             return;
         };
-        *marker = EocToken::after_semicolon(marker.span());
+        *marker = EocToken::after_semicolon(marker.expect_span());
     }
 
     /// Appends one emitted syntax fragment with any separator required to keep
@@ -404,7 +375,7 @@ impl TokenStream {
     ///
     /// This is the composition operation used by [`crate::quote_m2!`]. The
     /// fragment retains all of its internal token structure and trivia; a
-    /// detached space is inserted only when the last existing token and first
+    /// synthetic space is inserted only when the last existing token and first
     /// appended token would otherwise merge into one lexical token.
     #[doc(hidden)]
     pub fn append_fragment<T: Lex + ?Sized>(&mut self, fragment: &T) {
@@ -412,13 +383,13 @@ impl TokenStream {
         if self
             .last()
             .zip(fragment.iter().next())
-            .is_some_and(|(left, right)| {
-                (is_wordlike(left) && is_wordlike(right))
-                    || matches!((left, right), (TokenTree::Punct(left), TokenTree::Punct(right))
-                        if punctuation_would_merge(left.text(), right.text()))
-            })
+            .is_some_and(|(left, right)| needs_separator(left, right))
         {
-            self.extend([Trivia::new(TriviaKind::Whitespace, " ", Span::detached())]);
+            self.extend([Trivia::new(
+                TriviaKind::Whitespace,
+                " ",
+                Span::for_text(" "),
+            )]);
         }
         self.extend([fragment]);
     }
@@ -427,28 +398,68 @@ impl TokenStream {
     pub fn pop(&mut self) -> Option<TokenTree> {
         self.0.pop()
     }
-}
 
-fn is_wordlike(tree: &TokenTree) -> bool {
-    matches!(
-        tree,
-        TokenTree::Ident(_) | TokenTree::Literal(_) | TokenTree::Group(_)
-    )
+    /// Reconstructs source text from the shared sources retained by its spans.
+    pub fn to_source(&self) -> String {
+        self.to_string()
+    }
 }
 
 impl Display for TokenStream {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
-        for tree in &self.0 {
-            match tree {
-                TokenTree::Group(group) => group.fmt(formatter)?,
-                TokenTree::Eoc(marker) => marker.fmt(formatter)?,
-                TokenTree::Literal(literal) => literal.fmt(formatter)?,
-                TokenTree::Punct(punct) => punct.fmt(formatter)?,
-                TokenTree::Ident(ident) => ident.fmt(formatter)?,
-                TokenTree::Trivia(trivia) => trivia.fmt(formatter)?,
-            }
+        write_stream(formatter, self)
+    }
+}
+
+fn write_stream(formatter: &mut Formatter<'_>, stream: &TokenStream) -> Result {
+    let mut previous = None;
+    for tree in &stream.0 {
+        if let Some(left) = previous
+            && needs_separator(left, tree)
+        {
+            formatter.write_str(" ")?;
         }
-        Ok(())
+        write_tree(formatter, tree)?;
+        previous = match tree {
+            TokenTree::Trivia(_) | TokenTree::Eoc(_) => None,
+            tree => Some(tree),
+        };
+    }
+    Ok(())
+}
+
+fn needs_separator(left: &TokenTree, right: &TokenTree) -> bool {
+    let left_span = left.span();
+    let right_span = right.span();
+    if left_span.shares_source(&right_span) && left_span.end() == right_span.start() {
+        return false;
+    }
+    let wordlike = |tree: &TokenTree| {
+        matches!(
+            tree,
+            TokenTree::Ident(_) | TokenTree::Literal(_) | TokenTree::Group(_)
+        )
+    };
+    (wordlike(left) && wordlike(right))
+        || matches!((left, right), (TokenTree::Punct(left), TokenTree::Punct(right))
+            if punctuation_would_merge(left.text(), right.text()))
+}
+
+fn write_tree(formatter: &mut Formatter<'_>, tree: &TokenTree) -> Result {
+    match tree {
+        TokenTree::Group(group) => {
+            formatter.write_str(group.delim_kind().opening())?;
+            write_stream(formatter, &group.stream)?;
+            if group.delimiter.is_closed() {
+                formatter.write_str(group.delim_kind().closing())?;
+            }
+            Ok(())
+        }
+        TokenTree::Eoc(marker) => marker.fmt(formatter),
+        TokenTree::Literal(literal) => formatter.write_str(literal.text()),
+        TokenTree::Punct(punct) => formatter.write_str(punct.text()),
+        TokenTree::Ident(ident) => formatter.write_str(ident.text()),
+        TokenTree::Trivia(trivia) => formatter.write_str(trivia.text()),
     }
 }
 
@@ -501,7 +512,7 @@ pub trait Lex {
 
     /// Renders this value as normalized Macaulay2 source.
     fn to_m2(&self) -> String {
-        self.to_token_stream().to_string()
+        self.to_token_stream().to_source()
     }
 }
 

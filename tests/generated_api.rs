@@ -1,11 +1,15 @@
 use m2_syn::{
     Array, BinaryExpr, BinaryOperator, DelimiterKind, DelimiterToken, Expr, Lex, LiteralKind,
-    OperatorExpr, PrefixOperator, Span, Spanned, Symbol, TokenParseError, TokenTree, TriviaKind,
-    fold::Fold, parse_quote_m2, parse_tokens, parse2, quote_m2, visit::Visit, visit_mut::VisitMut,
+    OperatorExpr, PrefixOperator, Source, Span, Spanned, Symbol, TokenParseError, TokenTree,
+    TriviaKind, fold::Fold, parse_quote_m2, parse_tokens, parse2, quote_m2, visit::Visit,
+    visit_mut::VisitMut,
 };
 
 fn span(start: usize, end: usize) -> Span {
-    Span::new(start, end)
+    thread_local! {
+        static SOURCE: std::sync::Arc<Source> = Source::synthetic("left * right");
+    }
+    SOURCE.with(|source| Span::ranged(std::sync::Arc::clone(source), start..end))
 }
 
 fn symbol(name: &str, start: usize) -> Symbol {
@@ -58,7 +62,8 @@ struct Rename;
 
 impl VisitMut for Rename {
     fn visit_symbol_mut(&mut self, node: &mut Symbol) {
-        node.set_text(format!("{}_mut", node.text()));
+        let text = format!("{}_mut", node.text());
+        *node = Symbol::new(&text, Span::for_text(text.clone()));
     }
 }
 
@@ -157,7 +162,7 @@ fn delimited_nodes_store_typed_delimiters_and_flatten_to_raw_groups() {
         <m2_syn::Delimiter![[]] as DelimiterToken>::KIND,
         DelimiterKind::Bracket
     );
-    assert_eq!(array.delimiter.span(), Span::detached());
+    assert_eq!(array.delimiter.span().text(), Some("[]"));
     assert!(matches!(
         array.to_token_stream().into_iter().next(),
         Some(TokenTree::Group(group)) if group.delim_kind() == DelimiterKind::Bracket
@@ -249,7 +254,7 @@ fn quote_uses_the_m2_lexer_for_static_literals_and_identifiers() {
 
 #[test]
 fn quote_composes_interpolated_fragments_by_their_actual_boundaries() {
-    let plus = m2_syn::Token![+](Span::detached());
+    let plus = m2_syn::Token![+](Span::for_text(""));
     let value = symbol("value", 0);
     let tokens = quote_m2! { left $(plus) $(value) };
 
@@ -263,7 +268,7 @@ fn quote_composes_interpolated_fragments_by_their_actual_boundaries() {
 #[test]
 fn quote_repetition_is_an_explicit_rust_loop_with_recursive_interpolation() {
     let values = [symbol("a", 0), symbol("b", 1)];
-    let plus = m2_syn::Token![+](Span::detached());
+    let plus = m2_syn::Token![+](Span::for_text(""));
     let constant = symbol("z", 2);
     let tokens = quote_m2! {
         $[value in &values] {

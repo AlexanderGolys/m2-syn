@@ -8,13 +8,13 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use crate::lexer::{canonical_word_spelling, split_cells};
+use crate::lexer::{RawCell, canonical_word_spelling, split_cells};
 use crate::nodes::*;
 use crate::parse::{Lookahead, SignificantToken};
 use crate::{
-    Delimited, DelimiterKind, DelimiterToken, DelimiterValue, LexError, LiteralKind, Parse,
-    ParseStream, Parser, Punctuated, Recovered, Span, Spanned, Token, TokenParseError, TokenStream,
-    TokenTree, lex_str, lex_str_recovering,
+    Delimited, DelimiterKind, DelimiterToken, DelimiterValue, LexError, LexErrorKind, LiteralKind,
+    Parse, ParseStream, Parser, Punctuated, Recovered, Span, Spanned, Token, TokenParseError,
+    TokenStream, TokenTree, lex_str, lex_str_recovering,
 };
 
 macro_rules! is_token {
@@ -27,7 +27,7 @@ macro_rules! unexpected {
     ($token:expr, $expected:expr) => {{
         let token = $token;
         NativeParseError::Unexpected {
-            span: token.span(),
+            span: token.expect_span(),
             found: token.description(),
             expected: $expected,
         }
@@ -74,6 +74,281 @@ pub fn parse_native_recovering(
     let (tokens, diagnostics) = recovered.into_parts();
     let syntax = NativeParser.parse_stream(tokens)?;
     Ok(Recovered::new(syntax, diagnostics))
+}
+
+/// The current state of an append-oriented native cell parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NativeCellState {
+    /// No submitted syntax is waiting and no completed cell is queued.
+    Empty,
+    /// At least one complete cell is ready to be taken.
+    Complete,
+    /// The active source is a prefix that more input may complete.
+    Incomplete,
+    /// The active source contains an error that appended input cannot repair.
+    Invalid,
+}
+
+/// One completed native cell together with its exact submitted source.
+#[derive(Debug)]
+pub struct CompletedNativeCell {
+    source: Span,
+    syntax: crate::nodes::Cell,
+}
+
+impl CompletedNativeCell {
+    /// Returns the exact source submitted for this evaluation unit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internally retained source span cannot resolve its text.
+    pub fn source(&self) -> &str {
+        self.source
+            .text()
+            .expect("completed cell source spans must resolve to text")
+    }
+
+    /// Returns the parsed typed cell.
+    pub fn syntax(&self) -> &crate::nodes::Cell {
+        &self.syntax
+    }
+
+    /// Separates the exact source span from the typed cell.
+    pub fn into_parts(self) -> (Span, crate::nodes::Cell) {
+        (self.source, self.syntax)
+    }
+}
+
+/// A retained native parser for line-oriented shell input.
+///
+/// Each call to [`Self::push_line`] appends one submitted physical line. Cells
+/// completed by a top-level newline or semicolon are removed from the active
+/// buffer and never parsed again. Only the unfinished tail is lexed and parsed
+/// on later submissions.
+///
+/// Missing delimiter closers and parser requirements at end of input are
+/// classified as [`NativeCellState::Incomplete`]. A recoverable typed cell is
+/// available through [`Self::active_syntax`] when synthetic delimiter closers
+/// were enough to parse its contents.
+///
+/// ```
+/// use m2_syn::{Lex, NativeCellParser, NativeCellState};
+///
+/// let mut parser = NativeCellParser::new();
+/// assert_eq!(parser.push_line("f = x -> ("), NativeCellState::Incomplete);
+/// assert!(parser.active_syntax().is_some());
+/// assert_eq!(parser.push_line("x + 1"), NativeCellState::Incomplete);
+/// assert_eq!(parser.push_line(")"), NativeCellState::Complete);
+///
+/// let cells = parser.take_completed();
+/// assert_eq!(cells[0].syntax().to_m2(), "f = x -> (x + 1)");
+/// ```
+#[derive(Debug)]
+pub struct NativeCellParser {
+    active_source: String,
+    active_tokens: TokenStream,
+    active_syntax: Option<crate::nodes::Cell>,
+    completed: Vec<CompletedNativeCell>,
+    lexer_diagnostics: Vec<LexError>,
+    parse_error: Option<NativeParseError>,
+    state: NativeCellState,
+}
+
+impl Default for NativeCellParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NativeCellParser {
+    /// Creates an empty native shell parser.
+    pub fn new() -> Self {
+        Self {
+            active_source: String::new(),
+            active_tokens: TokenStream::new(),
+            active_syntax: None,
+            completed: Vec::new(),
+            lexer_diagnostics: Vec::new(),
+            parse_error: None,
+            state: NativeCellState::Empty,
+        }
+    }
+
+    /// Appends one submitted physical line and refreshes the active cell.
+    ///
+    /// A line feed is appended when `line` does not already end in one. This is
+    /// the submission boundary: a syntactically complete final expression may
+    /// become a completed cell, while an operator, required clause, or open
+    /// delimiter keeps the cell active.
+    pub fn push_line(&mut self, line: &str) -> NativeCellState {
+        self.active_source.push_str(line);
+        if !line.ends_with('\n') {
+            self.active_source.push('\n');
+        }
+        self.refresh()
+    }
+
+    /// Returns the current completion classification.
+    pub fn state(&self) -> NativeCellState {
+        self.state
+    }
+
+    /// Returns the exact source still belonging to the unfinished cell.
+    pub fn active_source(&self) -> &str {
+        &self.active_source
+    }
+
+    /// Returns recovered tokens for the unfinished cell.
+    pub fn active_tokens(&self) -> &TokenStream {
+        &self.active_tokens
+    }
+
+    /// Returns recovered typed syntax for the unfinished cell when available.
+    pub fn active_syntax(&self) -> Option<&crate::nodes::Cell> {
+        self.active_syntax.as_ref()
+    }
+
+    /// Returns lexer diagnostics for the active cell.
+    pub fn lexer_diagnostics(&self) -> &[LexError] {
+        &self.lexer_diagnostics
+    }
+
+    /// Returns the parser failure for an incomplete or invalid active cell.
+    pub fn parse_error(&self) -> Option<&NativeParseError> {
+        self.parse_error.as_ref()
+    }
+
+    /// Returns completed evaluation units that have not yet been taken.
+    pub fn completed(&self) -> &[CompletedNativeCell] {
+        &self.completed
+    }
+
+    /// Takes every completed evaluation unit without disturbing an active cell.
+    pub fn take_completed(&mut self) -> Vec<CompletedNativeCell> {
+        let completed = std::mem::take(&mut self.completed);
+        if self.state == NativeCellState::Complete {
+            self.state = NativeCellState::Empty;
+        }
+        completed
+    }
+
+    /// Discards the unfinished cell and its diagnostics.
+    pub fn reset_active(&mut self) {
+        self.active_source.clear();
+        self.active_tokens = TokenStream::new();
+        self.active_syntax = None;
+        self.lexer_diagnostics.clear();
+        self.parse_error = None;
+        self.state = if self.completed.is_empty() {
+            NativeCellState::Empty
+        } else {
+            NativeCellState::Complete
+        };
+    }
+
+    fn refresh(&mut self) -> NativeCellState {
+        self.active_tokens = TokenStream::new();
+        self.active_syntax = None;
+        self.lexer_diagnostics.clear();
+        self.parse_error = None;
+
+        loop {
+            let recovered = match lex_str_recovering(&self.active_source) {
+                Ok(recovered) => recovered,
+                Err(error) => {
+                    self.state = if incomplete_lex_error(error.kind()) {
+                        NativeCellState::Incomplete
+                    } else {
+                        NativeCellState::Invalid
+                    };
+                    self.lexer_diagnostics.push(error);
+                    return self.state;
+                }
+            };
+            let (tokens, diagnostics) = recovered.into_parts();
+            let mut cells = split_cells(tokens.clone()).into_iter();
+            let Some(cell) = cells.next() else {
+                self.active_tokens = tokens;
+                self.lexer_diagnostics = diagnostics;
+                self.state = if self.completed.is_empty() {
+                    NativeCellState::Empty
+                } else {
+                    NativeCellState::Complete
+                };
+                return self.state;
+            };
+
+            let has_following_cell = cells.next().is_some();
+            let ended_by_semicolon = cell.semicolon.is_some();
+            let end = cell.eoc.end().unwrap_or(self.active_source.len());
+            let source = Span::ranged(std::sync::Arc::clone(cell.eoc.source()), 0..end);
+
+            match parse_raw_cell(cell) {
+                Ok(Some(syntax)) if has_following_cell => {
+                    self.completed.push(CompletedNativeCell { source, syntax });
+                    self.active_source.replace_range(..end, "");
+                }
+                Ok(Some(syntax)) if diagnostics.is_empty() => {
+                    self.completed.push(CompletedNativeCell { source, syntax });
+                    self.active_source.clear();
+                    self.active_tokens = TokenStream::new();
+                    self.state = NativeCellState::Complete;
+                    return self.state;
+                }
+                Ok(Some(syntax)) => {
+                    self.active_tokens = tokens;
+                    self.active_syntax = Some(syntax);
+                    self.lexer_diagnostics = diagnostics;
+                    self.state = NativeCellState::Incomplete;
+                    return self.state;
+                }
+                Ok(None) => {
+                    self.active_tokens = tokens;
+                    self.lexer_diagnostics = diagnostics;
+                    self.state = if self.completed.is_empty() {
+                        NativeCellState::Empty
+                    } else {
+                        NativeCellState::Complete
+                    };
+                    return self.state;
+                }
+                Err(error) => {
+                    let can_append_to_cell = !has_following_cell && !ended_by_semicolon;
+                    self.state = if can_append_to_cell && incomplete_parse_error(&error) {
+                        NativeCellState::Incomplete
+                    } else {
+                        NativeCellState::Invalid
+                    };
+                    self.active_tokens = tokens;
+                    self.lexer_diagnostics = diagnostics;
+                    self.parse_error = Some(error);
+                    return self.state;
+                }
+            }
+        }
+    }
+}
+
+fn incomplete_lex_error(kind: LexErrorKind) -> bool {
+    matches!(
+        kind,
+        LexErrorKind::UnterminatedGroup
+            | LexErrorKind::UnterminatedString
+            | LexErrorKind::UnterminatedRawString
+            | LexErrorKind::UnterminatedBlockComment
+    )
+}
+
+fn incomplete_parse_error(error: &NativeParseError) -> bool {
+    match error {
+        NativeParseError::MissingOperand { .. } => true,
+        NativeParseError::Unexpected { found, .. } => found == "end of input",
+        NativeParseError::Lex(error) => incomplete_lex_error(error.kind()),
+        NativeParseError::NewlineInApplication { .. }
+        | NativeParseError::InvalidAssignmentTarget { .. }
+        | NativeParseError::InvalidLambdaParameters { .. }
+        | NativeParseError::Unsupported { .. } => false,
+    }
 }
 
 #[derive(Debug, Spanned)]
@@ -134,7 +409,7 @@ impl NativeParseError {
         if matches!(self, Self::MissingOperand { .. }) {
             Self::MissingOperand {
                 operator: operator.description(),
-                span: operator.span(),
+                span: operator.expect_span(),
             }
         } else {
             self
@@ -345,7 +620,7 @@ impl Engine {
 
     fn parse_components(&mut self) -> Result<(Punctuated<Component>, bool), NativeParseError> {
         let first = if self.at_punctuation(",") {
-            Component::Empty(Empty::new("", empty_span_at(&self.peek().span())))
+            Component::Empty(Empty::new("", empty_span_at(&self.peek().expect_span())))
         } else {
             self.parse_required(PREC_COMMA)?.into()
         };
@@ -355,7 +630,7 @@ impl Engine {
         while let Some(comma) = self.take_punctuation(",") {
             has_comma = true;
             let next = if self.at_end() || self.at_punctuation(";") || self.at_punctuation(",") {
-                Component::Empty(Empty::new("", empty_span_at(&self.peek().span())))
+                Component::Empty(Empty::new("", empty_span_at(&self.peek().expect_span())))
             } else {
                 self.parse_required(PREC_COMMA)?.into()
             };
@@ -413,7 +688,7 @@ impl Engine {
             UnaryAction::Prefix => {
                 let strength = info.unary_strength.expect("prefix operators have U");
                 let operand = self.parse_required(level.max(strength))?;
-                let span = token.token.span();
+                let span = token.token.expect_span();
                 let spelling = token.token.description();
                 let operator = PrefixOperator::from_token_tree(token.token).ok_or({
                     NativeParseError::Unsupported {
@@ -477,14 +752,16 @@ impl Engine {
                 } else {
                     unreachable!("quote actions are assigned only to quote specifiers")
                 };
-                let quoted_span = quoted.span();
+                let quoted_span = quoted.expect_span();
                 let Some(quoted_text) = quoted.spelling().map(str::to_owned) else {
                     return Err(unexpected!(quoted, "a quoted token"));
                 };
                 let quoted = Symbol::new(quoted_text, quoted_span);
                 QuoteExpression::new(specifier, quoted).into()
             }
-            UnaryAction::Error => return Err(unexpected!(token.token, "an expression")),
+            UnaryAction::Error => {
+                return Err(unexpected!(token.token, "an expression"));
+            }
         };
         self.accumulate(result, level)
     }
@@ -674,7 +951,7 @@ impl Engine {
         match self.parse_nullable(level)? {
             None => Err(NativeParseError::MissingOperand {
                 operator: keyword.description(),
-                span: keyword.span(),
+                span: keyword.expect_span(),
             }),
             Some(expression) => Ok(expression),
         }
@@ -686,7 +963,7 @@ impl Engine {
                 if matches!(token.token, TokenTree::Ident(_))
                     && matches!(parse_info(&token.token).unary, UnaryAction::Atom) =>
             {
-                let span = token.token.span();
+                let span = token.token.expect_span();
                 let text = token.token.description();
                 Ok(Symbol::new(text, span))
             }
@@ -745,7 +1022,7 @@ impl Engine {
                     .map_err(|error| error.missing_operand_for(&operator.token))?;
                 lower_binary(left, operator.token, right)?
             } else if info.postfix {
-                let span = operator.token.span();
+                let span = operator.token.expect_span();
                 let spelling = operator.token.description();
                 let operator = PostfixOperator::from_token_tree(operator.token).ok_or(
                     NativeParseError::Unsupported {
@@ -757,14 +1034,10 @@ impl Engine {
             } else if !matches!(info.unary, UnaryAction::Error) {
                 if operator.crossed_newline {
                     return Err(NativeParseError::NewlineInApplication {
-                        span: operator.token.span(),
+                        span: operator.token.expect_span(),
                     });
                 }
-                let adjacency_span = operator
-                    .token
-                    .span()
-                    .start()
-                    .map_or_else(Span::detached, Span::from_offset);
+                let adjacency_span = operator.token.expect_span().subspan(0, 0);
                 let right = self.parse_consumed(operator, PREC_APPLICATION_RIGHT)?;
                 AdjacentExpr::new(left, Adj::new("", adjacency_span), right).into()
             } else {
@@ -780,7 +1053,7 @@ impl Engine {
             (Some(value), _) => Err(NativeParseError::Unexpected {
                 found: "a sequence".into(),
                 expected: "one expression",
-                span: value.span(),
+                span: value.expect_span(),
             }),
             (None, _) => Err(NativeParseError::MissingOperand {
                 operator: "empty expression".into(),
@@ -919,9 +1192,9 @@ fn lower_prefix_statement(keyword: TokenTree, value: Option<Expr>) -> Expr {
 
 fn lower_atom(token: TokenTree) -> Result<Expr, NativeParseError> {
     match token {
-        TokenTree::Ident(token) => Ok(Symbol::new(token.text(), token.span()).into()),
+        TokenTree::Ident(token) => Ok(Symbol::new(token.text(), token.expect_span()).into()),
         TokenTree::Literal(token) => {
-            let span = token.span();
+            let span = token.expect_span();
             Ok(match token.kind {
                 LiteralKind::Integer => IntegerLiteral::new(token.text(), span).into(),
                 LiteralKind::Float => FloatLiteral::new(token.text(), span).into(),
@@ -934,7 +1207,7 @@ fn lower_atom(token: TokenTree) -> Result<Expr, NativeParseError> {
 }
 
 fn lower_binary(left: Expr, operator: TokenTree, right: Expr) -> Result<Expr, NativeParseError> {
-    let span = operator.span();
+    let span = operator.expect_span();
     let spelling = operator
         .spelling()
         .expect("binary actions are assigned only to spelled tokens");
@@ -966,7 +1239,7 @@ fn lower_assignment(
     right: Expr,
     local: bool,
 ) -> Result<Expr, NativeParseError> {
-    let span = operator.span();
+    let span = operator.expect_span();
     match (local, left) {
         (false, Expr::Symbol(variable)) => {
             Ok(GlobalBinding::new(variable, typed_token(operator), right).into())
@@ -1033,11 +1306,15 @@ fn parse_cells(tokens: TokenStream) -> Result<SourceFile, NativeParseError> {
     let eof_span = ParseStream::new(tokens.clone()).eof_span();
     let mut elements = Vec::new();
     for cell in split_cells(tokens) {
-        if let Some(element) = Engine::new(cell.stream).parse_cell(cell.semicolon, cell.eoc)? {
+        if let Some(element) = parse_raw_cell(cell)? {
             elements.push(element);
         }
     }
     Ok(SourceFile::new(elements, Eof::new("", eof_span)))
+}
+
+fn parse_raw_cell(cell: RawCell) -> Result<Option<crate::nodes::Cell>, NativeParseError> {
+    Engine::new(cell.stream).parse_cell(cell.semicolon, cell.eoc)
 }
 
 impl Parse for Expr {
@@ -1053,7 +1330,7 @@ impl Parse for Expr {
             Lookahead::End(_) => Ok(value),
             Lookahead::Token(token) => Err(TokenParseError::TrailingToken {
                 found: token.token.description(),
-                span: token.token.span(),
+                span: token.token.expect_span(),
             }),
         }
     }
@@ -1061,12 +1338,13 @@ impl Parse for Expr {
 
 impl Parse for SourceFile {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
-        parse_cells(input.by_ref().collect()).map_err(token_parse_error)
+        let tokens = input.by_ref().collect();
+        parse_cells(tokens).map_err(token_parse_error)
     }
 }
 
 fn token_parse_error(error: NativeParseError) -> TokenParseError {
-    let span = error.span();
+    let span = error.expect_span();
     TokenParseError::Syntax {
         message: error.to_string(),
         span,

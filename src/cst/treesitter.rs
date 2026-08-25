@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::Range;
+use std::sync::Arc;
 use std::vec::IntoIter;
 
 use crate::native::{assignment_pack, installation_value, lambda_parameters};
@@ -17,7 +18,8 @@ use crate::nodes::*;
 use crate::{
     CSTNodeClassLabel, DelimiterKind, DelimiterToken, DoubleSpan, ExternalCstChild,
     ExternalCstNode, LexError, Parser, Punctuated, Reconstruct, ReconstructError, Recovered,
-    SourceFile, Span, Spanned, TextEdit, TokenStream, TokenTree, lex_str, lex_str_recovering,
+    Source, SourceFile, Span, Spanned, TextEdit, TokenStream, TokenTree, lex_str,
+    lex_str_recovering,
 };
 
 #[derive(Debug)]
@@ -106,7 +108,7 @@ pub struct TreeSitterParser {
 /// and remain available through [`Self::diagnostics`].
 pub struct RealtimeParser {
     parser: tree_sitter::Parser,
-    source: String,
+    source: Arc<Source>,
     parse_view: String,
     tree: tree_sitter::Tree,
     syntax: SourceFile,
@@ -122,14 +124,14 @@ impl RealtimeParser {
     /// Returns [`ParseError`] when the grammar cannot parse and lower the
     /// source, apart from recoverable missing group closers.
     pub fn new(source: impl Into<String>) -> Result<Self, ParseError> {
-        let source = source.into();
+        let source = Source::new(source.into());
         let mut parser = TreeSitterParser::new()?.parser;
         let ParsedTree {
             parse_view,
             tree,
             syntax,
             diagnostics,
-        } = parse_recovered_tree(&mut parser, &source, None)?;
+        } = parse_recovered_tree(&mut parser, Arc::clone(&source), None)?;
         Ok(Self {
             parser,
             source,
@@ -152,8 +154,11 @@ impl RealtimeParser {
     /// UTF-8 buffer, or another [`ParseError`] when the edited source cannot be
     /// recovered and lowered.
     pub fn apply_edit(&mut self, edit: &TextEdit) -> Result<(), ParseError> {
-        let source = edit.apply(&self.source).ok_or(ParseError::InvalidEdit)?;
-        let (view, aliases, diagnostics) = renamed_source_recovering(&source)?;
+        let source_text = edit
+            .apply(self.source.text())
+            .ok_or(ParseError::InvalidEdit)?;
+        let source = Source::with_file(self.source.file(), source_text);
+        let (view, aliases, diagnostics) = renamed_source_recovering(source.text())?;
         let parse_view = view.into_owned();
 
         let mut edited_tree = self.tree.clone();
@@ -163,18 +168,21 @@ impl RealtimeParser {
             .parse(parse_view.as_bytes(), Some(&edited_tree))
             .ok_or(ParseError::Cancelled)?;
         if let Some(error) = first_error(tree.root_node()) {
-            return Err(ParseError::InvalidSyntax(Span::new(
-                error.start_byte().min(source.len()),
-                error.end_byte().min(source.len()),
+            return Err(ParseError::InvalidSyntax(Span::ranged(
+                Arc::clone(&source),
+                error.start_byte().min(source.text().len())
+                    ..error.end_byte().min(source.text().len()),
             )));
         }
-        let syntax = Lowerer::new(&source, aliases).source_file(tree.root_node())?;
+        let syntax = Lowerer::new(Arc::clone(&source), source.text(), aliases)
+            .source_file(tree.root_node())?;
         let changed_ranges = edited_tree
             .changed_ranges(&tree)
             .map(|range| {
-                Span::new(
-                    range.start_byte.min(source.len()),
-                    range.end_byte.min(source.len()),
+                Span::ranged(
+                    Arc::clone(&source),
+                    range.start_byte.min(source.text().len())
+                        ..range.end_byte.min(source.text().len()),
                 )
             })
             .collect();
@@ -190,7 +198,7 @@ impl RealtimeParser {
 
     /// Returns the current source snapshot.
     pub fn source(&self) -> &str {
-        &self.source
+        self.source.text()
     }
 
     /// Returns the typed syntax for the current snapshot.
@@ -223,21 +231,23 @@ struct ParsedTree {
 
 fn parse_recovered_tree(
     parser: &mut tree_sitter::Parser,
-    source: &str,
+    source: Arc<Source>,
     old_tree: Option<&tree_sitter::Tree>,
 ) -> Result<ParsedTree, ParseError> {
-    let (view, aliases, diagnostics) = renamed_source_recovering(source)?;
+    let source_text = source.text();
+    let (view, aliases, diagnostics) = renamed_source_recovering(source_text)?;
     let parse_view = view.into_owned();
     let tree = parser
         .parse(parse_view.as_bytes(), old_tree)
         .ok_or(ParseError::Cancelled)?;
     if let Some(error) = first_error(tree.root_node()) {
-        return Err(ParseError::InvalidSyntax(Span::new(
-            error.start_byte().min(source.len()),
-            error.end_byte().min(source.len()),
+        return Err(ParseError::InvalidSyntax(Span::ranged(
+            Arc::clone(&source),
+            error.start_byte().min(source_text.len())..error.end_byte().min(source_text.len()),
         )));
     }
-    let syntax = Lowerer::new(source, aliases).source_file(tree.root_node())?;
+    let syntax =
+        Lowerer::new(Arc::clone(&source), source_text, aliases).source_file(tree.root_node())?;
     Ok(ParsedTree {
         parse_view,
         tree,
@@ -309,17 +319,23 @@ impl TreeSitterParser {
     }
 
     fn parse_source(&mut self, source: &str) -> Result<SourceFile, ParseError> {
-        let (renamed, aliases) = renamed_source(source)?;
+        self.parse_source_in(Source::new(source))
+    }
+
+    fn parse_source_in(&mut self, source: Arc<Source>) -> Result<SourceFile, ParseError> {
+        let source_text = source.text();
+        let (renamed, aliases) = renamed_source(source_text)?;
         let tree = self
             .parser
             .parse(renamed.as_bytes(), None)
             .ok_or(ParseError::Cancelled)?;
         if let Some(error) = first_error(tree.root_node()) {
-            return Err(ParseError::InvalidSyntax(
-                TreeSitterNode::new(error, source.as_bytes()).span(),
-            ));
+            return Err(ParseError::InvalidSyntax(Span::ranged(
+                Arc::clone(&source),
+                error.start_byte()..error.end_byte(),
+            )));
         }
-        Lowerer::new(source, aliases).source_file(tree.root_node())
+        Lowerer::new(Arc::clone(&source), source_text, aliases).source_file(tree.root_node())
     }
 
     /// Parses incomplete source while retaining syntax inside unclosed groups.
@@ -335,18 +351,21 @@ impl TreeSitterParser {
         &mut self,
         source: &str,
     ) -> Result<Recovered<SourceFile, LexError>, ParseError> {
-        let (renamed, aliases, diagnostics) = renamed_source_recovering(source)?;
+        let source = Source::new(source);
+        let source_text = source.text();
+        let (renamed, aliases, diagnostics) = renamed_source_recovering(source_text)?;
         let tree = self
             .parser
             .parse(renamed.as_bytes(), None)
             .ok_or(ParseError::Cancelled)?;
         if let Some(error) = first_error(tree.root_node()) {
-            return Err(ParseError::InvalidSyntax(Span::new(
-                error.start_byte().min(source.len()),
-                error.end_byte().min(source.len()),
+            return Err(ParseError::InvalidSyntax(Span::ranged(
+                Arc::clone(&source),
+                error.start_byte().min(source_text.len())..error.end_byte().min(source_text.len()),
             )));
         }
-        let syntax = Lowerer::new(source, aliases).source_file(tree.root_node())?;
+        let syntax = Lowerer::new(Arc::clone(&source), source_text, aliases)
+            .source_file(tree.root_node())?;
         Ok(Recovered::new(syntax, diagnostics))
     }
 }
@@ -355,8 +374,7 @@ impl Parser for TreeSitterParser {
     type Error = ParseError;
 
     fn parse_stream(&mut self, tokens: TokenStream) -> Result<SourceFile, Self::Error> {
-        let source = tokens.to_string();
-        self.parse_source(&source)
+        self.parse_source_in(Source::new(tokens.to_source()))
     }
 }
 
@@ -387,7 +405,7 @@ pub fn parse_file_recovering(source: &str) -> Result<Recovered<SourceFile, LexEr
 /// Returns [`ParseError`] when the emitted source is invalid or reconstruction
 /// fails.
 pub fn parse_tokens(tokens: &TokenStream) -> Result<SourceFile, ParseError> {
-    parse_file(&tokens.to_string())
+    TreeSitterParser::new()?.parse_stream(tokens.clone())
 }
 
 fn first_error(root: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -410,10 +428,10 @@ struct Lowerer<'source> {
 }
 
 impl<'source> Lowerer<'source> {
-    fn new(source: &'source str, aliases: Vec<CoreAlias>) -> Self {
+    fn new(source_owner: Arc<Source>, source: &'source str, aliases: Vec<CoreAlias>) -> Self {
         Self {
             source: source.as_bytes(),
-            source_span: Span::source(source),
+            source_span: Span::ranged(source_owner, 0..source.len()),
             aliases,
         }
     }
@@ -432,7 +450,7 @@ impl<'source> Lowerer<'source> {
         }
         Ok(SourceFile::new(
             cells,
-            Eof::new("", Span::from_offset(self.source.len())),
+            Eof::new("", self.source_span.at(self.source.len())),
         ))
     }
 
@@ -457,7 +475,7 @@ impl<'source> Lowerer<'source> {
         Ok(Cell::new(
             content,
             semicolon,
-            Eoc::new("", Span::from_offset(eoc_offset)),
+            Eoc::new("", self.source_span.at(eoc_offset)),
         ))
     }
 
@@ -482,7 +500,12 @@ impl<'source> Lowerer<'source> {
     fn expr_pack(&self, nodes: Vec<tree_sitter::Node<'_>>) -> Result<ExprPack, ParseError> {
         let pack_span = nodes
             .iter()
-            .fold(Span::detached(), |span, node| span.join(self.span(*node)));
+            .map(|node| self.span(*node))
+            .reduce(|left, right| {
+                left.join(right)
+                    .expect("Tree-sitter nodes share one source snapshot")
+            })
+            .unwrap_or_else(|| Span::unlocated(Arc::clone(self.source_span.source())));
         let mut values = Vec::new();
         let mut commas = Vec::new();
         for node in nodes.into_iter().filter(|node| !node.is_extra()) {
@@ -1114,7 +1137,7 @@ impl<'source> Lowerer<'source> {
         let opening = self.span(self.required_kind(node, kind.opening())?);
         let closing = self.required_kind(node, kind.closing())?;
         let closing = if closing.start_byte() >= self.source.len() {
-            Span::from_offset(self.source.len())
+            self.source_span.at(self.source.len())
         } else {
             self.span(closing)
         };
@@ -1314,7 +1337,7 @@ fn collect_core_aliases(tokens: &TokenStream, aliases: &mut Vec<CoreAlias>) {
                 if bare == spelling {
                     continue;
                 }
-                let Some((start, end)) = identifier.span().bounds() else {
+                let Some((start, end)) = identifier.expect_span().bounds() else {
                     continue;
                 };
                 aliases.push(CoreAlias {
@@ -1396,9 +1419,7 @@ impl ExternalCstNode for TreeSitterNode<'_, '_> {
 }
 
 impl Spanned for TreeSitterNode<'_, '_> {
-    fn span(&self) -> Span {
-        self.span
-            .clone()
-            .unwrap_or_else(|| Span::new(self.node.start_byte(), self.node.end_byte()))
+    fn try_span(&self) -> Option<Span> {
+        self.span.clone()
     }
 }

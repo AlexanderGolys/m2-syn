@@ -14,7 +14,10 @@ impl Parser for EmptyFileParser {
     type Error = Infallible;
 
     fn parse_stream(&mut self, _tokens: TokenStream) -> Result<SourceFile, Self::Error> {
-        Ok(SourceFile::new(Vec::new(), Eof::new("", Span::detached())))
+        Ok(SourceFile::new(
+            Vec::new(),
+            Eof::new("", Span::for_text("")),
+        ))
     }
 }
 
@@ -24,7 +27,7 @@ impl Parser<Symbol> for SymbolParser {
     type Error = Infallible;
 
     fn parse_stream(&mut self, tokens: TokenStream) -> Result<Symbol, Self::Error> {
-        Ok(Symbol::new(tokens.to_string(), Span::detached()))
+        Ok(Symbol::new(tokens.to_string(), Span::for_text("")))
     }
 }
 
@@ -97,7 +100,7 @@ impl ExternalCstNode for SymbolCst {
 
 impl Spanned for SymbolCst {
     fn span(&self) -> Span {
-        Span::detached()
+        Span::for_text("from_cst")
     }
 }
 

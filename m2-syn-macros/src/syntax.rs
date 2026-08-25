@@ -399,7 +399,7 @@ impl Syntax {
                 let emit = match leaf {
                     LeafKind::Empty => quote! {},
                     LeafKind::Eoc => quote! {
-                        let span = ::m2_syn::Spanned::span(self);
+                        let span = ::m2_syn::Spanned::expect_span(self);
                         let marker = if output.ends_with_semicolon() {
                             ::m2_syn::EocToken::after_semicolon(span)
                         } else {
@@ -408,23 +408,20 @@ impl Syntax {
                         output.extend([marker]);
                     },
                     LeafKind::Float => quote! {
-                        output.extend([::m2_syn::LiteralToken::new(
+                        output.extend([::m2_syn::LiteralToken::from_span(
                             ::m2_syn::LiteralKind::Float,
-                            self.text(),
-                            ::m2_syn::Spanned::span(self),
+                            ::m2_syn::Spanned::expect_span(self),
                         )]);
                     },
                     LeafKind::Integer => quote! {
-                        output.extend([::m2_syn::LiteralToken::new(
+                        output.extend([::m2_syn::LiteralToken::from_span(
                             ::m2_syn::LiteralKind::Integer,
-                            self.text(),
-                            ::m2_syn::Spanned::span(self),
+                            ::m2_syn::Spanned::expect_span(self),
                         )]);
                     },
                     LeafKind::Ident | LeafKind::QualifiedIdent => quote! {
-                        output.extend([::m2_syn::IdentToken::new(
-                            self.text(),
-                            ::m2_syn::Spanned::span(self),
+                        output.extend([::m2_syn::IdentToken::from_span(
+                            ::m2_syn::Spanned::expect_span(self),
                         )]);
                     },
                 };
@@ -433,7 +430,7 @@ impl Syntax {
                 } else if matches!(leaf, LeafKind::Eoc) {
                     quote!("EOC")
                 } else {
-                    quote!(self.text())
+                    quote!(self.span.text().expect("textual syntax spans must resolve"))
                 };
                 let qualifier_fields = matches!(leaf, LeafKind::QualifiedIdent).then(|| {
                     quote! {
@@ -446,11 +443,7 @@ impl Syntax {
                 let constructor = match leaf {
                     LeafKind::QualifiedIdent => quote! {
                         let text = text.as_ref();
-                        let span = if span.text() == Some(text) {
-                            span
-                        } else {
-                            span.replaced_text(text)
-                        };
+                        let span = span.with_text(text);
                         let (package_qualifier, index_qualifier) =
                             ::m2_syn::__qualified_identifier_spans(text, &span);
                         Self { package_qualifier, index_qualifier, span }
@@ -460,44 +453,35 @@ impl Syntax {
                         Self { span }
                     },
                     _ => quote! {
-                        let text = text.as_ref();
-                        let span = if span.text() == Some(text) {
-                            span
-                        } else {
-                            span.replaced_text(text)
-                        };
+                        let span = span.with_text(text.as_ref());
                         Self { span }
                     },
                 };
                 let text_api = match leaf {
                     LeafKind::Empty | LeafKind::Eoc => quote! {},
                     LeafKind::QualifiedIdent => quote! {
-                        /// Returns the leaf spelling by slicing its source span.
+                        /// Returns the leaf spelling.
                         pub fn text(&self) -> &str {
-                            self.span
-                                .text()
-                                .expect("textual syntax leaves must have source-backed spans")
+                            self.span.text().expect("textual syntax spans must resolve")
                         }
 
-                        /// Replaces the leaf spelling with a newly source-backed fragment.
+                        /// Replaces the spelling with a new immutable source snapshot.
                         pub fn set_text(&mut self, text: impl AsRef<str>) {
-                        let text = text.as_ref();
-                        self.span = self.span.replaced_text(text);
-                        (self.package_qualifier, self.index_qualifier) =
-                            ::m2_syn::__qualified_identifier_spans(text, &self.span);
+                            let text = text.as_ref();
+                            self.span = self.span.clone().with_text(text);
+                            (self.package_qualifier, self.index_qualifier) =
+                                ::m2_syn::__qualified_identifier_spans(text, &self.span);
                         }
                     },
                     _ => quote! {
-                        /// Returns the leaf spelling by slicing its source span.
+                        /// Returns the leaf spelling.
                         pub fn text(&self) -> &str {
-                            self.span
-                                .text()
-                                .expect("textual syntax leaves must have source-backed spans")
+                            self.span.text().expect("textual syntax spans must resolve")
                         }
 
-                        /// Replaces the leaf spelling with a newly source-backed fragment.
+                        /// Replaces the spelling with a new immutable source snapshot.
                         pub fn set_text(&mut self, text: impl AsRef<str>) {
-                            self.span = self.span.replaced_text(text.as_ref());
+                            self.span = self.span.clone().with_text(text.as_ref());
                         }
                     },
                 };
@@ -530,7 +514,7 @@ impl Syntax {
                         ::m2_syn::PrettyNode::token(
                             stringify!(#name),
                             #pretty_text,
-                            ::m2_syn::Spanned::span(self),
+                            ::m2_syn::Spanned::expect_span(self),
                         )
                     }
                 }
@@ -551,7 +535,7 @@ impl Syntax {
                                 node.identity(),
                             ));
                         }
-                        Ok(Self::new(node.text(), node.span()))
+                        Ok(Self::new(node.text(), node.expect_span()))
                     }
                 }
 
@@ -634,9 +618,17 @@ impl Syntax {
                     })
                     .collect::<Vec<_>>();
                 let constructor_fields = fields.iter().map(|field| &field.binding);
-                let constructor_delimiter = typed_delimiter.as_ref().map(
-                    |ty| quote!(let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(::m2_syn::DoubleSpan::new(span.clone(), span));),
-                );
+                let constructor_delimiter = typed_delimiter.as_ref().map(|ty| {
+                    quote! {
+                        let spans = span.map_or_else(
+                            || ::m2_syn::DoubleSpan::synthetic(
+                                <#ty as ::m2_syn::DelimiterToken>::KIND,
+                            ),
+                            |span| ::m2_syn::DoubleSpan::new(span.clone(), span),
+                        );
+                        let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(spans);
+                    }
+                });
                 let delimiter_member = typed_delimiter.as_ref().map(|_| quote!(delimiter,));
                 let retained_span_member = retains_span.then(|| quote!(span,));
                 let constructor_value = match style {
@@ -659,7 +651,7 @@ impl Syntax {
                 };
                 let span_fields = fields.iter().map(|field| {
                     let binding = &field.binding;
-                    quote! { ::m2_syn::Spanned::span(&#binding) }
+                    quote! { ::m2_syn::Spanned::try_span(&#binding) }
                 });
                 let constructor_span = typed_delimiter
                     .as_ref()
@@ -677,7 +669,7 @@ impl Syntax {
                     .collect::<Result<Vec<_>>>()?;
                 let reconstructed_fields = fields.iter().map(|field| &field.binding);
                 let reconstruct_span =
-                    retains_span.then(|| quote!(let span = ::m2_syn::Spanned::span(&node);));
+                    retains_span.then(|| quote!(let span = ::m2_syn::Spanned::expect_span(&node);));
                 let reconstruct_delimiter = typed_delimiter.as_ref().map(|ty| {
                     quote! {
                         let opening = children.required_anonymous(
@@ -688,8 +680,8 @@ impl Syntax {
                         )?;
                         let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(
                             ::m2_syn::DoubleSpan::new(
-                                ::m2_syn::Spanned::span(&opening),
-                                ::m2_syn::Spanned::span(&closing),
+                                ::m2_syn::Spanned::expect_span(&opening),
+                                ::m2_syn::Spanned::expect_span(&closing),
                             ),
                         );
                     }
@@ -720,20 +712,16 @@ impl Syntax {
                     .map(|_| quote!(node.push("delimiter", &self.delimiter);));
                 let emit_contents = match definition.wrapper {
                     Some(Wrapper::Literal(Literal::String)) => quote! {
-                        let text = ::std::format!("\"{}\"", contents);
-                        let span = ::m2_syn::Spanned::span(self).replaced_text(text.clone());
-                        output.extend([::m2_syn::LiteralToken::new(
+                        let span = ::m2_syn::Spanned::expect_span(self);
+                        output.extend([::m2_syn::LiteralToken::from_span(
                             ::m2_syn::LiteralKind::String,
-                            text,
                             span,
                         )]);
                     },
                     Some(Wrapper::Literal(Literal::RawString)) => quote! {
-                        let text = ::std::format!("///{}///", contents);
-                        let span = ::m2_syn::Spanned::span(self).replaced_text(text.clone());
-                        output.extend([::m2_syn::LiteralToken::new(
+                        let span = ::m2_syn::Spanned::expect_span(self);
+                        output.extend([::m2_syn::LiteralToken::from_span(
                             ::m2_syn::LiteralKind::RawString,
-                            text,
                             span,
                         )]);
                     },
@@ -771,7 +759,7 @@ impl Syntax {
                         fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
                             let mut node = ::m2_syn::PrettyNode::syntax(
                                 stringify!(#name),
-                                ::m2_syn::Spanned::span(self),
+                                ::m2_syn::Spanned::try_span(self),
                             );
                             #(#pretty_fields)*
                             #pretty_delimiter
@@ -1159,7 +1147,7 @@ impl FieldDefinition {
                     }
                 }
             } else {
-                let push_separator = push_detached_separator(&quote!(field_output), separator);
+                let push_separator = push_source_separator(&quote!(field_output), separator);
                 quote! {
                     for (index, value) in self.#member.iter().enumerate() {
                         if index != 0 {
@@ -1182,7 +1170,7 @@ impl FieldDefinition {
             }
         });
         let separate = separator.map(|separator| {
-            let push_separator = push_detached_separator(&quote!(contents), separator);
+            let push_separator = push_source_separator(&quote!(contents), separator);
             if separator == " " {
                 quote! {
                     if !contents.is_empty()
@@ -1214,32 +1202,32 @@ impl FieldDefinition {
     }
 }
 
-fn push_detached_separator(output: &TokenStream, separator: &str) -> TokenStream {
+fn push_source_separator(output: &TokenStream, separator: &str) -> TokenStream {
     match separator {
         "" => quote! {},
         " " => quote! {
             #output.extend([::m2_syn::Trivia::new(
                 ::m2_syn::TriviaKind::Whitespace,
                 " ",
-                ::m2_syn::Span::detached(),
+                ::m2_syn::Span::for_text(" "),
             )]);
         },
         "\n" => quote! {
             #output.extend([::m2_syn::Trivia::new(
                 ::m2_syn::TriviaKind::Whitespace,
                 "\n",
-                ::m2_syn::Span::detached(),
+                ::m2_syn::Span::for_text("\n"),
             )]);
         },
         ", " => quote! {
             #output.extend([::m2_syn::Punct::new(
                 ",",
-                ::m2_syn::Span::detached(),
+                ::m2_syn::Span::for_text(","),
             )]);
             #output.extend([::m2_syn::Trivia::new(
                 ::m2_syn::TriviaKind::Whitespace,
                 " ",
-                ::m2_syn::Span::detached(),
+                ::m2_syn::Span::for_text(" "),
             )]);
         },
         separator => panic!("unsupported generated separator `{separator}`"),
@@ -1569,7 +1557,7 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
                 ::m2_syn::PrettyNode::variant(
                     stringify!(#name),
                     stringify!(#variant),
-                    ::m2_syn::Spanned::span(self),
+                    ::m2_syn::Spanned::try_span(self),
                     ::m2_syn::PrettyTree::pretty_tree(value),
                 )
             }

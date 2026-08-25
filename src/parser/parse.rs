@@ -225,10 +225,10 @@ impl ParseStream {
         let eof_span = tokens
             .last()
             .and_then(|token| {
-                let end = token.span().end()?;
-                Some(Span::from_offset(end))
+                let span = token.expect_span();
+                Some(span.at(span.end()?))
             })
-            .unwrap_or_else(Span::detached);
+            .unwrap_or_else(|| Span::for_text(""));
         Self {
             tokens: Rc::new(tokens),
             position: 0,
@@ -348,7 +348,7 @@ impl ParseStream {
             }
             return Err(TokenParseError::TrailingToken {
                 found: token.description(),
-                span: token.span(),
+                span: token.expect_span(),
             });
         }
         Ok(())
@@ -422,7 +422,7 @@ impl TokenParseError {
     }
 
     pub(crate) fn unexpected_token(expected: &'static str, token: &TokenTree) -> Self {
-        Self::unexpected(expected, token.description(), token.span())
+        Self::unexpected(expected, token.description(), token.expect_span())
     }
 }
 
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(identifier.text(), "name");
         assert_eq!(literal.kind, LiteralKind::Integer);
         assert_eq!(punctuation.text(), "+");
-        assert_eq!(group.to_string(), "(name)");
+        assert_eq!(crate::Lex::to_token_stream(&group).to_string(), "(name)");
     }
 
     #[test]
@@ -503,8 +503,8 @@ mod tests {
         let mut input = ParseStream::new(tokens);
         input.next_token();
 
-        let span = input.lookahead().span();
+        let span = input.lookahead().expect_span();
         assert_eq!(span.start().unwrap(), "name".len());
-        assert_eq!(span, input.eof_span());
+        assert_eq!(span, input.eof_span().span());
     }
 }

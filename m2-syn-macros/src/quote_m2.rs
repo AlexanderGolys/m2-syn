@@ -66,7 +66,9 @@ fn expand_stream(
                     #output.append_fragment(&#base::TokenGroup::new(
                         #base::Delimiter::new(
                             #base::DelimiterKind::AngleBar,
-                            #base::DoubleSpan::detached(),
+                            #base::DoubleSpan::synthetic(
+                                #base::DelimiterKind::AngleBar,
+                            ),
                         ),
                         #group_output,
                     ));
@@ -131,7 +133,7 @@ fn expand_group(group: &Group, output: &Ident, group_index: &mut usize) -> Resul
             };
             quote! {
                 #output.append_fragment(&#base::TokenGroup::new(
-                    #base::Delimiter::new(#kind, #base::DoubleSpan::detached()),
+                    #base::Delimiter::new(#kind, #base::DoubleSpan::synthetic(#kind)),
                     #group_output,
                 ));
             }

@@ -3,8 +3,8 @@
 //! This module owns byte classification, maximal munch, delimiter balancing,
 //! and top-level cell splitting. Its output uses only the shared raw atoms from
 //! `token_stream`; it never constructs a second lexer-specific token model.
-//! Every lexical atom slices one shared, validated source allocation through
-//! its span; token nodes never retain copied spellings.
+//! Spans retain source identity and byte ranges, while lexical atoms retain the
+//! spellings needed for parser-independent token processing.
 
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -14,7 +14,7 @@ use crate::{
     Delimiter, DelimiterKind, DoubleSpan, EocToken, GENERATED_OPERATOR_SPELLINGS,
     GENERATED_POSTFIX_OPERATOR_SPELLINGS, GENERATED_PUNCTUATION_SPELLINGS,
     GENERATED_WORD_TOKEN_SPELLINGS, IdentToken, LiteralKind, LiteralToken, Offset, Punct,
-    Recovered, Span, Spanned, TokenGroup, TokenStream, TokenTree, Trivia, TriviaKind,
+    Recovered, Source, Span, Spanned, TokenGroup, TokenStream, TokenTree, Trivia, TriviaKind,
 };
 
 const MAX_GROUP_DEPTH: usize = 256;
@@ -252,7 +252,7 @@ where
     let source = String::from_utf8(bytes).map_err(|_| LexError {
         kind: LexErrorKind::InvalidUtf8,
         delimiter: None,
-        span: Span::new(0, len),
+        span: Span::ranged(Source::new(""), 0..len),
     })?;
     Ok(NativeLexer::new(Arc::<str>::from(source)))
 }
@@ -265,7 +265,7 @@ struct NativeLexer {
 
 impl NativeLexer {
     fn new(source: Arc<str>) -> Self {
-        let source_span = Span::source(source.clone());
+        let source_span = Span::ranged(Source::new(Arc::clone(&source)), 0..source.len());
         Self {
             source,
             source_span,
@@ -908,7 +908,10 @@ fn current_cell_has_syntax(stream: &TokenStream) -> bool {
 
 fn terminate_cell(stream: &mut TokenStream, offset: Offset, after_semicolon: bool) {
     if current_cell_has_syntax(stream) {
-        let span = Span::from_offset(offset);
+        let span = stream
+            .last()
+            .map(|token| token.expect_span().at(offset))
+            .expect("a cell with syntax contains a token");
         let marker = if after_semicolon {
             EocToken::after_semicolon(span)
         } else {
@@ -939,13 +942,13 @@ pub(crate) fn split_cells(tokens: TokenStream) -> Vec<RawCell> {
             current
                 .pop()
                 .expect("the semicolon was just observed")
-                .span()
+                .expect_span()
         });
         if current_cell_has_syntax(&current) || semicolon.is_some() {
             cells.push(RawCell {
                 stream: std::mem::take(&mut current),
                 semicolon,
-                eoc: marker.span(),
+                eoc: marker.expect_span(),
             });
         }
     }
@@ -953,8 +956,14 @@ pub(crate) fn split_cells(tokens: TokenStream) -> Vec<RawCell> {
     if current_cell_has_syntax(&current) {
         let eoc = current
             .last()
-            .and_then(|token| token.span().end())
-            .map_or_else(Span::detached, Span::from_offset);
+            .map(|token| {
+                let span = token.expect_span();
+                span.end().map_or_else(
+                    || Span::unlocated(std::sync::Arc::clone(span.source())),
+                    |end| span.at(end),
+                )
+            })
+            .expect("a cell with syntax contains a token");
         cells.push(RawCell {
             stream: current,
             semicolon: None,
@@ -1136,18 +1145,23 @@ mod tests {
 
     fn tokens(source: &str) -> TokenStream {
         let mut stream = lex_str(source).unwrap();
-        assert_eq!(format!("{stream}"), source);
+        assert_eq!(stream.to_source(), source);
         if matches!(stream.last(), Some(TokenTree::Eoc(_))) {
             stream.pop();
         }
         stream
     }
 
+    fn span_at(start: usize, text: &str) -> Span {
+        let source = Source::new(format!("{}{}", " ".repeat(start), text));
+        Span::ranged(source, start..start + text.len())
+    }
+
     #[test]
     fn lexer_accepts_an_arbitrary_non_peekable_byte_iterator() {
         let bytes = vec![b'a', b'+', b'1'].into_iter();
         let stream = lex(bytes).unwrap();
-        assert_eq!(format!("{stream}"), "a+1");
+        assert_eq!(stream.to_source(), "a+1");
     }
 
     #[test]
@@ -1176,7 +1190,8 @@ mod tests {
 
     #[test]
     fn punctuation_is_returned_as_maximal_tokens() {
-        let stream = tokens("<<|-1||>2");
+        let source = "<<|-1||>2";
+        let stream = tokens(source);
         let punctuation = stream
             .iter()
             .filter_map(|tree| match tree {
@@ -1206,7 +1221,8 @@ mod tests {
                 .all(|tree| !matches!(tree, TokenTree::Trivia(_)))
         );
 
-        let comments = tokens("-- comment\n-* block *-");
+        let source = "-- comment\n-* block *-";
+        let comments = tokens(source);
         let trees = comments.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1223,7 +1239,8 @@ mod tests {
 
     #[test]
     fn leading_operator_runs_split_at_maximal_known_spellings() {
-        let stream = tokens("***1");
+        let source = "***1";
+        let stream = tokens(source);
         let trees = stream.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1240,7 +1257,8 @@ mod tests {
 
     #[test]
     fn identifiers_follow_the_m2_character_classes() {
-        let qualified = tokens("Core$foo'12 1not not1");
+        let source = "Core$foo'12 1not not1";
+        let qualified = tokens(source);
         let trees = qualified.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1259,7 +1277,8 @@ mod tests {
                 && not_one.text() == "not1"
         ));
 
-        let underscored = tokens("_name");
+        let source = "_name";
+        let underscored = tokens(source);
         let trees = underscored.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1267,13 +1286,15 @@ mod tests {
                 if underscore.spelling() == Some("_") && name.text() == "name"
         ));
 
-        let unicode = tokens("éλ🐻");
+        let source = "éλ🐻";
+        let unicode = tokens(source);
         assert!(matches!(
             unicode.iter().next(),
             Some(TokenTree::Ident(identifier)) if identifier.text() == "éλ🐻"
         ));
 
-        let operated = tokens("α⊠β");
+        let source = "α⊠β";
+        let operated = tokens(source);
         let trees = operated.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1296,7 +1317,7 @@ mod tests {
             [TokenTree::Ident(_)]
         ));
 
-        let symbol = crate::Symbol::new(spelling, Span::new(100, 100 + spelling.len()));
+        let symbol = crate::Symbol::new(spelling, span_at(100, spelling));
         assert_eq!(
             symbol.package_qualifier.as_ref().and_then(Span::bounds),
             Some((100, 107))
@@ -1313,14 +1334,14 @@ mod tests {
             [TokenTree::Ident(identifier)] if identifier.text() == spelling
         ));
 
-        let package = crate::Symbol::new("Package$name", Span::new(20, 32));
+        let package = crate::Symbol::new("Package$name", span_at(20, "Package$name"));
         assert_eq!(
             package.package_qualifier.as_ref().and_then(Span::bounds),
             Some((20, 27))
         );
         assert_eq!(package.index_qualifier, None);
 
-        let indexed = crate::Symbol::new("name$12", Span::new(30, 37));
+        let indexed = crate::Symbol::new("name$12", span_at(30, "name$12"));
         assert_eq!(indexed.package_qualifier, None);
         assert_eq!(
             indexed.index_qualifier.as_ref().and_then(Span::bounds),
@@ -1328,7 +1349,7 @@ mod tests {
         );
 
         for unqualified in ["name", "A$B$C", "A$$B", "A$", "A$1B", "Core$Core$not"] {
-            let symbol = crate::Symbol::new(unqualified, Span::detached());
+            let symbol = crate::Symbol::new(unqualified, Span::for_text(unqualified));
             assert_eq!(symbol.package_qualifier, None, "`{unqualified}`");
             assert_eq!(symbol.index_qualifier, None, "`{unqualified}`");
         }
@@ -1336,7 +1357,8 @@ mod tests {
 
     #[test]
     fn radix_literals_stop_before_the_first_invalid_digit() {
-        let binary = tokens("0b010201");
+        let source = "0b010201";
+        let binary = tokens(source);
         let trees = binary.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1347,7 +1369,8 @@ mod tests {
                 if binary.text() == "0b010" && decimal.text() == "201"
         ));
 
-        let octal = tokens("0o70789");
+        let source = "0o70789";
+        let octal = tokens(source);
         let trees = octal.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1358,7 +1381,8 @@ mod tests {
                 if octal.text() == "0o707" && decimal.text() == "89"
         ));
 
-        let binary_then_identifier = tokens("0b1E2");
+        let source = "0b1E2";
+        let binary_then_identifier = tokens(source);
         let trees = binary_then_identifier.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1372,7 +1396,8 @@ mod tests {
 
     #[test]
     fn trivia_preserves_physical_separation_between_punctuation_tokens() {
-        let stream = tokens("++x +\n+");
+        let source = "++x +\n+";
+        let stream = tokens(source);
         let trees = stream.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1420,7 +1445,7 @@ mod tests {
         assert!(trees.next().is_none());
         assert_eq!(parenthesized.delim_kind(), DelimiterKind::Parenthesis);
 
-        let span = parenthesized.span();
+        let span = parenthesized.expect_span();
         assert_eq!(span.start().unwrap(), 0);
         assert_eq!(span.end().unwrap(), 15);
         assert_eq!(parenthesized.delimiter().opening_span().end().unwrap(), 1);
@@ -1460,7 +1485,8 @@ mod tests {
 
     #[test]
     fn graded_operator_wins_before_parenthesis_grouping() {
-        let graded = tokens("(*)");
+        let source = "(*)";
+        let graded = tokens(source);
         let trees = graded.iter().collect::<Vec<_>>();
         assert!(matches!(
             trees.as_slice(),
@@ -1493,11 +1519,14 @@ mod tests {
 
     #[test]
     fn a_crlf_line_break_counts_as_the_two_bytes_it_is() {
-        let stream = tokens("x\r\ny");
+        let source = "x\r\ny";
+        let stream = tokens(source);
         let range = stream
             .iter()
             .find_map(|tree| match tree {
-                TokenTree::Ident(identifier) if identifier.text() == "y" => Some(identifier.span()),
+                TokenTree::Ident(identifier) if identifier.text() == "y" => {
+                    Some(identifier.expect_span())
+                }
                 _ => None,
             })
             .unwrap();
@@ -1505,7 +1534,7 @@ mod tests {
         assert_eq!(range.bounds(), Some((3, 4)));
 
         let error = lex_str("-* x\r\n").unwrap_err();
-        assert_eq!(error.span().end(), Some("-* x\r\n".len()));
+        assert_eq!(error.expect_span().end(), Some("-* x\r\n".len()));
     }
 
     #[test]

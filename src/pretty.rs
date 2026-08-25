@@ -15,13 +15,16 @@ use crate::{
 const RESET: &str = "\u{1b}[0m";
 const BOLD_CYAN: &str = "\u{1b}[1;36m";
 const BRIGHT_YELLOW: &str = "\u{1b}[93m";
-const NON_TERMINAL_BLUE: &str = "\u{1b}[38;5;75m";
+const BRIGHT_BLACK: &str = "\u{1b}[90m";
+const RED: &str = "\u{1b}[31m";
+const GREEN: &str = "\u{1b}[32m";
+const YELLOW: &str = "\u{1b}[33m";
+const BLUE: &str = "\u{1b}[34m";
+const MAGENTA: &str = "\u{1b}[35m";
+const CYAN: &str = "\u{1b}[36m";
+const WHITE: &str = "\u{1b}[37m";
+const NON_TERMINAL_BLUE: &str = BLUE;
 const DIM: &str = "\u{1b}[2m";
-const IDENT_COLOR: &str = "\u{1b}[38;5;45m";
-const LITERAL_COLOR: &str = "\u{1b}[38;5;207m";
-const PUNCT_COLOR: &str = "\u{1b}[38;5;82m";
-const DELIM_COLOR: &str = "\u{1b}[38;5;75m";
-const TRIVIA_COLOR: &str = "\u{1b}[38;5;245m";
 
 /// Converts typed syntax into the structural presentation used by the pretty
 /// printer.
@@ -43,10 +46,22 @@ pub trait PrettyTree {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrettyNode {
     name: String,
-    detail: Option<String>,
-    span: Span,
+    detail: Option<PrettyDetail>,
+    span: Option<Span>,
     role: NodeRole,
     children: Vec<PrettyEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrettyDetail {
+    text: String,
+    role: DetailRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailRole {
+    Text,
+    Glyph,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,24 +81,30 @@ struct PrettyEdge {
 impl PrettyNode {
     /// Creates a generated concrete syntax node.
     #[doc(hidden)]
-    pub fn syntax(name: impl Into<String>, span: Span) -> Self {
+    pub fn syntax(name: impl Into<String>, span: Option<Span>) -> Self {
         Self::new(name, span, NodeRole::Syntax)
     }
 
     /// Creates a generated enum-variant node.
     #[doc(hidden)]
-    pub fn variant(_category: &str, _variant: &str, span: Span, mut value: PrettyNode) -> Self {
-        if span != Span::Detached {
-            value.span = span;
-        }
+    pub fn variant(
+        _category: &str,
+        _variant: &str,
+        span: Option<Span>,
+        mut value: PrettyNode,
+    ) -> Self {
+        value.span = span;
         value
     }
 
-    /// Creates a delimiter node with explicit opening and closing boundaries.
+    /// Creates a delimiter collection with explicit opening and closing boundaries.
     #[doc(hidden)]
     pub fn delimiter(kind: DelimiterKind, spans: DoubleSpan) -> Self {
         let delimiter = Delimiter::new(kind, spans);
-        let mut node = Self::new("Delimiter", delimiter.span(), NodeRole::Token);
+        let mut node = Self::collection(
+            format!("{}…{} · 2 tokens", kind.opening(), kind.closing()),
+            delimiter.try_span(),
+        );
         node.push_node(
             "opening",
             Self::token("Token", kind.opening(), delimiter.opening_span()),
@@ -105,24 +126,29 @@ impl PrettyNode {
         {
             return Self::delimiter(kind, DoubleSpan::new(span.clone(), span));
         }
-        let mut node = Self::new(name, span, NodeRole::Token);
-        node.detail = Some(text);
+        let role = if matches!(text.as_str(), "∅" | "EOC") {
+            DetailRole::Glyph
+        } else {
+            DetailRole::Text
+        };
+        let mut node = Self::new(name, Some(span), NodeRole::Token);
+        node.detail = Some(PrettyDetail { text, role });
         node
     }
 
     /// Creates a collection wrapper.
     #[doc(hidden)]
-    pub fn collection(name: impl Into<String>, span: Span) -> Self {
+    pub fn collection(name: impl Into<String>, span: Option<Span>) -> Self {
         Self::new(name, span, NodeRole::Collection)
     }
 
     /// Creates an absent optional value.
     #[doc(hidden)]
     pub fn absent() -> Self {
-        Self::new("None", Span::detached(), NodeRole::Absent)
+        Self::new("None", None, NodeRole::Absent)
     }
 
-    fn new(name: impl Into<String>, span: Span, role: NodeRole) -> Self {
+    fn new(name: impl Into<String>, span: Option<Span>, role: NodeRole) -> Self {
         Self {
             name: name.into(),
             detail: None,
@@ -142,8 +168,8 @@ impl PrettyNode {
     #[doc(hidden)]
     pub fn push_node(&mut self, label: impl Into<String>, node: PrettyNode) {
         let mut node = node;
-        if node.span == Span::Detached {
-            node.span = self.span.clone();
+        if node.span.is_none() {
+            node.span.clone_from(&self.span);
         }
         self.children.push(PrettyEdge {
             label: label.into(),
@@ -185,7 +211,8 @@ impl<T: PrettyTree + Spanned> PrettyTree for Option<T> {
 
 impl<T: PrettyTree + Spanned> PrettyTree for Vec<T> {
     fn pretty_tree(&self) -> PrettyNode {
-        let mut node = PrettyNode::collection(item_count("List", self.len()), self.span());
+        let span = Span::join_all(self.iter().map(Spanned::span));
+        let mut node = PrettyNode::collection(item_count("List", self.len()), span);
         for (index, value) in self.iter().enumerate() {
             node.push(format!("[{index}]"), value);
         }
@@ -199,7 +226,8 @@ where
     P: PrettyTree + Spanned,
 {
     fn pretty_tree(&self) -> PrettyNode {
-        let mut node = PrettyNode::collection(item_count("Punctuated", self.len()), self.span());
+        let mut node =
+            PrettyNode::collection(item_count("Punctuated", self.len()), self.try_span());
         node.push("[0]", self.first());
         for (index, (punctuation, value)) in self.rest().iter().enumerate() {
             node.push("punctuation", punctuation);
@@ -303,12 +331,19 @@ impl<'source> PrettyReport<'source> {
 
 impl Display for PrettyReport<'_> {
     fn fmt(&self, output: &mut Formatter<'_>) -> FmtResult {
-        section_title(output, "SOURCE", self.options)?;
-        write_source(output, self.source, self.options)?;
-        section_title(output, "TOKEN STREAM", self.options)?;
-        write_tokens(output, &self.tokens, self.options)?;
-        section_title(output, "TYPED CST", self.options)?;
-        write_tree(output, &self.cst, self.options)
+        let mut source = String::new();
+        write_source(&mut source, self.source)?;
+        write_box(output, "SOURCE", &source, self.options)?;
+        writeln!(output)?;
+
+        let mut tokens = String::new();
+        write_tokens(&mut tokens, &self.tokens, self.options)?;
+        write_box(output, "TOKEN STREAM", &tokens, self.options)?;
+        writeln!(output)?;
+
+        let mut cst = String::new();
+        write_tree(&mut cst, &self.cst, self.options)?;
+        write_box(output, "TYPED CST", &cst, self.options)
     }
 }
 
@@ -333,37 +368,110 @@ pub fn format_pretty_tree(value: &impl PrettyTree) -> String {
     format_tree(&value.pretty_tree(), PrettyOptions::PLAIN)
 }
 
-fn section_title(output: &mut impl FmtWrite, title: &str, options: PrettyOptions) -> FmtResult {
+fn write_box(
+    output: &mut impl FmtWrite,
+    title: &str,
+    contents: &str,
+    options: PrettyOptions,
+) -> FmtResult {
+    let inner_width = options.width.saturating_sub(4);
     writeln!(
         output,
-        "{}╭─ {} {}",
-        paint(DIM, "", options),
+        "{}{}{}{}",
+        paint(DIM, "╭─ ", options),
         paint(BOLD_CYAN, title, options),
         paint(
             DIM,
-            &"─".repeat(options.width.saturating_sub(title.len() + 5)),
-            options
+            &format!(
+                " {}",
+                "─".repeat(options.width.saturating_sub(title.chars().count() + 5))
+            ),
+            options,
         ),
+        paint(DIM, "╮", options),
+    )?;
+    for line in contents.lines() {
+        let line = clip_ansi(line, inner_width);
+        let line_width = ansi_width(&line);
+        writeln!(
+            output,
+            "{} {}{} {}",
+            paint(DIM, "│", options),
+            line,
+            " ".repeat(inner_width.saturating_sub(line_width)),
+            paint(DIM, "│", options),
+        )?;
+    }
+    writeln!(
+        output,
+        "{}{}{}",
+        paint(DIM, "╰", options),
+        paint(DIM, &"─".repeat(options.width.saturating_sub(2)), options),
+        paint(DIM, "╯", options),
     )
 }
 
-fn write_source(output: &mut impl FmtWrite, source: &str, options: PrettyOptions) -> FmtResult {
-    let width = source.lines().count().max(1).to_string().len();
-    if source.is_empty() {
-        writeln!(output, "{}", paint(DIM, "│  ∅", options))?;
-    } else {
-        for (index, line) in source.lines().enumerate() {
-            writeln!(
-                output,
-                "{} {:>width$} {} {}",
-                paint(DIM, "│", options),
-                index + 1,
-                paint(DIM, "│", options),
-                line,
-            )?;
+fn ansi_width(text: &str) -> usize {
+    let mut characters = text.chars().peekable();
+    let mut width = 0;
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' && characters.peek() == Some(&'[') {
+            for escaped in characters.by_ref() {
+                if escaped == 'm' {
+                    break;
+                }
+            }
+        } else {
+            width += 1;
         }
     }
-    writeln!(output, "{}", paint(DIM, "╰─", options))
+    width
+}
+
+fn clip_ansi(text: &str, width: usize) -> String {
+    if ansi_width(text) <= width {
+        return text.to_owned();
+    }
+
+    let limit = width.saturating_sub(1);
+    let mut output = String::new();
+    let mut characters = text.chars().peekable();
+    let mut visible = 0;
+    let mut styled = false;
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' && characters.peek() == Some(&'[') {
+            styled = true;
+            output.push(character);
+            for escaped in characters.by_ref() {
+                output.push(escaped);
+                if escaped == 'm' {
+                    break;
+                }
+            }
+        } else if visible < limit {
+            output.push(character);
+            visible += 1;
+        } else {
+            break;
+        }
+    }
+    output.push('…');
+    if styled {
+        output.push_str(RESET);
+    }
+    output
+}
+
+fn write_source(output: &mut impl FmtWrite, source: &str) -> FmtResult {
+    let width = source.lines().count().max(1).to_string().len();
+    if source.is_empty() {
+        writeln!(output, "∅")?;
+    } else {
+        for (index, line) in source.lines().enumerate() {
+            writeln!(output, "{:>width$} │ {}", index + 1, line)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -417,12 +525,11 @@ fn write_flat(
     if flat.is_empty() {
         return writeln!(output, "{}", paint(DIM, "∅", options));
     }
-    let chunks = structural_chunks(&flat);
-    let available = options.width.saturating_sub(8).max(24);
+    let available = options.width.saturating_sub(12).max(24);
     let mut band = Vec::new();
     let mut used = 0;
     let mut wrote_band = false;
-    for chunk in chunks {
+    for chunk in flat.iter().map(std::slice::from_ref) {
         let chunk_width = token_band_width(chunk);
         if !band.is_empty() && used + 1 + chunk_width > available {
             if wrote_band {
@@ -438,6 +545,15 @@ fn write_flat(
         }
         used += chunk_width;
         band.extend_from_slice(chunk);
+        if matches!(chunk.last().map(|token| token.kind), Some(FlatKind::Eoc)) {
+            if wrote_band {
+                writeln!(output)?;
+            }
+            write_token_band(output, &band, options)?;
+            wrote_band = true;
+            band.clear();
+            used = 0;
+        }
     }
     if !band.is_empty() {
         if wrote_band {
@@ -446,21 +562,6 @@ fn write_flat(
         write_token_band(output, &band, options)?;
     }
     Ok(())
-}
-
-fn structural_chunks(tokens: &[FlatToken]) -> Vec<&[FlatToken]> {
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    for (index, token) in tokens.iter().enumerate() {
-        if matches!(token.kind, FlatKind::Open | FlatKind::Close) {
-            chunks.push(&tokens[start..=index]);
-            start = index + 1;
-        }
-    }
-    if start < tokens.len() {
-        chunks.push(&tokens[start..]);
-    }
-    chunks
 }
 
 fn token_band_width(tokens: &[FlatToken]) -> usize {
@@ -494,7 +595,7 @@ fn write_token_band(
         let width = token_column_width(token) - 2;
         let text = clipped(&visible_text(&token.text), width);
         let cell = centered_cell(&text, width);
-        write!(output, "{}", paint(BRIGHT_YELLOW, &cell, options))?;
+        write!(output, "{}", paint(token_color(token.kind), &cell, options))?;
     }
     writeln!(output)?;
 
@@ -543,7 +644,7 @@ fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
                     depth,
                     kind: FlatKind::Eoc,
                     text: "EOC".into(),
-                    span: token.span(),
+                    span: token.expect_span(),
                 },
             ),
             TokenTree::Group(group) => {
@@ -574,7 +675,7 @@ fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
                     depth,
                     kind: FlatKind::Ident,
                     text: token.text().into(),
-                    span: token.span(),
+                    span: token.expect_span(),
                 },
             ),
             TokenTree::Literal(token) => push_flat(
@@ -583,7 +684,7 @@ fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
                     depth,
                     kind: FlatKind::Literal,
                     text: token.text().into(),
-                    span: token.span(),
+                    span: token.expect_span(),
                 },
             ),
             TokenTree::Punct(token) => push_flat(
@@ -592,7 +693,7 @@ fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
                     depth,
                     kind: FlatKind::Punct,
                     text: token.text().into(),
-                    span: token.span(),
+                    span: token.expect_span(),
                 },
             ),
             TokenTree::Trivia(token) => push_flat(
@@ -601,7 +702,7 @@ fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
                     depth,
                     kind: FlatKind::Trivia,
                     text: token.text().into(),
-                    span: token.span(),
+                    span: token.expect_span(),
                 },
             ),
         }
@@ -615,7 +716,11 @@ fn push_flat(output: &mut Vec<FlatToken>, token: FlatToken) {
         && previous.depth == token.depth
     {
         previous.text.push_str(&token.text);
-        previous.span = previous.span.join(token.span);
+        if let Some(span) = previous.span.join(token.span.clone()) {
+            previous.span = span;
+        } else {
+            output.push(token);
+        }
     } else {
         output.push(token);
     }
@@ -635,12 +740,13 @@ fn flat_kind(kind: FlatKind) -> &'static str {
 
 fn token_color(kind: FlatKind) -> &'static str {
     match kind {
-        FlatKind::Eoc => PUNCT_COLOR,
-        FlatKind::Open | FlatKind::Close => DELIM_COLOR,
-        FlatKind::Ident => IDENT_COLOR,
-        FlatKind::Literal => LITERAL_COLOR,
-        FlatKind::Punct => PUNCT_COLOR,
-        FlatKind::Trivia => TRIVIA_COLOR,
+        FlatKind::Eoc => BRIGHT_BLACK,
+        FlatKind::Open => BLUE,
+        FlatKind::Close => MAGENTA,
+        FlatKind::Ident => CYAN,
+        FlatKind::Literal => YELLOW,
+        FlatKind::Punct => GREEN,
+        FlatKind::Trivia => RED,
     }
 }
 
@@ -683,19 +789,23 @@ fn write_node(
         paint(DIM, prefix, options),
         paint(DIM, connector, options)
     )?;
+    if let Some(detail) = &node.detail {
+        write!(
+            output,
+            "{}  ",
+            paint(
+                detail_color(detail.role),
+                &visible_text(&detail.text),
+                options
+            )
+        )?;
+    }
     if let Some(label) = label.filter(|label| !label.is_empty()) {
         write!(
             output,
             "{} {} ",
             paint(BRIGHT_YELLOW, label, options),
             paint(DIM, "→", options)
-        )?;
-    }
-    if let Some(detail) = &node.detail {
-        write!(
-            output,
-            "{}  ",
-            paint(BRIGHT_YELLOW, &visible_text(detail), options)
         )?;
     }
     write!(
@@ -707,7 +817,11 @@ fn write_node(
         write!(
             output,
             "  {}",
-            paint(DIM, &format_span(&node.span), options)
+            paint(
+                DIM,
+                &node.span.as_ref().map_or_else(|| "@?".into(), format_span),
+                options,
+            )
         )?;
     }
     writeln!(output)?;
@@ -740,9 +854,16 @@ fn node_color(role: NodeRole) -> &'static str {
     }
 }
 
+fn detail_color(role: DetailRole) -> &'static str {
+    match role {
+        DetailRole::Text => WHITE,
+        DetailRole::Glyph => BRIGHT_BLACK,
+    }
+}
+
 fn format_span(span: &Span) -> String {
     let Some((start, end)) = span.bounds() else {
-        return "@detached".into();
+        return "@unlocated".into();
     };
     // Byte offsets rather than `line:column`, because turning an offset into a
     // line and column is a question about the buffer's contents and the pretty
@@ -765,15 +886,12 @@ fn paint(style: &'static str, text: &str, options: PrettyOptions) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Trivia, TriviaKind, lex_str};
+    use crate::lex_str;
 
     #[test]
     fn adjacent_trivia_is_hidden_or_rendered_as_one_token() {
-        let mut tokens = TokenStream::new();
-        tokens.extend([
-            Trivia::new(TriviaKind::Whitespace, " ", Span::detached()),
-            Trivia::new(TriviaKind::LineBreak, "\n", Span::detached()),
-        ]);
+        let source = " \n";
+        let tokens = lex_str(source).unwrap();
 
         let hidden = format_tokens(&tokens, PrettyOptions::PLAIN);
         assert!(!hidden.contains("TRIVIA"));
@@ -790,16 +908,35 @@ mod tests {
 
     #[test]
     fn token_bands_use_distinct_class_colors() {
-        let tokens = lex_str("name = 1\nnext").unwrap();
+        let source = "name = 1\n(next) -- note";
+        let tokens = lex_str(source).unwrap();
         let plain = format_tokens(&tokens, PrettyOptions::PLAIN);
 
         assert!(plain.contains("token │"));
 
-        let colored = format_tokens(&tokens, PrettyOptions::ANSI);
-        assert!(colored.contains(&format!("{BRIGHT_YELLOW} name ")));
-        for color in [IDENT_COLOR, PUNCT_COLOR, LITERAL_COLOR] {
+        let colored = format_tokens(
+            &tokens,
+            PrettyOptions {
+                trivia: true,
+                ..PrettyOptions::ANSI
+            },
+        );
+        for color in [BRIGHT_BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN] {
             assert!(colored.contains(color));
         }
+    }
+
+    #[test]
+    fn eoc_starts_a_new_token_band() {
+        let source = "first\nsecond";
+        let tokens = lex_str(source).unwrap();
+        let rendered = format_tokens(&tokens, PrettyOptions::PLAIN);
+
+        assert_eq!(rendered.matches("token │").count(), 2);
+        let bands = rendered.split("\n\n").collect::<Vec<_>>();
+        assert_eq!(bands.len(), 2);
+        assert!(bands[0].contains("EOC"));
+        assert!(bands[1].contains("second"));
     }
 
     #[test]
@@ -810,9 +947,64 @@ mod tests {
 
     #[test]
     fn enum_presentation_is_transparent() {
-        let value = PrettyNode::token("Symbol", "x", Span::detached());
-        let rendered = PrettyNode::variant("Expr", "Symbol", Span::detached(), value);
+        let span = Span::for_text("x");
+        let value = PrettyNode::token("Symbol", "x", span.clone());
+        let rendered = PrettyNode::variant("Expr", "Symbol", Some(span), value);
 
         assert_eq!(rendered.name, "Symbol");
+    }
+
+    #[test]
+    fn tree_values_lead_their_field_and_distinguish_text_from_glyphs() {
+        let source = Span::for_text(";");
+        let mut root = PrettyNode::syntax("Root", Some(source.clone()));
+        root.push_node(
+            "semicolon",
+            PrettyNode::token("Token![;]", ";", source.clone()),
+        );
+        root.push_node("operator", PrettyNode::token("Adj", "∅", source.at(1)));
+
+        let plain = format_tree(&root, PrettyOptions::PLAIN);
+        assert!(plain.contains(";  semicolon → Token![;]"));
+        assert!(plain.contains("∅  operator → Adj"));
+
+        let colored = format_tree(&root, PrettyOptions::ANSI);
+        assert!(colored.contains(&format!("{WHITE};{RESET}")));
+        assert!(colored.contains(&format!("{BRIGHT_BLACK}∅{RESET}")));
+    }
+
+    #[test]
+    fn delimiter_is_presented_as_a_collection() {
+        let source = Span::for_text("()");
+        let delimiter = PrettyNode::delimiter(
+            DelimiterKind::Parenthesis,
+            DoubleSpan::new(source.subspan(0, 1), source.subspan(1, 2)),
+        );
+
+        assert_eq!(delimiter.role, NodeRole::Collection);
+        assert_eq!(delimiter.name, "(…) · 2 tokens");
+        assert!(!format_tree(&delimiter, PrettyOptions::PLAIN).contains("Delimiter"));
+    }
+
+    #[test]
+    fn report_boxes_have_four_fixed_width_walls() {
+        let mut rendered = String::new();
+        let long_line = "x".repeat(PrettyOptions::PLAIN.width * 2);
+        write_box(
+            &mut rendered,
+            "TEST",
+            &format!("one\ntwo\n{long_line}"),
+            PrettyOptions::PLAIN,
+        )
+        .unwrap();
+
+        for line in rendered.lines() {
+            assert_eq!(line.chars().count(), PrettyOptions::PLAIN.width);
+        }
+        assert!(rendered.contains('…'));
+        assert!(rendered.starts_with("╭─ TEST "));
+        assert!(rendered.lines().next().unwrap().ends_with('╮'));
+        assert!(rendered.lines().nth(1).unwrap().ends_with('│'));
+        assert!(rendered.lines().last().unwrap().ends_with('╯'));
     }
 }

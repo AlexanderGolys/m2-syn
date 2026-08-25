@@ -79,7 +79,10 @@ fn expand_spanned_members(
 ) -> TokenStream2 {
     let members = members.into_iter().collect::<Vec<_>>();
     let base = base_crate();
-    let span = quote! {#base::Spanned::span};
+    let span = quote! {#base::Spanned::try_span};
+    if members.is_empty() {
+        return quote!(None);
+    }
     if let Some((_, value)) = members
         .iter()
         .find(|(member, _)| matches!(member, Member::Named(ident) if ident == "span"))
@@ -89,7 +92,7 @@ fn expand_spanned_members(
         let values = members.iter().map(|(_, value)| value);
         quote! {
             #base::Span::join_all(
-                [#(#base::Spanned::span(#values)),*]
+                [#(#base::Spanned::try_span(#values)),*]
             )
         }
     }
@@ -157,10 +160,7 @@ fn expand_spanned(input: &DeriveInput) -> Result<TokenStream2> {
                     }
                 })
                 .collect::<Vec<_>>();
-            let empty_fallback = data
-                .variants
-                .is_empty()
-                .then(|| quote!(_ => #span_ty::detached()));
+            let empty_fallback = data.variants.is_empty().then(|| quote!(_ => None));
             quote! {
                 match self {
                     #(#arms,)*
@@ -180,7 +180,7 @@ fn expand_spanned(input: &DeriveInput) -> Result<TokenStream2> {
         impl #impl_generics
             #base::Spanned for #name #type_generics #where_clause
         {
-            fn span(&self) -> #span_ty {
+            fn try_span(&self) -> Option<#span_ty> {
                 #body
             }
         }

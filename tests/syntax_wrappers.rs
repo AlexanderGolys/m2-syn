@@ -1,16 +1,20 @@
 use m2_syn::{
     Body, Delimited, Delimiter, FragmentParseError, Lex, LiteralKind, LiteralToken, Parse,
-    ParseStream, Punctuated, Span, Spanned, Terminated, TokenParseError, TokenStream, TokenTree,
-    lex_str, parse_fragment_str, parse_native, parse_quote_m2, parse2,
+    ParseStream, Punctuated, Source, Span, Spanned, Terminated, TokenParseError, TokenStream,
+    TokenTree, lex_str, parse_fragment_str, parse_native, parse_quote_m2, parse2,
 };
 
 fn assert_syntax<T: Parse + Lex>() {}
+
+fn synthetic_span() -> Span {
+    Span::unlocated(Source::synthetic(""))
+}
 
 fn integer(text: &str) -> Value {
     Value::Integer(LiteralToken::new(
         LiteralKind::Integer,
         text.to_owned(),
-        Span::detached(),
+        synthetic_span(),
     ))
 }
 
@@ -55,7 +59,7 @@ fn all_delimiter_macros_name_construct_parse_and_emit_their_syntax() {
     assert_syntax::<Braced>();
     assert_syntax::<AngleBars>();
 
-    let span = Span::detached();
+    let span = synthetic_span();
     round_trip::<Parenthesized>(m2_syn::paren!(integer("1"), &span), "(1)");
     round_trip::<Bracketed>(m2_syn::brackets!(integer("1"), &span), "[1]");
     round_trip::<Braced>(m2_syn::braces!(integer("1"), &span), "{1}");
@@ -65,7 +69,7 @@ fn all_delimiter_macros_name_construct_parse_and_emit_their_syntax() {
 #[test]
 fn delimiters_lower_cells_to_local_groups_and_unpack_groups_to_global_cells() {
     let cells = lex_str("left;right").unwrap();
-    let local = m2_syn::paren!(cells, Span::detached()).to_token_stream();
+    let local = m2_syn::paren!(cells, synthetic_span()).to_token_stream();
     assert_eq!(local.to_string(), "(left;right)");
 
     let group = match local.into_iter().next().unwrap() {
@@ -100,7 +104,7 @@ fn delimiter_atoms_themselves_parse_and_emit() {
     assert_syntax::<m2_syn::Delimiter![{}]>();
     assert_syntax::<m2_syn::Delimiter![<| |>]>();
 
-    let span = Span::detached();
+    let span = synthetic_span();
     round_trip(m2_syn::Delimiter![()](&span), "()");
     round_trip(m2_syn::Delimiter![[]](&span), "[]");
     round_trip(m2_syn::Delimiter![{}](&span), "{}");
@@ -120,13 +124,13 @@ fn punct_macro_names_and_constructs_parseable_sequences() {
     let one: Values = m2_syn::punc!(value integer("1"));
     round_trip(one, "1");
 
-    let comma = m2_syn::Token![,](Span::detached());
+    let comma = m2_syn::Token![,](synthetic_span());
     let two: Values = m2_syn::punc!(pairs integer("1"); comma => integer("2"));
     round_trip(two, "1,2");
 
     let pair = ValueComma::new(
         integer("1"),
-        m2_syn::Token![,](Span::detached()),
+        m2_syn::Token![,](synthetic_span()),
         integer("2"),
     );
     round_trip(pair, "1,2");
@@ -137,7 +141,7 @@ impl Parse for Value {
         let Some(token) = input.next_token() else {
             return Err(TokenParseError::UnexpectedEnd {
                 expected: "an integer",
-                span: Span::detached(),
+                span: synthetic_span(),
             });
         };
         let span = token.span();

@@ -196,12 +196,13 @@ spans are read rather than inferred. The convenient type macros construct the
 statically refined forms:
 
 ```rust
-use m2_syn::{Span, Lex};
+use m2_syn::{Lex, Source, Span};
 
 type Parenthesized = m2_syn::paren!(m2_syn::Token![+]);
+let span = Span::unlocated(Source::synthetic(""));
 let value: Parenthesized = m2_syn::paren!(
-    m2_syn::Token![+](Span::detached()),
-    Span::detached(),
+    m2_syn::Token![+](&span),
+    &span,
 );
 assert_eq!(value.to_m2(), "(+)");
 ```
@@ -255,28 +256,32 @@ signature queries under the control of the consuming analysis layer.
 
 ## Spans
 
-A `Span` is a byte range into a source buffer. Source-backed spans recover their
-text directly with `span.text()`; offset-only spans can still index an explicitly
-supplied `str` or `String`.
+A `Span` is an `Arc<Source>` and an optional standard byte `Range`. The source
+allocation contains an immutable text snapshot and a compact `File` enum. Every
+token cloned from one parse therefore shares one source allocation, while the
+token types themselves stay concrete and require no source-id generic.
 
 ```rust
-use m2_syn::{Span, TextEdit};
+use std::sync::Arc;
+use m2_syn::{File, Source, Span, TextEdit};
 
-let source = "quotient ring";
-let ring = Span::source(source).subspan(9, 13);
+let source = Source::with_file(File::from_raw(7), "quotient ring");
+let ring = Span::ranged(Arc::clone(&source), 9..13);
 assert_eq!(ring.text(), Some("ring"));
-assert_eq!(&source[&ring], "ring");
 
 // An edit acts on the buffer and on the spans indexing it, and the two agree.
 let edit = TextEdit::insertion(0, "the ");
-let edited = edit.apply(source).unwrap();
-assert_eq!(&edited[ring.shifted(&edit)], &source[&ring]);
+let edited = edit.apply(source.text()).unwrap();
+let edited_source = Source::with_file(source.file(), edited);
+let shifted = ring.shifted(&edit).with_source(edited_source);
+assert_eq!(shifted.text(), ring.text());
 ```
 
-Tokens and textual leaves retain no copied spelling: they keep a span and slice
-its shared source buffer. Product and category spans are derived from their
-children. Parser-independent syntax uses `Span::detached()` when no source
-location exists.
+Textual leaves derive their spelling directly from the source snapshot. Product
+and category spans are derived from their children. A span always knows its
+source; when only its exact position is unavailable, its range is `None`.
+Programmatically generated syntax uses an explicit synthetic `Source`, and
+joining spans from different source snapshots returns `None`.
 
 Line and column are deliberately absent — they are facts about a buffer's
 contents rather than about a position, so they belong to whoever holds the
@@ -321,9 +326,11 @@ Decimal real literals retain precision before exponent: `1p53`, `.5p20`, and
 `p` starts the following identifier instead, so `1e3p20` is adjacency between
 `1e3` and `p20`.
 
-The lexer owns one validated source buffer and gives every lexical atom a span
-into that shared allocation. The byte-iterator entry point first materializes
-its finite input; `lex_str` starts directly from source text.
+The lexer validates one source buffer and gives every lexical atom the same
+source identity with its own byte range. Each atom separately retains the
+spelling needed for parser-independent token processing. The byte-iterator
+entry point first materializes its finite input; `lex_str` starts directly from
+source text.
 
 ```rust
 use m2_syn::{TokenTree, lex_str};
@@ -389,7 +396,7 @@ impl Parser for EmptyParser {
     type Error = Infallible;
 
     fn parse_stream(&mut self, _tokens: TokenStream) -> Result<SourceFile, Self::Error> {
-        Ok(SourceFile::new(Vec::new(), Eof::new("", Span::detached())))
+        Ok(SourceFile::new(Vec::new(), Eof::new("", Span::for_text(""))))
     }
 }
 
@@ -508,7 +515,7 @@ that do not depend on the pattern are reused normally on each iteration.
 ```rust
 use m2_syn::{Span, Symbol, quote_m2};
 
-let value = Symbol::new("value", Span::detached());
+let value = Symbol::new("value", Span::for_text("value"));
 let tokens = quote_m2! {
     result = $(value) + 1;
     return result
@@ -517,10 +524,10 @@ let tokens = quote_m2! {
 assert_eq!(tokens.to_string(), "result=value+1;return result");
 
 let values = [
-    Symbol::new("left", Span::detached()),
-    Symbol::new("right", Span::detached()),
+    Symbol::new("left", Span::for_text("left")),
+    Symbol::new("right", Span::for_text("right")),
 ];
-let comma = m2_syn::Token![,](Span::detached());
+let comma = m2_syn::Token![,](Span::for_text(","));
 let repeated = quote_m2! {
     $[value in &values] { $(value) $(comma) }
 };

@@ -86,10 +86,10 @@ macro_rules! punc {
 /// use m2_syn::{Lex, Span};
 ///
 /// type Pluses = m2_syn::punc!(m2_syn::Token![+]);
-/// let comma = m2_syn::Token![,](Span::detached());
+/// let comma = m2_syn::Token![,](Span::for_text(","));
 /// let values: Pluses = m2_syn::punc!(
-///     pairs m2_syn::Token![+](Span::detached());
-///     comma => m2_syn::Token![+](Span::detached()),
+///     pairs m2_syn::Token![+](Span::for_text("+"));
+///     comma => m2_syn::Token![+](Span::for_text("+")),
 /// );
 /// assert_eq!(values.to_m2(), "+,+");
 /// ```
@@ -265,19 +265,17 @@ fn rest_value_mut<S, P>((_, value): &mut (P, S)) -> &mut S {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Span;
 
     #[test]
     fn a_sequence_is_nonempty_and_retains_separator_spans() {
-        let comma_span = Span::new(1, 2);
-        let values = Punctuated::new(
-            Token![+](Span::new(0, 1)),
-            vec![(Token![,](&comma_span), Token![+](Span::new(2, 3)))],
-        );
+        let source = "+,+";
+        let values: Punctuated<Token![+], Token![,]> = crate::parse_fragment_str(source).unwrap();
+        let comma_span = values.rest()[0].0.expect_span();
 
         assert_eq!(values.len(), 2);
         assert_eq!(values.token_len(), 3);
-        assert_eq!(values.rest()[0].0.span().bounds(), comma_span.bounds());
+        assert_eq!(comma_span.text(), Some(","));
+        assert_eq!(comma_span.bounds(), Some((1, 2)));
         assert_eq!(values.to_m2(), "+,+");
     }
 }

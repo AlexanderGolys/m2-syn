@@ -14,12 +14,13 @@ use crate::{
 /// between them.
 ///
 /// ```
-/// use m2_syn::{Span, Lex};
+/// use m2_syn::{Lex, Source, Span};
 ///
 /// type ParenthesizedPlus = m2_syn::paren!(m2_syn::Token![+]);
+/// let span = Span::unlocated(Source::synthetic(""));
 /// let value: ParenthesizedPlus = m2_syn::paren!(
-///     m2_syn::Token![+](Span::detached()),
-///     Span::detached(),
+///     m2_syn::Token![+](&span),
+///     &span,
 /// );
 /// assert_eq!(value.to_m2(), "(+)");
 /// ```
@@ -112,7 +113,7 @@ where
             TokenParseError::unexpected(
                 D::expected(),
                 raw_delimiter.kind.opening(),
-                raw_delimiter.span(),
+                raw_delimiter.expect_span(),
             )
         })?;
         let contents = parse2(group.into_stream())?;
@@ -138,7 +139,7 @@ where
 {
     fn pretty_tree(&self) -> PrettyNode {
         let delimiter = self.delimiter.delimiter();
-        let mut node = PrettyNode::collection("Delimited", self.span());
+        let mut node = PrettyNode::collection("Delimited", self.try_span());
         node.push("contents", &self.contents);
         node.push_node(
             "delimiter",

@@ -96,7 +96,7 @@ impl ParsedFile {
 
     /// Emits the current CST as normalized Macaulay2 source.
     pub fn to_source(&self) -> String {
-        self.token_stream().to_string()
+        self.token_stream().to_source()
     }
 
     /// Formats the current raw token representation as a recursively flattened

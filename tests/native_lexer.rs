@@ -30,8 +30,9 @@ fn public_string_lexer_returns_a_displayable_token_stream() {
 }
 
 #[test]
-fn lexical_atoms_slice_one_shared_source_instead_of_storing_spellings() {
-    let stream = lexed("alpha + beta");
+fn lexical_atoms_share_one_source_identity() {
+    let source = "alpha + beta";
+    let stream = lexed(source);
     let tokens = stream.iter().collect::<Vec<_>>();
     let alpha = tokens[0].span();
     let whitespace = tokens[1].span();
@@ -45,7 +46,7 @@ fn lexical_atoms_slice_one_shared_source_instead_of_storing_spellings() {
     assert!(alpha.shares_source(&whitespace));
     assert!(alpha.shares_source(&plus));
     assert!(alpha.shares_source(&beta));
-    assert_eq!(stream.span().text(), Some("alpha + beta"));
+    assert_eq!(stream.span().text(), Some(source));
 }
 
 #[test]

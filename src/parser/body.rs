@@ -11,8 +11,8 @@ pub struct Terminated<S> {
 }
 
 impl<S: Spanned> Spanned for Terminated<S> {
-    fn span(&self) -> Span {
-        self.statement.span().join(self.semicolon.span())
+    fn try_span(&self) -> Option<Span> {
+        self.statement.try_span()?.join(self.semicolon.span())
     }
 }
 
@@ -88,7 +88,7 @@ fn reject_empty_statement(input: &ParseStream) -> Result<(), TokenParseError> {
     Err(TokenParseError::unexpected(
         "a statement before `;`",
         ";",
-        token.span(),
+        token.expect_span(),
     ))
 }
 

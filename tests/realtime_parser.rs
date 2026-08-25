@@ -3,6 +3,7 @@ use m2_syn::{Lex, LexErrorKind, ParseError, RealtimeParser, Spanned, TextEdit};
 #[test]
 fn realtime_parser_retains_and_then_completes_an_unclosed_group() {
     let mut parser = RealtimeParser::new("[x").unwrap();
+    let source_id = parser.syntax().span().source_id();
     assert_eq!(parser.source(), "[x");
     assert_eq!(parser.syntax().to_m2(), "[x");
     assert_eq!(parser.diagnostics().len(), 1);
@@ -23,6 +24,7 @@ fn realtime_parser_retains_and_then_completes_an_unclosed_group() {
     );
 
     parser.apply_edit(&TextEdit::insertion(2, ", y")).unwrap();
+    assert_eq!(parser.syntax().span().source_id(), source_id);
     assert_eq!(parser.source(), "[x, y");
     assert_eq!(parser.syntax().to_m2(), "[x,y");
     assert_eq!(parser.diagnostics()[0].span().bounds(), Some((0, 5)));
@@ -32,6 +34,7 @@ fn realtime_parser_retains_and_then_completes_an_unclosed_group() {
     assert_eq!(parser.source(), "[x, y]");
     assert_eq!(parser.syntax().to_m2(), "[x,y]");
     assert!(parser.diagnostics().is_empty());
+    assert_eq!(parser.syntax().span().text(), Some("[x, y]"));
 }
 
 #[test]

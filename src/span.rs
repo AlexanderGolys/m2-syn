@@ -1,6 +1,10 @@
+use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
-use std::ops::Index;
-use std::sync::Arc;
+use std::ops::Range;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU16, Ordering},
+};
 
 /// A boundary in a source buffer, as a byte offset.
 ///
@@ -110,220 +114,209 @@ impl TextEdit {
     }
 }
 
-/// Where syntax originated: a stretch of a buffer, or nowhere at all.
+static NEXT_FILE_ID: AtomicU16 = AtomicU16::new(1);
+
+/// The source site containing syntax.
 ///
-/// A zero-width `Range` is `start == end`, which is what the virtual marker
-/// nodes use — end of input, the `Adj` between adjacent expressions,
-/// an omitted component in `(x,,y)`. Because boundaries sit between bytes,
-/// `x..x` already names a position exactly, so such a marker needs no
-/// representation of its own. An inverted pair can never be constructed:
-/// [`Self::new`] collapses it to `Detached` rather than fabricating a range.
-///
-#[derive(Debug, Clone)]
-struct SourceSlice {
-    text: Arc<str>,
-    origin: Offset,
+/// `FileId` is the ordinary source-file identity. Keeping the identity behind
+/// an enum lets the syntax model add distinct embedded or macro hygiene sites
+/// without changing every span and token field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum File {
+    /// An ordinary source file registered under a compact process-local id.
+    FileId(u16),
+    /// Syntax constructed without a corresponding on-disk source file.
+    Synthetic(u16),
 }
 
-impl PartialEq for SourceSlice {
-    fn eq(&self, other: &Self) -> bool {
-        self.origin == other.origin && Arc::ptr_eq(&self.text, &other.text)
+impl File {
+    /// Allocates a compact process-local file label.
+    ///
+    /// The counter may recycle after all `u16` values have been used. Source
+    /// snapshot identity is carried by the shared [`Source`] allocation, so a
+    /// recycled display label cannot make unrelated spans equal or joinable.
+    pub fn fresh() -> Self {
+        let id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        Self::FileId(id)
     }
-}
 
-impl Eq for SourceSlice {}
-
-impl Hash for SourceSlice {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.origin.hash(state);
-        std::ptr::hash(Arc::as_ptr(&self.text), state);
+    /// Creates an identity from an application-defined integer.
+    pub const fn from_raw(raw: u16) -> Self {
+        Self::FileId(raw)
     }
-}
 
-impl SourceSlice {
-    fn covers(&self, start: Offset, end: Offset) -> bool {
-        self.origin <= start && end <= self.origin.saturating_add(self.text.len())
-    }
-}
-
-fn common_source(
-    left: Option<&SourceSlice>,
-    right: Option<&SourceSlice>,
-    start: Offset,
-    end: Offset,
-) -> Option<SourceSlice> {
-    match (left, right) {
-        (Some(left), Some(right)) if left == right => Some(left.clone()),
-        (Some(source), None) | (None, Some(source)) if source.covers(start, end) => {
-            Some(source.clone())
+    /// Returns the application-defined integer stored by this identity.
+    pub const fn into_raw(self) -> u16 {
+        match self {
+            Self::FileId(id) | Self::Synthetic(id) => id,
         }
-        _ => None,
     }
 }
 
-/// Where syntax originated and, when available, the source buffer it indexes.
-///
-/// Source-derived tokens retain only this value. Their spelling is recovered
-/// by slicing the shared source buffer; it is never copied into token or syntax
-/// node storage. Spans constructed only from offsets remain useful for
-/// diagnostics and synthetic trees, but naturally cannot yield source text.
-#[derive(Debug, Clone, Default)]
+/// Compatibility name for the source identity stored by [`Span`].
+pub type SourceId = File;
+
+/// One immutable source snapshot shared by every span into it.
+pub struct Source {
+    file: File,
+    text: Arc<str>,
+}
+
+impl Source {
+    /// Creates an ordinary source file with a fresh compact identity.
+    pub fn new(text: impl Into<Arc<str>>) -> Arc<Self> {
+        Self::with_file(File::fresh(), text)
+    }
+
+    /// Creates source text for syntax constructed outside an input file.
+    pub fn synthetic(text: impl Into<Arc<str>>) -> Arc<Self> {
+        let id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        Self::with_file(File::Synthetic(id), text)
+    }
+
+    /// Creates a source snapshot with an explicitly selected source kind.
+    pub fn with_file(file: File, text: impl Into<Arc<str>>) -> Arc<Self> {
+        Arc::new(Self {
+            file,
+            text: text.into(),
+        })
+    }
+
+    /// Returns this source's semantic identity.
+    pub fn file(&self) -> File {
+        self.file
+    }
+
+    /// Returns the complete immutable source snapshot.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl Debug for Source {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Source")
+            .field("file", &self.file)
+            .field("bytes", &self.text.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A shared source snapshot and optional byte range within it.
+#[derive(Clone)]
 pub struct Span {
-    bounds: Option<(Offset, Offset)>,
-    source: Option<SourceSlice>,
-}
-
-impl PartialEq for Span {
-    fn eq(&self, other: &Self) -> bool {
-        self.bounds == other.bounds && self.source == other.source
-    }
-}
-
-impl Eq for Span {}
-
-impl Hash for Span {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.bounds.hash(state);
-        self.source.hash(state);
-    }
+    source: Arc<Source>,
+    range: Option<Range<Offset>>,
 }
 
 impl Span {
-    /// A detached span without source text.
-    #[allow(non_upper_case_globals)]
-    pub const Detached: Self = Self {
-        bounds: None,
-        source: None,
-    };
-
-    /// Creates a span with no source location.
-    pub fn detached() -> Self {
-        Self::Detached
-    }
-
-    /// Builds a span covering `start..end`, where `end` is the offset past the
-    /// last byte.
-    ///
-    /// An inverted pair collapses to `Detached` rather than fabricating a range.
-    pub fn new(start: Offset, end: Offset) -> Self {
-        if start <= end {
-            Self {
-                bounds: Some((start, end)),
-                source: None,
-            }
-        } else {
-            Self::Detached
-        }
-    }
-
-    /// A zero-width span at one boundary, for syntax that occupies no bytes.
-    pub fn from_offset(offset: Offset) -> Self {
+    /// Builds a span in `source` with an optional byte range.
+    pub fn new(source: Arc<Source>, range: Option<Range<Offset>>) -> Self {
         Self {
-            bounds: Some((offset, offset)),
-            source: None,
+            source,
+            range: range.filter(|range| range.start <= range.end),
         }
     }
 
-    /// Attaches the complete source fragment covered by this span.
+    /// Builds a span covering `range` in `source`.
+    pub fn ranged(source: Arc<Source>, range: Range<Offset>) -> Self {
+        Self::new(source, Some(range))
+    }
+
+    /// Builds a span whose source is known but whose byte range is not.
+    pub fn unlocated(source: Arc<Source>) -> Self {
+        Self {
+            source,
+            range: None,
+        }
+    }
+
+    /// Creates a span covering one complete synthetic source buffer.
+    pub fn for_text(text: impl Into<Arc<str>>) -> Self {
+        let source = Source::synthetic(text);
+        Self::ranged(Arc::clone(&source), 0..source.text().len())
+    }
+
+    /// Returns the source file identity.
+    pub fn file(&self) -> File {
+        self.source.file()
+    }
+
+    /// Borrows the shared source snapshot.
+    pub fn source(&self) -> &Arc<Source> {
+        &self.source
+    }
+
+    /// Returns the source identity.
+    pub fn source_id(&self) -> File {
+        self.file()
+    }
+
+    /// Returns a copy of the indexed byte range.
+    pub fn range(&self) -> Option<Range<Offset>> {
+        self.range.clone()
+    }
+
+    /// Changes the source snapshot while preserving this span's range.
+    pub fn with_source(mut self, source: Arc<Source>) -> Self {
+        self.source = source;
+        self
+    }
+
+    /// Ensures that this span resolves to exactly `text`.
     ///
-    /// Existing source backing is retained. For an offset-only span, `text`
-    /// must have the same byte width as the span; its first byte is associated
-    /// with the span's opening offset. Detached syntax may also carry a source
-    /// fragment, which is useful for programmatically constructed syntax.
-    ///
-    /// # Panics
-    ///
-    /// Panics when an offset-only span and `text` have different byte widths.
+    /// Parsed syntax retains its original source allocation. Programmatically
+    /// constructed syntax receives a compact synthetic source allocation
+    /// rather than storing a second copy of its spelling in every token.
     pub fn with_text(self, text: impl Into<Arc<str>>) -> Self {
-        if self.source.is_some() {
+        let text = text.into();
+        if self.text() == Some(text.as_ref()) {
             return self;
         }
-        let text = text.into();
-        let origin = match self.bounds {
-            Some((start, end)) => {
-                assert_eq!(
-                    end - start,
-                    text.len(),
-                    "source fragment width must equal its span width"
-                );
-                start
-            }
-            None => 0,
-        };
-        Self {
-            source: Some(SourceSlice { text, origin }),
-            ..self
-        }
+        let source = Source::with_file(self.file(), text);
+        Self::ranged(Arc::clone(&source), 0..source.text().len())
     }
 
-    /// Replaces this span's source fragment while retaining its opening
-    /// location and updating its width.
-    pub fn replaced_text(&self, text: impl Into<Arc<str>>) -> Self {
-        let text = text.into();
-        let bounds = self
-            .start()
-            .map(|start| (start, start.saturating_add(text.len())));
-        let origin = bounds.map_or(0, |(start, _)| start);
-        Self {
-            bounds,
-            source: Some(SourceSlice { text, origin }),
-        }
+    /// Returns the exact source text covered by this span.
+    pub fn text(&self) -> Option<&str> {
+        self.source.text().get(self.range.as_ref()?.clone())
     }
-
-    /// Creates a source-backed span covering an entire source buffer.
-    pub fn source(text: impl Into<Arc<str>>) -> Self {
-        let text = text.into();
-        let end = text.len();
+    /// Creates a zero-width span at `offset` with this span's source identity.
+    pub fn at(&self, offset: Offset) -> Self {
+        if self.range.is_none() {
+            return Self::unlocated(Arc::clone(&self.source));
+        }
         Self {
-            bounds: Some((0, end)),
-            source: Some(SourceSlice { text, origin: 0 }),
+            source: Arc::clone(&self.source),
+            range: Some(offset..offset),
         }
     }
 
     /// Returns a subspan at byte offsets relative to this span's opening.
     ///
-    /// The returned span shares the same source buffer. Invalid or detached
-    /// ranges become detached spans.
+    /// The returned span shares the same source identity. Invalid or unavailable
+    /// ranges become unlocated spans in the same file.
     pub fn subspan(&self, start: Offset, end: Offset) -> Self {
-        let Some((outer_start, outer_end)) = self.bounds else {
-            return Self::Detached;
+        let Some(outer) = &self.range else {
+            return Self::unlocated(Arc::clone(&self.source));
         };
-        let Some(start) = outer_start.checked_add(start) else {
-            return Self::Detached;
+        let Some(start) = outer.start.checked_add(start) else {
+            return Self::unlocated(Arc::clone(&self.source));
         };
-        let Some(end) = outer_start.checked_add(end) else {
-            return Self::Detached;
+        let Some(end) = outer.start.checked_add(end) else {
+            return Self::unlocated(Arc::clone(&self.source));
         };
-        if start > end || end > outer_end {
-            return Self::Detached;
+        if start > end || end > outer.end {
+            return Self::unlocated(Arc::clone(&self.source));
         }
         Self {
-            bounds: Some((start, end)),
-            source: self.source.clone(),
+            source: Arc::clone(&self.source),
+            range: Some(start..end),
         }
     }
 
-    /// Returns the exact source text covered by this span when source backing
-    /// is available.
-    pub fn text(&self) -> Option<&str> {
-        let source = self.source.as_ref()?;
-        match self.bounds {
-            Some((start, end)) => source
-                .text
-                .get(start.checked_sub(source.origin)?..end.checked_sub(source.origin)?),
-            None => Some(&source.text),
-        }
-    }
-
-    /// Reports whether both spans slice the same shared source buffer.
-    pub fn shares_source(&self, other: &Self) -> bool {
-        match (&self.source, &other.source) {
-            (Some(left), Some(right)) => Arc::ptr_eq(&left.text, &right.text),
-            _ => false,
-        }
-    }
-
-    /// The boundary this span opens at, or `None` when it is detached.
+    /// The boundary this span opens at, or `None` when it is unlocated.
     pub fn start(&self) -> Option<Offset> {
         self.bounds().map(|(start, _)| start)
     }
@@ -335,18 +328,23 @@ impl Span {
 
     /// The boundaries this span lies between.
     pub fn bounds(&self) -> Option<(Offset, Offset)> {
-        self.bounds
+        self.range.as_ref().map(|range| (range.start, range.end))
     }
 
-    /// How many bytes this span covers, or `None` when it is detached.
+    /// How many bytes this span covers, or `None` when it is unlocated.
     pub fn len(&self) -> Option<usize> {
         self.bounds().map(|(start, end)| end - start)
     }
 
     /// Reports whether this span covers no bytes, as the virtual marker tokens
-    /// do. Detached syntax covers no bytes either.
+    /// do. Unlocated syntax covers no bytes either.
     pub fn is_empty(&self) -> bool {
         self.len().unwrap_or(0) == 0
+    }
+
+    /// Reports whether both spans identify the same source site.
+    pub fn shares_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.source, &other.source)
     }
 
     /// Returns whether `offset` lies inside this span, excluding its closing
@@ -382,109 +380,141 @@ impl Span {
     /// Text inserted at a span's *closing* boundary therefore extends the span,
     /// which is what an unclosed group wants — it keeps reaching whatever now
     /// follows it. A span wholly removed by a deletion collapses to a zero-width
-    /// span at the deletion point rather than becoming [`Self::Detached`],
+    /// span at the deletion point rather than losing its location,
     /// because it still records where the syntax used to be.
     pub fn shifted(&self, edit: &TextEdit) -> Self {
         match self.bounds() {
-            None => Self::Detached,
-            Some((start, end)) => Self::new(edit.shift(start), edit.shift(end)),
+            None => Self::unlocated(Arc::clone(&self.source)),
+            Some((start, end)) => Self {
+                source: Arc::clone(&self.source),
+                range: Some(edit.shift(start)..edit.shift(end)),
+            },
         }
     }
 
-    /// The smallest span covering both, ignoring detached operands.
-    pub fn join(&self, other: Self) -> Self {
+    /// Returns this span with the same opening boundary and source identity but
+    /// a new byte length.
+    pub fn resized(&self, len: usize) -> Self {
+        let Some(start) = self.start() else {
+            return Self::unlocated(Arc::clone(&self.source));
+        };
+        Self {
+            source: Arc::clone(&self.source),
+            range: Some(start..start.saturating_add(len)),
+        }
+    }
+}
+
+impl Span {
+    /// The smallest span covering both, or `None` when they belong to
+    /// different files.
+    pub fn join(&self, other: Self) -> Option<Self> {
+        if !self.shares_source(&other) {
+            return None;
+        }
         match (self.bounds(), other.bounds()) {
-            (None, _) => other,
-            (_, None) => self.clone(),
+            (None, _) => Some(other),
+            (_, None) => Some(self.clone()),
             (Some((start, end)), Some((start2, end2))) => {
                 let start = start.min(start2);
                 let end = end.max(end2);
-                let bounds = Some((start, end));
-                let source = common_source(self.source.as_ref(), other.source.as_ref(), start, end);
-                Self { bounds, source }
+                Some(Self {
+                    source: Arc::clone(&self.source),
+                    range: Some(start..end),
+                })
             }
         }
     }
 
-    /// The overlap of both, or `Detached` when they do not overlap.
-    pub fn meet(&self, other: Self) -> Self {
+    /// The overlap of both, or `None` when the files differ or the ranges do
+    /// not overlap.
+    pub fn meet(&self, other: Self) -> Option<Self> {
+        if !self.shares_source(&other) {
+            return None;
+        }
         match (self.bounds(), other.bounds()) {
             (Some((start, end)), Some((start2, end2))) => {
                 let start = start.max(start2);
                 let end = end.min(end2);
                 if start < end {
-                    let source =
-                        common_source(self.source.as_ref(), other.source.as_ref(), start, end);
-                    Self {
-                        bounds: Some((start, end)),
-                        source,
-                    }
+                    Some(Self {
+                        source: Arc::clone(&self.source),
+                        range: Some(start..end),
+                    })
                 } else {
-                    Self::Detached
+                    None
                 }
             }
-            _ => Self::Detached,
+            _ => None,
         }
     }
 
-    /// Joins every span in an iterator, ignoring detached spans.
-    pub fn join_all(spans: impl IntoIterator<Item = Span>) -> Self {
-        spans
-            .into_iter()
-            .reduce(|left, right| left.join(right))
-            .unwrap_or_default()
+    /// Joins every span in an iterator, returning `None` for an empty iterator
+    /// or when any two spans belong to different files.
+    pub fn join_all<I, S>(spans: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Option<Self>>,
+    {
+        let mut spans = spans.into_iter().filter_map(Into::into);
+        let first = spans.next()?;
+        spans.try_fold(first, |left, right| left.join(right))
     }
 }
 
-/// Indexes the buffer, panicking when the span does not name text in it.
-///
-/// This is legal despite `Index` and `str` both being foreign because [`Span`]
-/// is local, and it cannot overlap `str`'s own
-/// `impl<I: SliceIndex<str>> Index<I> for str` because `Span` does not implement
-/// `SliceIndex`.
-impl Index<Span> for str {
-    type Output = str;
-
-    fn index(&self, span: Span) -> &str {
-        span.bounds()
-            .and_then(|(start, end)| self.get(start..end))
-            .unwrap_or_else(|| panic!("{span:?} does not name text in this buffer"))
+impl PartialEq for Span {
+    fn eq(&self, other: &Self) -> bool {
+        self.shares_source(other) && self.range == other.range
     }
 }
 
-impl Index<&Span> for str {
-    type Output = str;
+impl Eq for Span {}
 
-    fn index(&self, span: &Span) -> &str {
-        span.bounds()
-            .and_then(|(start, end)| self.get(start..end))
-            .unwrap_or_else(|| panic!("{span:?} does not name text in this buffer"))
+impl Hash for Span {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.source).hash(state);
+        self.range.hash(state);
     }
 }
 
-/// `String` needs its own implementation rather than reaching `str`'s through
-/// deref: it already has an `Index` impl of its own, so operator resolution stops
-/// there instead of falling through.
-impl Index<Span> for String {
-    type Output = str;
-
-    fn index(&self, span: Span) -> &str {
-        self.as_str().index(span)
-    }
-}
-
-impl Index<&Span> for String {
-    type Output = str;
-
-    fn index(&self, span: &Span) -> &str {
-        self.as_str().index(span)
+impl Debug for Span {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut span = formatter.debug_struct("Span");
+        span.field("file", &self.file()).field("range", &self.range);
+        if let Some(text) = self.text() {
+            span.field("text", &text);
+        }
+        span.finish()
     }
 }
 
 /// A syntax value that reports its source extent.
 pub trait Spanned {
     /// Returns the smallest span covering this value.
-    fn span(&self) -> Span;
+    ///
+    /// # Panics
+    ///
+    /// Panics when the value is absent or assembled from different source
+    /// snapshots. Use [`Self::try_span`] when either case is expected.
+    fn span(&self) -> Span {
+        self.try_span()
+            .expect("syntax must have one shared source snapshot")
+    }
+
+    /// Returns the smallest span covering this value, when its constituents
+    /// share one source snapshot.
+    fn try_span(&self) -> Option<Span> {
+        Some(self.span())
+    }
+
+    /// Returns this value's span when one source snapshot covers it.
+    ///
+    /// # Panics
+    ///
+    /// Panics for absent syntax or syntax assembled from different sources.
+    fn expect_span(&self) -> Span {
+        self.span()
+    }
 }
 
 impl Spanned for Span {
@@ -497,299 +527,98 @@ impl<T: Spanned + ?Sized> Spanned for &T {
     fn span(&self) -> Span {
         (*self).span()
     }
+
+    fn try_span(&self) -> Option<Span> {
+        (*self).try_span()
+    }
 }
 
 impl<T: Spanned + ?Sized> Spanned for Box<T> {
     fn span(&self) -> Span {
         self.as_ref().span()
     }
+
+    fn try_span(&self) -> Option<Span> {
+        self.as_ref().try_span()
+    }
 }
 
 impl<T: Spanned> Spanned for Option<T> {
-    fn span(&self) -> Span {
-        self.as_ref().map_or_else(Span::detached, Spanned::span)
+    fn try_span(&self) -> Option<Span> {
+        self.as_ref().and_then(Spanned::try_span)
     }
 }
 
 impl<T: Spanned> Spanned for Vec<T> {
-    fn span(&self) -> Span {
-        Span::join_all(self.iter().map(Spanned::span))
+    fn try_span(&self) -> Option<Span> {
+        Span::join_all(self.iter().map(Spanned::try_span))
     }
 }
 
 impl<A: Spanned, B: Spanned> Spanned for (A, B) {
-    fn span(&self) -> Span {
-        self.0.span().join(self.1.span())
+    fn try_span(&self) -> Option<Span> {
+        self.0.try_span()?.join(self.1.try_span()?)
     }
 }
 
 impl<T: Spanned> Spanned for &[T] {
-    fn span(&self) -> Span {
-        Span::join_all(self.iter().map(Spanned::span))
+    fn try_span(&self) -> Option<Span> {
+        Span::join_all(self.iter().map(Spanned::try_span))
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod source_tests {
+    use std::sync::Arc;
+
     use super::*;
 
-    /// The span of `text` starting at `start`, as the lexer would emit it:
-    /// boundaries around the text, so `end` is one past its last byte.
-    fn span_of(start: Offset, text: &str) -> Span {
-        Span::new(start, start + text.len())
+    #[test]
+    fn spans_resolve_text_from_one_shared_source() {
+        let source = Source::new("quotient ring");
+        let quotient = Span::ranged(Arc::clone(&source), 0..8);
+        let ring = Span::ranged(Arc::clone(&source), 9..13);
+
+        assert_eq!(quotient.text(), Some("quotient"));
+        assert_eq!(ring.text(), Some("ring"));
+        assert!(Arc::ptr_eq(quotient.source(), ring.source()));
     }
 
     #[test]
-    fn boundaries_are_gaps_so_adjacent_spans_never_own_the_same_position() {
-        // `a+b`: the gap at byte 1 closes `a` and opens `+`.
-        let a = span_of(0, "a");
-        let plus = span_of(1, "+");
+    fn joining_different_sources_returns_none() {
+        let left = Span::for_text("x");
+        let right = Span::for_text("y");
 
-        assert!(!a.contains(1));
-        assert!(plus.contains(1));
-        // Both touch it, which is what a cursor query wants.
-        assert!(a.touches(1));
-        assert!(plus.touches(1));
+        assert_eq!(left.join(right), None);
     }
 
     #[test]
-    fn a_marker_token_contains_nothing_but_touches_its_own_position() {
-        let eof = Span::from_offset(3);
+    fn an_unlocated_span_still_knows_its_source() {
+        let source = Source::new("x + y");
+        let span = Span::unlocated(Arc::clone(&source));
 
-        assert!(eof.is_empty());
-        assert!(!eof.contains(3));
-        assert!(eof.touches(3));
-    }
-
-    /// An insertion of width `d` at `s` sends `x` to `x + (x >= s) * d`, and
-    /// nothing else about it varies — there is no side to choose.
-    #[test]
-    fn an_insertion_moves_exactly_the_offsets_at_or_after_it() {
-        let insert = TextEdit::insertion(3, "xy");
-
-        assert_eq!(insert.shift(2), 2);
-        // At the insertion point, so it travels — which is what a marker token
-        // at end of input wants, staying past everything typed at it.
-        assert_eq!(insert.shift(3), 5);
-        assert_eq!(insert.shift(4), 6);
-    }
-
-    /// Shifting is monotone, so the two ends of a span can never cross and a
-    /// zero-width span stays zero-width without needing a special case.
-    #[test]
-    fn shifting_never_inverts_a_span() {
-        let edits = [TextEdit::insertion(3, "xy"), TextEdit::deletion(2, 5)];
-
-        for edit in &edits {
-            for start in 0..8 {
-                for end in start..8 {
-                    let shifted = Span::new(start, end).shifted(edit);
-                    assert_ne!(shifted, Span::Detached, "{start}..{end} under {edit:?}");
-                }
-            }
-            assert!(Span::from_offset(3).shifted(edit).is_empty());
-        }
+        assert_eq!(span.file(), source.file());
+        assert_eq!(span.range(), None);
+        assert_eq!(span.text(), None);
     }
 
     #[test]
-    fn insertion_at_a_span_boundary_moves_it_or_extends_the_span() {
-        let span = span_of(2, "xy");
+    fn source_snapshots_with_the_same_file_do_not_alias() {
+        let file = File::from_raw(7);
+        let before = Span::ranged(Source::with_file(file, "x"), 0..1);
+        let after = Span::ranged(Source::with_file(file, "y"), 0..1);
 
-        // At byte 2, the span's own start: both ends clear the threshold, so the
-        // span moves whole and the new text lands before it.
-        assert_eq!(
-            span.shifted(&TextEdit::insertion(2, "AB")),
-            span_of(4, "xy")
-        );
-        // At byte 4, the span's own closing boundary: only the end clears it, so
-        // the span extends to keep reaching what now follows.
-        assert_eq!(span.shifted(&TextEdit::insertion(4, "AB")), Span::new(2, 6));
+        assert_ne!(before, after);
+        assert_eq!(before.join(after), None);
     }
 
     #[test]
-    fn insertion_strictly_inside_a_span_extends_it() {
-        let span = span_of(0, "abcd");
+    fn shifting_preserves_source_identity() {
+        let source = Source::new("ring");
+        let span = Span::ranged(Arc::clone(&source), 0..4);
+        let shifted = span.shifted(&TextEdit::insertion(0, "graded "));
 
-        assert_eq!(
-            span.shifted(&TextEdit::insertion(2, "efg")),
-            span_of(0, "abcdefg")
-        );
-    }
-
-    #[test]
-    fn text_after_a_deletion_moves_back_and_covered_text_collapses() {
-        let deleted = TextEdit::deletion(1, 3);
-
-        // Wholly after: shifts back by the deleted width.
-        assert_eq!(span_of(4, "z").shifted(&deleted), span_of(2, "z"));
-        // Wholly before: untouched.
-        assert_eq!(span_of(0, "a").shifted(&deleted), span_of(0, "a"));
-        // Wholly covered: collapses to where it used to be, not detached.
-        let covered = span_of(1, "xy").shifted(&deleted);
-        assert_eq!(covered, Span::from_offset(1));
-        assert!(covered.is_empty());
-    }
-
-    #[test]
-    fn a_detached_span_is_unaffected_by_edits() {
-        assert_eq!(
-            Span::detached().shifted(&TextEdit::insertion(0, "abc")),
-            Span::detached()
-        );
-    }
-
-    /// Offsets near the top of the range are ordinary buffer positions, so
-    /// shifting must stay within the edit's own width rather than summing two
-    /// absolute offsets.
-    #[test]
-    fn shifting_late_offsets_does_not_overflow() {
-        let span = Span::new(usize::MAX - 4, usize::MAX - 3);
-        // Two bytes inserted far below the span.
-        let insert = TextEdit::insertion(1, "ab");
-
-        // The displacement is two bytes. Summing the absolute offsets instead
-        // would compute `(usize::MAX - 4) + 3`, overflowing.
-        assert_eq!(
-            span.shifted(&insert),
-            Span::new(usize::MAX - 2, usize::MAX - 1)
-        );
-    }
-
-    /// `shift` moves its argument whenever the edit has any width, so leaving
-    /// earlier text alone rests entirely on its guards.
-    #[test]
-    fn text_before_an_edit_never_moves() {
-        let edits = [TextEdit::insertion(8, "AB"), TextEdit::deletion(8, 10)];
-        let earlier = [
-            span_of(5, "ab"),
-            Span::new(0, 2),
-            // Ends just short of the edit. A span ending *exactly* at an
-            // insertion extends instead, which
-            // `insertion_at_a_span_boundary_moves_it_or_extends_the_span`
-            // covers.
-            Span::new(6, 7),
-            // A zero-width marker before the edit.
-            Span::from_offset(1),
-        ];
-
-        for edit in &edits {
-            for span in &earlier {
-                assert_eq!(span.shifted(edit), *span, "{span:?} moved under {edit:?}");
-            }
-        }
-    }
-
-    /// Inserting at a span's own start carries the whole span forward: both
-    /// endpoints move by the edit's width, so the span keeps its length and the
-    /// new text lands outside it.
-    #[test]
-    fn inserting_at_a_span_start_moves_both_endpoints() {
-        let span = Span::new(2, 6);
-        let shifted = span.shifted(&TextEdit::insertion(2, "xyz"));
-
-        assert_eq!(shifted, Span::new(5, 9));
-        assert_eq!(shifted.len(), span.len());
-    }
-
-    #[test]
-    fn an_inverted_pair_collapses_rather_than_becoming_a_range() {
-        assert_eq!(Span::new(5, 2), Span::Detached);
-    }
-
-    #[test]
-    #[should_panic(expected = "deletion start must not exceed its end")]
-    fn an_inverted_deletion_is_rejected_at_construction() {
-        TextEdit::deletion(3, 1);
-    }
-
-    #[test]
-    fn adjacent_spans_do_not_have_an_overlap() {
-        assert_eq!(Span::new(0, 1).meet(Span::new(1, 2)), Span::Detached);
-    }
-
-    #[test]
-    fn a_span_indexes_the_buffer_it_came_from() {
-        let source = "quotient ring";
-
-        assert_eq!(&source[span_of(9, "ring")], "ring");
-        // A marker token names the empty string at its own position.
-        assert_eq!(&source[Span::from_offset(9)], "");
-        assert_eq!(Span::new(0, source.len()), Span::new(0, 13));
-
-        // Spans that name no text in this buffer are refused rather than guessed.
-    }
-
-    #[test]
-    #[should_panic(expected = "does not name text in this buffer")]
-    fn indexing_with_a_detached_span_is_a_bug_rather_than_an_empty_slice() {
-        let _ = &"ring"[Span::detached()];
-    }
-
-    /// The law tying the two halves together: an edit acts on the buffer and on
-    /// the span, and a span disjoint from the edit still names the same text
-    /// afterwards. This is what `shifted` is *for*, so it is checked against
-    /// every edit shape rather than a single hand-picked case.
-    #[test]
-    fn an_edit_acts_on_buffer_and_span_alike() {
-        let source = "quotient ring R";
-        let ring = span_of(9, "ring");
-
-        let disjoint = [
-            // Before the span.
-            TextEdit::insertion(0, "the "),
-            TextEdit::deletion(0, 9),
-            // Exactly at its opening boundary: the span moves whole, so it
-            // still names the same text. An insertion at the *closing*
-            // boundary extends the span instead and is not disjoint.
-            TextEdit::insertion(9, "graded "),
-            // After the span.
-            TextEdit::insertion(15, " = QQ"),
-            TextEdit::deletion(13, 15),
-            // A multi-byte character, to catch byte/char confusion.
-            TextEdit::insertion(0, "ℤ "),
-        ];
-
-        for edit in &disjoint {
-            let edited = edit.apply(source).expect("edit lands inside the buffer");
-            assert_eq!(
-                &edited[ring.shifted(edit)],
-                &source[&ring],
-                "{edit:?} broke the span"
-            );
-        }
-    }
-
-    /// The general form of the same law: for an edit landing *inside* a span,
-    /// the shifted span names the edited text, so the edit acts on the slice too.
-    #[test]
-    fn an_edit_inside_a_span_acts_on_the_text_the_span_names() {
-        let source = "quotient ring";
-        let ring = span_of(9, "ring");
-        let edit = TextEdit::insertion(11, "AB");
-
-        let edited = edit.apply(source).expect("edit lands inside the buffer");
-        // The span still names its own text, with the insertion carried into it.
-        assert_eq!(&edited[ring.shifted(&edit)], "riABng");
-        // Which is exactly the edit acting on the original slice, rebased to it.
-        let inside = TextEdit::insertion(11 - ring.start().unwrap(), "AB");
-        assert_eq!(inside.apply(&source[ring]).unwrap(), "riABng");
-    }
-
-    /// Text typed at a span's closing boundary is absorbed by it. This is what
-    /// an unclosed group wants: its span keeps reaching the end of whatever has
-    /// been typed since, without anyone re-deriving it.
-    #[test]
-    fn a_span_absorbs_text_appended_at_its_closing_boundary() {
-        let source = "f(x";
-        // An unclosed group, running from its opening delimiter to end of input.
-        let group = Span::new(1, source.len());
-        assert_eq!(&source[&group], "(x");
-
-        let typed = TextEdit::insertion(3, ", y");
-        let edited = typed.apply(source).expect("edit lands inside the buffer");
-
-        assert_eq!(&edited[group.shifted(&typed)], "(x, y");
-        // Still opens at the delimiter and still reaches end of input.
-        assert_eq!(group.shifted(&typed), Span::new(1, edited.len()));
+        assert!(Arc::ptr_eq(&source, shifted.source()));
+        assert_eq!(shifted.range(), Some(7..11));
     }
 }

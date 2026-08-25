@@ -11,7 +11,7 @@ impl Parse for Name {
         let Some(token) = input.next_token() else {
             return Err(TokenParseError::UnexpectedEnd {
                 expected: "identifier",
-                span: Span::detached(),
+                span: Span::for_text(""),
             });
         };
 

@@ -61,7 +61,10 @@ pub use lexer::{LexError, LexErrorKind, lex, lex_recovering, lex_str, lex_str_re
 #[doc(hidden)]
 pub use m2_syn_macros::token as __m2_syn_token;
 pub use m2_syn_macros::{Spanned, parse_quote_m2, quote_m2, syntax};
-pub use native::{NativeParseError, NativeParser, parse_native, parse_native_recovering};
+pub use native::{
+    CompletedNativeCell, NativeCellParser, NativeCellState, NativeParseError, NativeParser,
+    parse_native, parse_native_recovering,
+};
 pub use nodes::*;
 pub use nodes::{fold, visit, visit_mut};
 pub use parsed_file::ParsedFile;
@@ -70,7 +73,7 @@ pub use pretty::{
 };
 pub use punctuated::{PunctPair, Punctuated};
 pub use recovery::Recovered;
-pub use span::{Offset, Span, Spanned, TextEdit};
+pub use span::{File, Offset, Source, SourceId, Span, Spanned, TextEdit};
 #[doc(hidden)]
 pub use token_stream::delim::parse_delimiter;
 pub use token_stream::delim::{

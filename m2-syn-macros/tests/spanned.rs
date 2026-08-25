@@ -8,17 +8,30 @@ impl Span {
         Self::default()
     }
 
-    pub fn join(self, other: Self) -> Self {
-        Self(self.0.min(other.0), self.1.max(other.1))
+    pub fn join(self, other: Self) -> Option<Self> {
+        Some(Self(self.0.min(other.0), self.1.max(other.1)))
     }
 
-    pub fn join_all(spans: impl IntoIterator<Item = Self>) -> Self {
-        spans.into_iter().reduce(Self::join).unwrap_or_default()
+    pub fn join_all<I, S>(spans: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Option<Self>>,
+    {
+        spans
+            .into_iter()
+            .filter_map(Into::into)
+            .reduce(|left, right| left.join(right).unwrap())
     }
 }
 
 pub trait Spanned {
-    fn span(&self) -> Span;
+    fn span(&self) -> Span {
+        self.try_span().unwrap()
+    }
+
+    fn try_span(&self) -> Option<Span> {
+        Some(self.span())
+    }
 }
 
 impl Spanned for Span {
@@ -50,7 +63,7 @@ fn enum_variants_use_the_same_member_span_rules_as_structs() {
 
     assert_eq!(named.span(), named_span);
     assert_eq!(tuple.span(), Span(3, 13));
-    assert_eq!(SpannedVariants::Unit.span(), Span::detached());
+    assert_eq!(SpannedVariants::Unit.try_span(), None);
 }
 
 #[test]

@@ -170,9 +170,10 @@ impl TokenDefinitions {
             let name = &definition.name;
             let type_name = name;
             let spelling = &definition.spelling;
-            let (raw_new, raw_matches) = match definition.raw_kind {
+            let (raw_new, raw_from_span, raw_matches) = match definition.raw_kind {
                 RawTokenKind::Punct => (
                     quote!(::m2_syn::TokenTree::Punct(::m2_syn::Punct::new(#spelling, span))),
+                    quote!(::m2_syn::TokenTree::Punct(::m2_syn::Punct::from_span(span))),
                     quote! {
                         match token {
                             ::m2_syn::TokenTree::Punct(token) => token.text() == #spelling,
@@ -182,6 +183,9 @@ impl TokenDefinitions {
                 ),
                 RawTokenKind::Ident => (
                     quote!(::m2_syn::TokenTree::Ident(::m2_syn::IdentToken::new(#spelling, span))),
+                    quote!(::m2_syn::TokenTree::Ident(::m2_syn::IdentToken::from_span(
+                        span
+                    ))),
                     quote! {
                         match token {
                             ::m2_syn::TokenTree::Ident(token) => {
@@ -196,6 +200,10 @@ impl TokenDefinitions {
                     quote!(::m2_syn::TokenTree::Trivia(::m2_syn::Trivia::new(
                         ::m2_syn::TriviaKind::Whitespace,
                         " ",
+                        span,
+                    ))),
+                    quote!(::m2_syn::TokenTree::Trivia(::m2_syn::Trivia::from_span(
+                        ::m2_syn::TriviaKind::Whitespace,
                         span,
                     ))),
                     quote! {
@@ -222,7 +230,7 @@ impl TokenDefinitions {
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub fn #type_name<S: ::m2_syn::Spanned>(span: S) -> #type_name {
-                    let span = span.span();
+                    let span = span.expect_span();
                     #type_name { raw: ::std::boxed::Box::new(#raw_new) }
                 }
 
@@ -259,7 +267,7 @@ impl TokenDefinitions {
                         ::m2_syn::PrettyNode::token(
                             ::std::format!("Token![{}]", <Self as ::m2_syn::Token>::SPELLING),
                             <Self as ::m2_syn::Token>::SPELLING,
-                            ::m2_syn::Spanned::span(self),
+                            ::m2_syn::Spanned::expect_span(self),
                         )
                     }
                 }
@@ -280,7 +288,10 @@ impl TokenDefinitions {
                                 node.identity(),
                             ));
                         }
-                        Ok(#type_name(node.span()))
+                        let span = node.expect_span();
+                        Ok(#type_name {
+                            raw: ::std::boxed::Box::new(#raw_from_span),
+                        })
                     }
                 }
             }
@@ -438,7 +449,7 @@ fn expand_delimiters() -> TokenStream {
             #[doc(hidden)]
             #[allow(non_snake_case)]
             pub fn #name<S: Spanned>(span: S) -> #name {
-                let span = span.span();
+                let span = span.expect_span();
                 <#name as DelimiterToken>::new(DoubleSpan::new(span.clone(), span))
             }
 

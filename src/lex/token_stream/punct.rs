@@ -1,7 +1,6 @@
-use std::fmt::{Display, Formatter, Result};
 use std::sync::Arc;
 
-use crate::{Span, Spanned};
+use crate::{Source, Span, Spanned};
 
 use super::{Lex, TokenStream, TokenTree};
 
@@ -12,41 +11,33 @@ pub struct Punct {
 }
 
 impl Punct {
-    /// Creates punctuation whose spelling is already available through its span.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `span` has no source backing.
+    /// Creates punctuation from its source span.
     pub fn from_span(span: Span) -> Self {
-        assert!(
-            span.text().is_some(),
-            "punctuation spans must name source text"
-        );
         Self { span }
     }
 
     /// Creates punctuation with its source spelling and span.
     pub fn new(text: impl Into<Arc<str>>, span: Span) -> Self {
-        Self {
-            span: span.with_text(text),
-        }
+        let text = text.into();
+        let span = if span.text() == Some(text.as_ref()) {
+            span
+        } else {
+            let source = Source::with_file(span.file(), text);
+            let len = source.text().len();
+            Span::ranged(source, 0..len)
+        };
+        Self { span }
     }
 
     /// Returns the punctuation spelling.
     ///
     /// # Panics
     ///
-    /// Panics if this token's invariant that its span is source-backed was violated.
+    /// Panics when `sources` cannot resolve this token's span.
     pub fn text(&self) -> &str {
         self.span
             .text()
-            .expect("punctuation tokens must have source-backed spans")
-    }
-}
-
-impl Display for Punct {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
-        formatter.write_str(self.text())
+            .expect("punctuation spans must resolve to source text")
     }
 }
 

@@ -96,7 +96,7 @@ fn quote_keeps_punctuation_fragments_lexically_separate() {
 }
 
 #[test]
-fn source_backings_participate_in_span_equality_and_hashing() {
+fn source_identities_participate_in_span_equality_and_hashing() {
     let first = lex_str("a").unwrap().span();
     let second = lex_str("b").unwrap().span();
     let same_text_but_distinct_source = lex_str("a").unwrap().span();

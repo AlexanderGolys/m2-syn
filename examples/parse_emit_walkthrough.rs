@@ -1,6 +1,6 @@
 use m2_syn::{
-    IdentToken, Parse, ParseStream, Span, Spanned, ToTokens, TokenParseError, TokenStream,
-    TokenTree, parse1, quote_m2,
+    IdentToken, Lex, Parse, ParseStream, Span, Spanned, TokenParseError, TokenStream, TokenTree,
+    parse2, quote_m2,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +27,7 @@ impl Parse for Name {
     }
 }
 
-impl ToTokens for Name {
+impl Lex for Name {
     fn to_tokens(&self, output: &mut TokenStream) {
         self.0.to_tokens(output);
     }
@@ -50,7 +50,7 @@ impl Parse for Addition {
     }
 }
 
-impl ToTokens for Addition {
+impl Lex for Addition {
     fn to_tokens(&self, output: &mut TokenStream) {
         output.extend(self.left.to_token_stream());
         output.extend(self.operator.to_token_stream());
@@ -62,14 +62,14 @@ fn main() -> Result<(), TokenParseError> {
     let quoted = quote_m2!(left + right);
     println!("1. quote_m2! produced:\n{quoted:#?}\n");
 
-    let parsed: Addition = parse1(quoted)?;
+    let parsed: Addition = parse2(quoted)?;
     println!("2. Parse produced:\n{parsed:#?}\n");
 
     let emitted = parsed.to_token_stream();
-    println!("3. ToTokens produced:\n{emitted:#?}\n");
+    println!("3. Lex produced:\n{emitted:#?}\n");
     println!("4. Display merged those tokens as: {emitted}");
 
-    let reparsed: Addition = parse1(emitted)?;
+    let reparsed: Addition = parse2(emitted)?;
     assert_eq!(reparsed, parsed);
 
     Ok(())

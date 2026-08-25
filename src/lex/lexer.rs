@@ -3,62 +3,140 @@
 //! This module owns byte classification, maximal munch, delimiter balancing,
 //! and top-level cell splitting. Its output uses only the shared raw atoms from
 //! `token_stream`; it never constructs a second lexer-specific token model.
-//! The private byte cursor provides arbitrary finite lookahead while pulling
-//! the underlying iterator lazily.
+//! Every lexical atom slices one shared, validated source allocation through
+//! its span; token nodes never retain copied spellings.
 
-use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::sync::Arc;
 
-use crate::nodes::{
-    GENERATED_KEYWORD_SPELLINGS, GENERATED_OPERATOR_SPELLINGS,
-    GENERATED_POSTFIX_OPERATOR_SPELLINGS, GENERATED_PUNCTUATION_SPELLINGS,
-};
-use crate::token_stream::delim::Delimiter;
 use crate::{
-    CellBlock, CellStream, DelimiterKind, Group, IdentToken, Literal, LiteralKind, Punct, SourceId,
-    Span, Spanned, TextPoint, TextRange, TokenStream, TokenTree, Trivia, TriviaKind,
+    Delimiter, DelimiterKind, DoubleSpan, EocToken, GENERATED_OPERATOR_SPELLINGS,
+    GENERATED_POSTFIX_OPERATOR_SPELLINGS, GENERATED_PUNCTUATION_SPELLINGS,
+    GENERATED_WORD_TOKEN_SPELLINGS, IdentToken, LiteralKind, LiteralToken, Offset, Punct,
+    Recovered, Span, Spanned, TokenGroup, TokenStream, TokenTree, Trivia, TriviaKind,
 };
 
 const MAX_GROUP_DEPTH: usize = 256;
 
 /// Collapses an explicitly `Core$`-qualified identifier back to its bare
-/// spelling when that spelling is one of the generated keywords, matching
-/// M2's `Core$if` / `if` equivalence.
-pub(crate) fn canonical_keyword_spelling(spelling: &str) -> &str {
-    let Some(keyword) = spelling.strip_prefix("Core$") else {
+/// spelling when that spelling is one of the hardcoded word-token aliases.
+pub(crate) fn canonical_word_spelling(spelling: &str) -> &str {
+    let Some(word) = spelling.strip_prefix("Core$") else {
         return spelling;
     };
-    if GENERATED_KEYWORD_SPELLINGS.contains(&keyword) {
-        keyword
+    if GENERATED_WORD_TOKEN_SPELLINGS.contains(&word) {
+        word
     } else {
         spelling
     }
 }
 
+#[doc(hidden)]
+pub fn __qualified_identifier_spans(spelling: &str, span: &Span) -> (Option<Span>, Option<Span>) {
+    let components = spelling.match_indices('$').collect::<Vec<_>>();
+    let subspan = |start: usize, end: usize| span.subspan(start, end);
+    match components.as_slice() {
+        [(separator, _)] => {
+            let left = &spelling[..*separator];
+            let right_start = separator + 1;
+            let right = &spelling[right_start..];
+            if is_bare_symbol_name(left) && is_bare_symbol_name(right) {
+                (Some(subspan(0, *separator)), None)
+            } else if is_bare_symbol_name(left) && is_decimal_index(right) {
+                (None, Some(subspan(right_start, spelling.len())))
+            } else {
+                (None, None)
+            }
+        }
+        [(package_separator, _), (index_separator, _)] => {
+            let package = &spelling[..*package_separator];
+            let name_start = package_separator + 1;
+            let name = &spelling[name_start..*index_separator];
+            let index_start = index_separator + 1;
+            let index = &spelling[index_start..];
+            if is_bare_symbol_name(package) && is_bare_symbol_name(name) && is_decimal_index(index)
+            {
+                (
+                    Some(subspan(0, *package_separator)),
+                    Some(subspan(index_start, spelling.len())),
+                )
+            } else {
+                (None, None)
+            }
+        }
+        _ => (None, None),
+    }
+}
+
+fn is_bare_symbol_name(spelling: &str) -> bool {
+    let Some(first) = spelling.as_bytes().first().copied() else {
+        return false;
+    };
+    is_identifier_start(first)
+        && spelling
+            .as_bytes()
+            .iter()
+            .copied()
+            .all(|byte| byte != b'$' && is_identifier_continue(byte))
+}
+
+fn is_decimal_index(spelling: &str) -> bool {
+    !spelling.is_empty() && spelling.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// The class of a tokenization failure.
 pub enum LexErrorKind {
+    /// A byte cannot begin any M2 token.
     InvalidCharacter,
+    /// A string contains an invalid escape sequence.
     InvalidEscape,
+    /// A numeric spelling is malformed.
     InvalidNumber,
+    /// The byte input is not valid UTF-8.
     InvalidUtf8,
+    /// Delimiter nesting exceeded the defensive parser limit.
     NestingLimitExceeded,
+    /// A closing delimiter has no matching opener.
     UnexpectedClosingDelimiter,
+    /// Input ended before a delimited group closed.
     UnterminatedGroup,
+    /// Input ended inside a string literal.
     UnterminatedString,
+    /// Input ended inside a raw string literal.
     UnterminatedRawString,
+    /// Input ended inside a block comment.
     UnterminatedBlockComment,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Spanned)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Spanned)]
+/// A tokenization failure and the source span that caused it.
 pub struct LexError {
     kind: LexErrorKind,
+    delimiter: Option<DelimiterKind>,
     span: Span,
 }
 
 impl LexError {
-    pub fn kind(self) -> LexErrorKind {
+    /// Returns the error class.
+    pub fn kind(&self) -> LexErrorKind {
         self.kind
+    }
+
+    /// Returns the unclosed expression family for a missing group closer.
+    pub fn unclosed_expression(&self) -> Option<&'static str> {
+        self.delimiter.map(DelimiterKind::expression_name)
+    }
+
+    /// Returns the token spelling required to complete this error.
+    pub fn expected(&self) -> Option<&'static str> {
+        self.delimiter.map(DelimiterKind::closing)
+    }
+
+    /// Returns a readable description of what terminated this error.
+    pub fn found(&self) -> Option<&'static str> {
+        self.delimiter.map(|_| "end of input")
     }
 }
 
@@ -71,7 +149,17 @@ impl Display for LexError {
             LexErrorKind::InvalidUtf8 => "source is not valid UTF-8",
             LexErrorKind::NestingLimitExceeded => "delimiter nesting limit exceeded",
             LexErrorKind::UnexpectedClosingDelimiter => "unexpected closing delimiter",
-            LexErrorKind::UnterminatedGroup => "unterminated delimited group",
+            LexErrorKind::UnterminatedGroup => {
+                if let Some(delimiter) = self.delimiter {
+                    return write!(
+                        formatter,
+                        "unclosed {}: expected `{}`, found end of input",
+                        delimiter.expression_name(),
+                        delimiter.closing(),
+                    );
+                }
+                "unterminated delimited group"
+            }
             LexErrorKind::UnterminatedString => "unterminated string literal",
             LexErrorKind::UnterminatedRawString => "unterminated raw string literal",
             LexErrorKind::UnterminatedBlockComment => "unterminated block comment",
@@ -82,123 +170,159 @@ impl Display for LexError {
 
 impl Error for LexError {}
 
-/// Lexes bytes into source-spanned cell blocks containing token trees.
+/// Lexes bytes into one source-spanned stream of token trees.
 ///
 /// Malformed source is always reported as [`LexError`]; byte contents do not
 /// cause this function to panic. A user-provided iterator may still panic from
 /// its own [`Iterator::next`] implementation.
-pub fn lex<I>(bytes: I, source_id: SourceId) -> Result<CellStream, LexError>
+///
+/// # Errors
+///
+/// Returns [`LexError`] for malformed UTF-8, literals, comments, delimiters,
+/// or characters that Macaulay2 cannot tokenize.
+pub fn lex<I>(bytes: I) -> Result<TokenStream, LexError>
 where
     I: IntoIterator<Item = u8>,
 {
-    NativeLexer::new(bytes.into_iter(), source_id).lex()
+    lexer_from_bytes(bytes)?.lex(true)
+}
+
+/// Lexes bytes while retaining groups whose closing delimiter is missing.
+///
+/// Every missing closer becomes a zero-width closing boundary at end of input.
+/// The corresponding [`LexErrorKind::UnterminatedGroup`] diagnostic spans from
+/// that group's opening delimiter through end of input. Other lexical failures
+/// remain fatal.
+///
+/// # Errors
+///
+/// Returns [`LexError`] for malformed UTF-8, literals, comments, unmatched
+/// closing delimiters, invalid characters, or excessive delimiter nesting.
+pub fn lex_recovering<I>(bytes: I) -> Result<Recovered<TokenStream, LexError>, LexError>
+where
+    I: IntoIterator<Item = u8>,
+{
+    lexer_from_bytes(bytes)?.lex_recovering(true)
 }
 
 /// Lexes M2 source text into its source-spanned token tree.
-pub fn lex_str(source: &str, source_id: SourceId) -> Result<CellStream, LexError> {
-    lex(source.bytes(), source_id)
-}
-
-/// A lazy cursor with arbitrary finite lookahead over a byte iterator.
 ///
-/// Looking ahead only pulls enough bytes to answer the requested projection;
-/// advancing removes the first buffered byte. The lexer therefore never needs
-/// to tentatively consume and then push bytes back into its input.
-struct ByteCursor<I>
-where
-    I: Iterator<Item = u8>,
-{
-    iterator: I,
-    lookahead: VecDeque<u8>,
+/// # Errors
+///
+/// Returns [`LexError`] when the source contains malformed lexical syntax.
+pub fn lex_str(source: &str) -> Result<TokenStream, LexError> {
+    NativeLexer::new(Arc::<str>::from(source)).lex(true)
 }
 
-impl<I> ByteCursor<I>
+/// Lexes source text while retaining the interior of unclosed groups.
+///
+/// # Errors
+///
+/// Returns [`LexError`] for malformed lexical syntax other than missing group
+/// closers, which are returned in [`Recovered::diagnostics`].
+pub fn lex_str_recovering(source: &str) -> Result<Recovered<TokenStream, LexError>, LexError> {
+    NativeLexer::new(Arc::<str>::from(source)).lex_recovering(true)
+}
+
+/// Lexes one statically spelled fragment emitted by [`crate::quote_m2!`].
+///
+/// Procedural-macro input arrives as Rust token trees, so the macro first joins
+/// each uninterrupted static run into M2 source text. Sending that text through
+/// the real lexer keeps quoted literals, identifier rules, and maximal
+/// punctuation exactly aligned with ordinary source parsing.
+///
+/// # Panics
+///
+/// Panics when a static fragment accepted by Rust's tokenization is not valid
+/// M2 lexical syntax. Interpolate a pre-built [`TokenStream`] when its source
+/// spelling cannot be represented directly in Rust macro input.
+#[doc(hidden)]
+pub fn __quote_fragment(source: &str) -> TokenStream {
+    NativeLexer::new(Arc::<str>::from(source))
+        .lex(false)
+        .unwrap_or_else(|error| panic!("invalid static M2 quote fragment: {error}"))
+}
+
+fn lexer_from_bytes<I>(bytes: I) -> Result<NativeLexer, LexError>
 where
-    I: Iterator<Item = u8>,
+    I: IntoIterator<Item = u8>,
 {
-    fn new(iterator: I) -> Self {
+    let bytes = bytes.into_iter().collect::<Vec<_>>();
+    let len = bytes.len();
+    let source = String::from_utf8(bytes).map_err(|_| LexError {
+        kind: LexErrorKind::InvalidUtf8,
+        delimiter: None,
+        span: Span::new(0, len),
+    })?;
+    Ok(NativeLexer::new(Arc::<str>::from(source)))
+}
+
+struct NativeLexer {
+    source: Arc<str>,
+    source_span: Span,
+    offset: Offset,
+}
+
+impl NativeLexer {
+    fn new(source: Arc<str>) -> Self {
+        let source_span = Span::source(source.clone());
         Self {
-            iterator,
-            lookahead: VecDeque::new(),
+            source,
+            source_span,
+            offset: 0,
         }
     }
 
-    fn peek(&mut self, distance: usize) -> Option<u8> {
-        while self.lookahead.len() <= distance {
-            self.lookahead.push_back(self.iterator.next()?);
-        }
-        self.lookahead.get(distance).copied()
-    }
-}
-
-impl<I> Iterator for ByteCursor<I>
-where
-    I: Iterator<Item = u8>,
-{
-    type Item = u8;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.lookahead.pop_front().or_else(|| self.iterator.next())
-    }
-}
-
-struct NativeLexer<I: Iterator<Item = u8>> {
-    input: ByteCursor<I>,
-    source_id: SourceId,
-    point: TextPoint,
-}
-
-impl<I> NativeLexer<I>
-where
-    I: Iterator<Item = u8>,
-{
-    fn new(bytes: I, source_id: SourceId) -> Self {
-        Self {
-            input: ByteCursor::new(bytes),
-            source_id,
-            point: TextPoint::new(0, 0, 0),
+    fn lex(self, terminate_final_cell: bool) -> Result<TokenStream, LexError> {
+        let recovered = self.lex_recovering(terminate_final_cell)?;
+        match recovered.diagnostics.into_iter().next() {
+            Some(error) => Err(error),
+            None => Ok(recovered.value),
         }
     }
 
-    fn lex(mut self) -> Result<CellStream, LexError> {
+    fn lex_recovering(
+        mut self,
+        terminate_final_cell: bool,
+    ) -> Result<Recovered<TokenStream, LexError>, LexError> {
         let mut output = TokenStream::new();
-        let mut cells = Vec::new();
-        let mut cell_start = self.point;
         let mut groups = Vec::<OpenGroup>::new();
+        // A quote specifier takes the following token literally, so that token
+        // is not interpreted as structure. This is the one grammar fact the
+        // lexer needs: without it `symbol (` opens a group and `symbol ;` ends
+        // a cell, neither of which M2 does.
+        let mut quote_next = false;
         loop {
-            let Some(first) = self.input.peek(0) else {
-                return match groups.last() {
-                    Some(group) => {
-                        Err(self.error(LexErrorKind::UnterminatedGroup, group.opening_start))
-                    }
-                    None => {
-                        if !output.is_empty() {
-                            let closing = self.span(self.point, self.point);
-                            self.finish_cell(
-                                &mut output,
-                                &mut cells,
-                                &mut cell_start,
-                                DelimiterKind::Empty,
-                                closing,
-                            );
-                        }
-                        Ok(CellStream::new(cells, self.source_id))
-                    }
-                };
+            let Some(first) = self.peek(0) else {
+                let mut diagnostics = Vec::with_capacity(groups.len());
+                while let Some(group) = groups.pop() {
+                    diagnostics.push(LexError {
+                        kind: LexErrorKind::UnterminatedGroup,
+                        delimiter: Some(group.kind),
+                        span: self.span_from(group.opening_start),
+                    });
+                    let contents = std::mem::replace(&mut output, group.parent);
+                    output.extend([TokenGroup::new(
+                        Delimiter::new(
+                            group.kind,
+                            DoubleSpan::unclosed(group.opening, self.offset),
+                        ),
+                        contents,
+                    )]);
+                }
+                if terminate_final_cell {
+                    terminate_cell(&mut output, self.offset, false);
+                }
+                return Ok(Recovered::new(output, diagnostics));
             };
 
             if first == b'\n' || (first == b'\r' && self.byte_after_current() == Some(b'\n')) {
-                let top_level = groups.is_empty();
                 self.lex_line_break(&mut output)?;
-                if top_level && newline_ends_cell(&output) {
-                    let closing = self.span(self.point, self.point);
-                    self.finish_cell(
-                        &mut output,
-                        &mut cells,
-                        &mut cell_start,
-                        DelimiterKind::Empty,
-                        closing,
-                    );
+                if groups.is_empty()
+                    && current_cell_has_syntax(&output)
+                    && newline_ends_cell(&output)
+                {
+                    terminate_cell(&mut output, self.offset, false);
                 }
             } else if first == b'\r' {
                 self.lex_carriage_return(&mut output)?;
@@ -206,8 +330,11 @@ where
                 self.lex_whitespace(&mut output)?;
             } else if let Some(width) = self.math_operator_width() {
                 self.lex_math_operator(width, &mut output)?;
+                quote_next = false;
             } else if is_identifier_start(first) {
+                let quoted = std::mem::take(&mut quote_next);
                 self.lex_identifier(&mut output)?;
+                quote_next = !quoted && last_token_quotes_next(&output);
             } else if first.is_ascii_digit()
                 || (first == b'.'
                     && self
@@ -215,55 +342,52 @@ where
                         .is_some_and(|byte| byte.is_ascii_digit()))
             {
                 self.lex_number(&mut output)?;
+                quote_next = false;
             } else if first == b'"' {
                 self.lex_string(&mut output)?;
-            } else if let Some(punctuation) = self.take_punctuation_match() {
-                match punctuation.kind {
-                    PunctuationKind::Ordinary => {
-                        let ends_cell = groups.is_empty() && punctuation.bytes.as_slice() == b";";
-                        if ends_cell {
-                            let closing_start = self.point;
-                            self.commit_bytes(&punctuation.bytes);
-                            let closing = self.span_from(closing_start);
-                            self.finish_cell(
-                                &mut output,
-                                &mut cells,
-                                &mut cell_start,
-                                DelimiterKind::Semicolon,
-                                closing,
-                            );
-                        } else {
-                            self.push_punctuation(punctuation.bytes, &mut output)?;
+                quote_next = false;
+            } else if let Some(fixed) = self.match_fixed() {
+                let quoted = std::mem::take(&mut quote_next);
+                match fixed.kind {
+                    // A quoted bracket is an ordinary token, not a group
+                    // boundary; the parser reads it as the quoted symbol.
+                    FixedKind::Open(_) | FixedKind::Close(_) if quoted => {
+                        self.lex_punctuation(fixed.len, &mut output)?;
+                    }
+                    FixedKind::Punctuation => {
+                        self.lex_punctuation(fixed.len, &mut output)?;
+                        if !quoted && groups.is_empty() && first == b';' {
+                            terminate_cell(&mut output, self.offset, true);
                         }
                     }
-                    PunctuationKind::LineComment => {
-                        self.lex_line_comment(punctuation.bytes, &mut output)?;
+                    // A comment does not consume the pending quote: M2 reads
+                    // `symbol -- note⏎x` as the quoted `x`.
+                    FixedKind::LineComment => {
+                        self.lex_line_comment(fixed.len, &mut output)?;
+                        quote_next = quoted;
                     }
-                    PunctuationKind::BlockComment => {
-                        let top_level = groups.is_empty();
-                        let start_line = self.point.line;
-                        self.lex_block_comment(punctuation.bytes, &mut output)?;
-                        if top_level && self.point.line != start_line && newline_ends_cell(&output)
+                    FixedKind::BlockComment => {
+                        self.lex_block_comment(fixed.len, &mut output)?;
+                        quote_next = quoted;
+                        if groups.is_empty()
+                            && output.last().is_some_and(
+                                |token| matches!(token, TokenTree::Trivia(trivia) if trivia.contains_line_break()),
+                            )
+                            && current_cell_has_syntax(&output)
+                            && newline_ends_cell(&output)
                         {
-                            let closing = self.span(self.point, self.point);
-                            self.finish_cell(
-                                &mut output,
-                                &mut cells,
-                                &mut cell_start,
-                                DelimiterKind::Empty,
-                                closing,
-                            );
+                            terminate_cell(&mut output, self.offset, false);
                         }
                     }
-                    PunctuationKind::RawString => {
-                        self.lex_raw_string(punctuation.bytes, &mut output)?;
+                    FixedKind::RawString => {
+                        self.lex_raw_string(fixed.len, &mut output)?;
                     }
-                    PunctuationKind::Open(kind) => {
+                    FixedKind::Open(kind) => {
                         if groups.len() == MAX_GROUP_DEPTH {
-                            return Err(self.error(LexErrorKind::NestingLimitExceeded, self.point));
+                            return Err(self.error(LexErrorKind::NestingLimitExceeded, self.offset));
                         }
-                        let opening_start = self.point;
-                        self.commit_bytes(&punctuation.bytes);
+                        let opening_start = self.offset;
+                        self.take_exact(fixed.len, opening_start)?;
                         let opening = self.span_from(opening_start);
                         groups.push(OpenGroup {
                             kind,
@@ -272,9 +396,9 @@ where
                             parent: std::mem::take(&mut output),
                         });
                     }
-                    PunctuationKind::Close(kind) => {
-                        let closing_start = self.point;
-                        self.commit_bytes(&punctuation.bytes);
+                    FixedKind::Close(kind) => {
+                        let closing_start = self.offset;
+                        self.take_exact(fixed.len, closing_start)?;
                         let closing = self.span_from(closing_start);
                         let Some(group) = groups.pop() else {
                             return Err(
@@ -287,14 +411,14 @@ where
                             );
                         }
                         let contents = std::mem::replace(&mut output, group.parent);
-                        output.push_group(Group::new(
-                            Delimiter::new(kind, group.opening.join(closing)),
+                        output.extend([TokenGroup::new(
+                            Delimiter::new(kind, DoubleSpan::new(group.opening, closing)),
                             contents,
-                        ));
+                        )]);
                     }
                 }
             } else {
-                let start = self.point;
+                let start = self.offset;
                 self.next();
                 return Err(self.error(LexErrorKind::InvalidCharacter, start));
             }
@@ -302,51 +426,48 @@ where
     }
 
     fn lex_line_break(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
-        let start = self.point;
+        let start = self.offset;
         let first = self.next_or_error(LexErrorKind::InvalidCharacter, start)?;
         let mut bytes = vec![first];
-        if first == b'\r' && self.input.peek(0) == Some(b'\n') {
+        if first == b'\r' && self.peek(0) == Some(b'\n') {
             bytes.push(self.next_or_error(LexErrorKind::InvalidCharacter, start)?);
         }
-        let text = self.text(bytes, start)?;
+        let _ = bytes;
         let span = self.span_from(start);
-        output.push(TokenTree::Trivia(Trivia::new(
+        output.extend([TokenTree::Trivia(Trivia::from_span(
             TriviaKind::Whitespace,
-            text,
             span,
-        )));
+        ))]);
         Ok(())
     }
 
     fn lex_carriage_return(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
-        let start = self.point;
+        let start = self.offset;
         let byte = self.next_or_error(LexErrorKind::InvalidCharacter, start)?;
-        let text = self.text(vec![byte], start)?;
-        output.push(TokenTree::Trivia(Trivia::new(
+        let _ = byte;
+        output.extend([TokenTree::Trivia(Trivia::from_span(
             TriviaKind::Whitespace,
-            text,
             self.span_from(start),
-        )));
+        ))]);
         Ok(())
     }
 
     fn lex_whitespace(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
-        let start = self.point;
+        let start = self.offset;
         let bytes = self.take_while(|byte| matches!(byte, b' ' | b'\t'));
-        let text = self.text(bytes, start)?;
-        output.push(TokenTree::Trivia(Trivia::new(
+        let _ = bytes;
+        output.extend([TokenTree::Trivia(Trivia::from_span(
             TriviaKind::Whitespace,
-            text,
             self.span_from(start),
-        )));
+        ))]);
         Ok(())
     }
 
     fn lex_identifier(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
-        let start = self.point;
+        let start = self.offset;
         let mut bytes = vec![self.next_or_error(LexErrorKind::InvalidUtf8, start)?];
         loop {
-            let Some(byte) = self.input.peek(0) else {
+            let Some(byte) = self.peek(0) else {
                 break;
             };
             if !is_identifier_continue(byte) || self.math_operator_width().is_some() {
@@ -354,20 +475,19 @@ where
             }
             bytes.push(self.next_or_error(LexErrorKind::InvalidUtf8, start)?);
         }
-        let text = self.text(bytes, start)?;
-        output.push(TokenTree::Ident(IdentToken::new(
-            text,
+        let _ = bytes;
+        output.extend([TokenTree::Ident(IdentToken::from_span(
             self.span_from(start),
-        )));
+        ))]);
         Ok(())
     }
 
     fn lex_number(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
-        let start = self.point;
+        let start = self.offset;
         let mut bytes = Vec::new();
         let mut decimal = true;
 
-        if self.input.peek(0) == Some(b'0') {
+        if self.peek(0) == Some(b'0') {
             bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
             if let Some(radix) = self.number_radix() {
                 decimal = false;
@@ -380,28 +500,28 @@ where
             bytes.extend(self.take_while(|byte| byte.is_ascii_digit()));
         }
 
-        let next = self.input.peek(0);
+        let next = self.peek(0);
         let begins_float = decimal
             && (next == Some(b'.') && self.byte_after_current() != Some(b'.')
                 || matches!(next, Some(b'p' | b'e' | b'E')));
         let kind = if begins_float {
-            if self.input.peek(0) == Some(b'.') {
+            if self.peek(0) == Some(b'.') {
                 bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
                 bytes.extend(self.take_while(|byte| byte.is_ascii_digit()));
             }
-            if self.input.peek(0) == Some(b'p') {
+            if self.peek(0) == Some(b'p') {
                 bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
-                if !self.input.peek(0).is_some_and(|byte| byte.is_ascii_digit()) {
+                if !self.peek(0).is_some_and(|byte| byte.is_ascii_digit()) {
                     return Err(self.error(LexErrorKind::InvalidNumber, start));
                 }
                 bytes.extend(self.take_while(|byte| byte.is_ascii_digit()));
             }
-            if matches!(self.input.peek(0), Some(b'e' | b'E')) {
+            if matches!(self.peek(0), Some(b'e' | b'E')) {
                 bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
-                if matches!(self.input.peek(0), Some(b'+' | b'-')) {
+                if matches!(self.peek(0), Some(b'+' | b'-')) {
                     bytes.push(self.next_or_error(LexErrorKind::InvalidNumber, start)?);
                 }
-                if !self.input.peek(0).is_some_and(|byte| byte.is_ascii_digit()) {
+                if !self.peek(0).is_some_and(|byte| byte.is_ascii_digit()) {
                     return Err(self.error(LexErrorKind::InvalidNumber, start));
                 }
                 bytes.extend(self.take_while(|byte| byte.is_ascii_digit()));
@@ -411,18 +531,17 @@ where
             LiteralKind::Integer
         };
 
-        let text = self.text(bytes, start)?;
-        output.push(TokenTree::Literal(Literal::new(
+        let _ = bytes;
+        output.extend([TokenTree::Literal(LiteralToken::from_span(
             kind,
-            text,
             self.span_from(start),
-        )));
+        ))]);
         Ok(())
     }
 
     fn number_radix(&mut self) -> Option<NumberRadix> {
-        let marker = self.input.peek(0)?;
-        let digit = self.input.peek(1);
+        let marker = self.peek(0)?;
+        let digit = self.peek(1);
         match marker {
             b'b' | b'B' if digit.is_some_and(|byte| NumberRadix::Binary.is_digit(byte)) => {
                 Some(NumberRadix::Binary)
@@ -438,26 +557,25 @@ where
     }
 
     fn lex_string(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
-        let start = self.point;
+        let start = self.offset;
         let mut bytes = vec![self.next_or_error(LexErrorKind::UnterminatedString, start)?];
 
         loop {
-            match self.input.peek(0) {
+            match self.peek(0) {
                 None => return Err(self.error(LexErrorKind::UnterminatedString, start)),
                 Some(b'"') => {
                     bytes.push(self.next_or_error(LexErrorKind::UnterminatedString, start)?);
-                    let text = self.text(bytes, start)?;
-                    output.push(TokenTree::Literal(Literal::new(
+                    let _ = bytes;
+                    output.extend([TokenTree::Literal(LiteralToken::from_span(
                         LiteralKind::String,
-                        text,
                         self.span_from(start),
-                    )));
+                    ))]);
                     return Ok(());
                 }
                 Some(b'\\') => {
-                    let escape_start = self.point;
+                    let escape_start = self.offset;
                     bytes.push(self.next_or_error(LexErrorKind::UnterminatedString, start)?);
-                    let Some(escaped) = self.input.peek(0) else {
+                    let Some(escaped) = self.peek(0) else {
                         return Err(self.error(LexErrorKind::UnterminatedString, start));
                     };
                     bytes.push(self.next_or_error(LexErrorKind::UnterminatedString, start)?);
@@ -466,7 +584,7 @@ where
                         | b'\\' => {}
                         b'0'..=b'7' => {
                             for _ in 0..2 {
-                                if !matches!(self.input.peek(0), Some(b'0'..=b'7')) {
+                                if !matches!(self.peek(0), Some(b'0'..=b'7')) {
                                     break;
                                 }
                                 bytes.push(
@@ -488,14 +606,10 @@ where
         &mut self,
         bytes: &mut Vec<u8>,
         digits: usize,
-        start: TextPoint,
+        start: Offset,
     ) -> Result<(), LexError> {
         for _ in 0..digits {
-            if !self
-                .input
-                .peek(0)
-                .is_some_and(|byte| byte.is_ascii_hexdigit())
-            {
+            if !self.peek(0).is_some_and(|byte| byte.is_ascii_hexdigit()) {
                 return Err(self.error(LexErrorKind::InvalidEscape, start));
             }
             bytes.push(self.next_or_error(LexErrorKind::InvalidEscape, start)?);
@@ -505,32 +619,30 @@ where
 
     fn lex_raw_string(
         &mut self,
-        opener: Vec<u8>,
+        opener_len: usize,
         output: &mut TokenStream,
     ) -> Result<(), LexError> {
-        let start = self.point;
-        self.commit_bytes(&opener);
-        let mut bytes = opener;
+        let start = self.offset;
+        let mut bytes = self.take_exact(opener_len, start)?;
 
         loop {
-            if self.input.peek(0).is_none() {
+            if self.peek(0).is_none() {
                 return Err(self.error(LexErrorKind::UnterminatedRawString, start));
             }
-            if self.input.peek(0) == Some(b'/') {
+            if self.peek(0) == Some(b'/') {
                 match self.slash_run_len() {
                     3 => {
                         bytes.extend(self.take_exact(3, start)?);
-                        let text = self.text(bytes, start)?;
-                        output.push(TokenTree::Literal(Literal::new(
+                        let _ = bytes;
+                        output.extend([TokenTree::Literal(LiteralToken::from_span(
                             LiteralKind::RawString,
-                            text,
                             self.span_from(start),
-                        )));
+                        ))]);
                         return Ok(());
                     }
                     0 => return Err(self.error(LexErrorKind::UnterminatedRawString, start)),
                     1 => {
-                        bytes.push(self.next_or_error(LexErrorKind::UnterminatedRawString, start)?)
+                        bytes.push(self.next_or_error(LexErrorKind::UnterminatedRawString, start)?);
                     }
                     _ => bytes.extend(self.take_exact(2, start)?),
                 }
@@ -542,112 +654,71 @@ where
 
     fn lex_line_comment(
         &mut self,
-        opener: Vec<u8>,
+        opener_len: usize,
         output: &mut TokenStream,
     ) -> Result<(), LexError> {
-        let start = self.point;
-        self.commit_bytes(&opener);
-        let mut bytes = opener;
+        let start = self.offset;
+        let mut bytes = self.take_exact(opener_len, start)?;
         loop {
-            match self.input.peek(0) {
+            match self.peek(0) {
                 None | Some(b'\n') => break,
                 Some(b'\r') if self.byte_after_current() == Some(b'\n') => break,
                 Some(_) => bytes.push(self.next_or_error(LexErrorKind::InvalidCharacter, start)?),
             }
         }
-        let text = self.text(bytes, start)?;
-        output.push(TokenTree::Trivia(Trivia::new(
+        let _ = bytes;
+        output.extend([TokenTree::Trivia(Trivia::from_span(
             TriviaKind::LineComment,
-            text,
             self.span_from(start),
-        )));
+        ))]);
         Ok(())
     }
 
     fn lex_block_comment(
         &mut self,
-        opener: Vec<u8>,
+        opener_len: usize,
         output: &mut TokenStream,
     ) -> Result<(), LexError> {
-        let start = self.point;
-        self.commit_bytes(&opener);
-        let mut bytes = opener;
+        let start = self.offset;
+        let mut bytes = self.take_exact(opener_len, start)?;
         loop {
-            if self.input.peek(0).is_none() {
+            if self.peek(0).is_none() {
                 return Err(self.error(LexErrorKind::UnterminatedBlockComment, start));
             }
-            if self.input.peek(0) == Some(b'*') && self.byte_after_current() == Some(b'-') {
+            if self.peek(0) == Some(b'*') && self.byte_after_current() == Some(b'-') {
                 bytes.extend(self.take_exact(2, start)?);
-                let text = self.text(bytes, start)?;
-                output.push(TokenTree::Trivia(Trivia::new(
+                let _ = bytes;
+                output.extend([TokenTree::Trivia(Trivia::from_span(
                     TriviaKind::BlockComment,
-                    text,
                     self.span_from(start),
-                )));
+                ))]);
                 return Ok(());
             }
             bytes.push(self.next_or_error(LexErrorKind::UnterminatedBlockComment, start)?);
         }
     }
 
-    fn take_punctuation_match(&mut self) -> Option<PunctuationMatch> {
-        let mut candidates = Vec::new();
-        for (spelling, kind) in [
-            ("///", PunctuationKind::RawString),
-            ("--", PunctuationKind::LineComment),
-            ("-*", PunctuationKind::BlockComment),
-            ("(", PunctuationKind::Open(DelimiterKind::Parenthesis)),
-            (")", PunctuationKind::Close(DelimiterKind::Parenthesis)),
-            ("[", PunctuationKind::Open(DelimiterKind::Bracket)),
-            ("]", PunctuationKind::Close(DelimiterKind::Bracket)),
-            ("{", PunctuationKind::Open(DelimiterKind::Brace)),
-            ("}", PunctuationKind::Close(DelimiterKind::Brace)),
-            ("<|", PunctuationKind::Open(DelimiterKind::AngleBar)),
-            ("|>", PunctuationKind::Close(DelimiterKind::AngleBar)),
-        ] {
-            candidates.push((spelling.as_bytes(), kind));
-        }
-        candidates.extend(
-            GENERATED_PUNCTUATION_SPELLINGS
-                .iter()
-                .map(|spelling| (spelling.as_bytes(), PunctuationKind::Ordinary)),
-        );
-
-        let mut accepted = None;
-        let mut distance = 0;
-        loop {
-            let Some(next) = self.input.peek(distance) else {
-                break;
-            };
-            if !candidates
-                .iter()
-                .any(|(spelling, _)| spelling.get(distance) == Some(&next))
-            {
-                break;
-            }
-            distance += 1;
-            candidates.retain(|(spelling, _)| spelling.get(distance - 1) == Some(&next));
-            for (spelling, kind) in &candidates {
-                if spelling.len() == distance {
-                    accepted = Some((distance, *kind));
-                }
-            }
-        }
-
-        let (accepted_len, kind) = accepted?;
-        let bytes = (0..accepted_len)
-            .map(|_| self.input.next().expect("accepted bytes were buffered"))
-            .collect();
-        Some(PunctuationMatch { bytes, kind })
+    fn match_fixed(&mut self) -> Option<FixedMatch> {
+        fixed_spellings()
+            .filter(|(spelling, _)| {
+                spelling
+                    .bytes()
+                    .enumerate()
+                    .all(|(distance, expected)| self.peek(distance) == Some(expected))
+            })
+            .max_by_key(|(spelling, _)| spelling.len())
+            .map(|(spelling, kind)| FixedMatch {
+                len: spelling.len(),
+                kind,
+            })
     }
 
     fn math_operator_width(&mut self) -> Option<usize> {
-        let first = self.input.peek(0)?;
+        let first = self.peek(0)?;
         if !matches!(first, 0xc2 | 0xc3 | 0xe2) {
             return None;
         }
-        self.input
-            .peek(1)
+        self.peek(1)
             .filter(|second| is_math_operator_pair(first, *second))
             .and_then(|_| utf8_char_width(first))
     }
@@ -657,33 +728,38 @@ where
         width: usize,
         output: &mut TokenStream,
     ) -> Result<(), LexError> {
-        let start = self.point;
-        let mut bytes = self.pull_exact(width, start)?;
-        if self.input.peek(0) == Some(b'=') {
-            bytes.push(self.pull_or_error(LexErrorKind::InvalidUtf8, start)?);
+        let start = self.offset;
+        let mut bytes = self.take_exact(width, start)?;
+        if self.peek(0) == Some(b'=') {
+            bytes.push(self.next_or_error(LexErrorKind::InvalidUtf8, start)?);
         }
-        self.push_punctuation(bytes, output)
+        self.emit_punctuation(bytes, start, output)
     }
 
-    fn push_punctuation(
-        &mut self,
+    fn lex_punctuation(&mut self, len: usize, output: &mut TokenStream) -> Result<(), LexError> {
+        let start = self.offset;
+        let bytes = self.take_exact(len, start)?;
+        self.emit_punctuation(bytes, start, output)
+    }
+
+    fn emit_punctuation(
+        &self,
         bytes: Vec<u8>,
+        start: Offset,
         output: &mut TokenStream,
     ) -> Result<(), LexError> {
-        let start = self.point;
-        let text = self.text(bytes.clone(), start)?;
-        self.commit_bytes(&bytes);
-        output.push(TokenTree::Punct(Punct::new(text, self.span_from(start))));
+        let _ = bytes;
+        output.extend([TokenTree::Punct(Punct::from_span(self.span_from(start)))]);
         Ok(())
     }
 
     fn byte_after_current(&mut self) -> Option<u8> {
-        self.input.peek(1)
+        self.peek(1)
     }
 
     fn slash_run_len(&mut self) -> usize {
         let mut len = 0;
-        while len < 4 && self.input.peek(len) == Some(b'/') {
+        while len < 4 && self.peek(len) == Some(b'/') {
             len += 1;
         }
         len
@@ -691,7 +767,7 @@ where
 
     fn take_while(&mut self, predicate: impl Fn(u8) -> bool) -> Vec<u8> {
         let mut bytes = Vec::new();
-        while self.input.peek(0).is_some_and(&predicate) {
+        while self.peek(0).is_some_and(&predicate) {
             let Some(byte) = self.next() else {
                 break;
             };
@@ -700,7 +776,7 @@ where
         bytes
     }
 
-    fn take_exact(&mut self, len: usize, start: TextPoint) -> Result<Vec<u8>, LexError> {
+    fn take_exact(&mut self, len: usize, start: Offset) -> Result<Vec<u8>, LexError> {
         let mut bytes = Vec::with_capacity(len);
         for _ in 0..len {
             let Some(byte) = self.next() else {
@@ -711,93 +787,37 @@ where
         Ok(bytes)
     }
 
-    fn pull_exact(&mut self, len: usize, start: TextPoint) -> Result<Vec<u8>, LexError> {
-        let mut bytes = Vec::with_capacity(len);
-        for _ in 0..len {
-            let Some(byte) = self.input.next() else {
-                return Err(self.error(LexErrorKind::InvalidUtf8, start));
-            };
-            bytes.push(byte);
-        }
-        Ok(bytes)
-    }
-
     fn next(&mut self) -> Option<u8> {
-        let byte = self.input.next()?;
-        let next = (byte == b'\r').then(|| self.input.peek(0)).flatten();
-        self.advance(byte, next);
+        let byte = self.peek(0)?;
+        self.offset += 1;
         Some(byte)
     }
 
-    fn next_or_error(&mut self, kind: LexErrorKind, start: TextPoint) -> Result<u8, LexError> {
+    fn peek(&self, distance: usize) -> Option<u8> {
+        self.offset
+            .checked_add(distance)
+            .and_then(|offset| self.source.as_bytes().get(offset))
+            .copied()
+    }
+
+    fn next_or_error(&mut self, kind: LexErrorKind, start: Offset) -> Result<u8, LexError> {
         match self.next() {
             Some(byte) => Ok(byte),
             None => Err(self.error(kind, start)),
         }
     }
 
-    fn pull_or_error(&mut self, kind: LexErrorKind, start: TextPoint) -> Result<u8, LexError> {
-        match self.input.next() {
-            Some(byte) => Ok(byte),
-            None => Err(self.error(kind, start)),
-        }
-    }
-
-    fn commit_bytes(&mut self, bytes: &[u8]) {
-        for (index, byte) in bytes.iter().copied().enumerate() {
-            let next = (byte == b'\r')
-                .then(|| bytes.get(index + 1).copied().or_else(|| self.input.peek(0)))
-                .flatten();
-            self.advance(byte, next);
-        }
-    }
-
-    fn advance(&mut self, byte: u8, next: Option<u8>) {
-        self.point.byte = self.point.byte.saturating_add(1);
-        match byte {
-            b'\r' if next == Some(b'\n') => {}
-            b'\n' => {
-                self.point.line = self.point.line.saturating_add(1);
-                self.point.column = 0;
-            }
-            _ => self.point.column = self.point.column.saturating_add(1),
-        }
-    }
-
-    fn text(&self, bytes: Vec<u8>, start: TextPoint) -> Result<String, LexError> {
-        String::from_utf8(bytes).map_err(|_| self.error(LexErrorKind::InvalidUtf8, start))
-    }
-
-    fn error(&self, kind: LexErrorKind, start: TextPoint) -> LexError {
+    fn error(&self, kind: LexErrorKind, start: Offset) -> LexError {
         LexError {
             kind,
+            delimiter: None,
             span: self.span_from(start),
         }
     }
 
-    fn span_from(&self, start: TextPoint) -> Span {
-        self.span(start, self.point)
-    }
-
-    fn span(&self, start: TextPoint, end: TextPoint) -> Span {
-        Span::new(self.source_id, TextRange::new(start, end))
-    }
-
-    fn finish_cell(
-        &self,
-        output: &mut TokenStream,
-        cells: &mut Vec<CellBlock>,
-        cell_start: &mut TextPoint,
-        kind: DelimiterKind,
-        closing: Span,
-    ) {
-        let stream = std::mem::take(output);
-        let opening = self.span(*cell_start, *cell_start);
-        cells.push(CellBlock::new(
-            Delimiter::new(kind, opening.join(closing)),
-            stream,
-        ));
-        *cell_start = self.point;
+    /// The span running from `start` to wherever the cursor has reached.
+    fn span_from(&self, start: Offset) -> Span {
+        self.source_span.subspan(start, self.offset)
     }
 }
 
@@ -815,6 +835,12 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
 
     for tree in stream.iter() {
         let text = match tree {
+            TokenTree::Eoc(_) => {
+                required_clauses.clear();
+                last_text = None;
+                quote_next = false;
+                None
+            }
             TokenTree::Ident(token) => Some(token.text()),
             TokenTree::Punct(token) => Some(token.text()),
             TokenTree::Literal(_) | TokenTree::Group(_) => {
@@ -822,7 +848,7 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
                 last_text = None;
                 None
             }
-            TokenTree::Trivia(_) | TokenTree::Eof(_) => None,
+            TokenTree::Trivia(_) => None,
         };
 
         let Some(text) = text else {
@@ -833,7 +859,7 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
             last_text = None;
             continue;
         }
-        let text = canonical_keyword_spelling(text);
+        let text = canonical_word_spelling(text);
         last_text = Some(text);
         if is_quote_specifier(text) {
             quote_next = true;
@@ -870,6 +896,72 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
     }
     !GENERATED_OPERATOR_SPELLINGS.contains(&last)
         || GENERATED_POSTFIX_OPERATOR_SPELLINGS.contains(&last)
+}
+
+fn current_cell_has_syntax(stream: &TokenStream) -> bool {
+    stream
+        .iter()
+        .rev()
+        .take_while(|token| !matches!(token, TokenTree::Eoc(_)))
+        .any(|token| !matches!(token, TokenTree::Trivia(_)))
+}
+
+fn terminate_cell(stream: &mut TokenStream, offset: Offset, after_semicolon: bool) {
+    if current_cell_has_syntax(stream) {
+        let span = Span::from_offset(offset);
+        let marker = if after_semicolon {
+            EocToken::after_semicolon(span)
+        } else {
+            EocToken::new(span)
+        };
+        stream.extend([TokenTree::Eoc(marker)]);
+    }
+}
+
+/// One lexer-delimited top-level cell.
+pub(crate) struct RawCell {
+    pub(crate) stream: TokenStream,
+    pub(crate) semicolon: Option<Span>,
+    pub(crate) eoc: Span,
+}
+
+/// Partitions a token stream at the EOC markers inserted during lexing.
+pub(crate) fn split_cells(tokens: TokenStream) -> Vec<RawCell> {
+    let mut cells = Vec::new();
+    let mut current = TokenStream::new();
+
+    for token in tokens {
+        let TokenTree::Eoc(marker) = token else {
+            current.extend([token]);
+            continue;
+        };
+        let semicolon = marker.follows_semicolon().then(|| {
+            current
+                .pop()
+                .expect("the semicolon was just observed")
+                .span()
+        });
+        if current_cell_has_syntax(&current) || semicolon.is_some() {
+            cells.push(RawCell {
+                stream: std::mem::take(&mut current),
+                semicolon,
+                eoc: marker.span(),
+            });
+        }
+    }
+
+    if current_cell_has_syntax(&current) {
+        let eoc = current
+            .last()
+            .and_then(|token| token.span().end())
+            .map_or_else(Span::detached, Span::from_offset);
+        cells.push(RawCell {
+            stream: current,
+            semicolon: None,
+            eoc,
+        });
+    }
+    cells
 }
 
 fn remove_last_clause(clauses: &mut Vec<RequiredClause>, clause: RequiredClause) -> bool {
@@ -916,25 +1008,39 @@ fn keyword_requires_value(keyword: &str) -> bool {
     )
 }
 
-fn is_quote_specifier(keyword: &str) -> bool {
+/// Whether the token just lexed quotes the one after it.
+fn last_token_quotes_next(stream: &TokenStream) -> bool {
+    matches!(stream.last(), Some(TokenTree::Ident(token))
+        if is_quote_specifier(canonical_word_spelling(token.text())))
+}
+
+pub(crate) fn is_quote_specifier(keyword: &str) -> bool {
     matches!(
         keyword,
         "symbol" | "local" | "global" | "threadVariable" | "threadLocal"
     )
 }
 
+pub(crate) fn punctuation_would_merge(left: &str, right: &str) -> bool {
+    let mut combined = String::with_capacity(left.len() + right.len());
+    combined.push_str(left);
+    combined.push_str(right);
+    fixed_spellings()
+        .any(|(spelling, _)| spelling.len() > left.len() && combined.starts_with(spelling))
+        || (right.starts_with('=') && is_math_operator(left))
+}
+
 #[derive(Debug)]
 struct OpenGroup {
     kind: DelimiterKind,
-    opening_start: TextPoint,
+    opening_start: Offset,
     opening: Span,
     parent: TokenStream,
 }
 
-// @##incorrect strings and comments are not punctuation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PunctuationKind {
-    Ordinary,
+enum FixedKind {
+    Punctuation,
     LineComment,
     BlockComment,
     RawString,
@@ -942,10 +1048,32 @@ enum PunctuationKind {
     Close(DelimiterKind),
 }
 
+const FIXED_SPELLINGS: &[(&str, FixedKind)] = &[
+    ("///", FixedKind::RawString),
+    ("--", FixedKind::LineComment),
+    ("-*", FixedKind::BlockComment),
+    ("(", FixedKind::Open(DelimiterKind::Parenthesis)),
+    (")", FixedKind::Close(DelimiterKind::Parenthesis)),
+    ("[", FixedKind::Open(DelimiterKind::Bracket)),
+    ("]", FixedKind::Close(DelimiterKind::Bracket)),
+    ("{", FixedKind::Open(DelimiterKind::Brace)),
+    ("}", FixedKind::Close(DelimiterKind::Brace)),
+    ("<|", FixedKind::Open(DelimiterKind::AngleBar)),
+    ("|>", FixedKind::Close(DelimiterKind::AngleBar)),
+];
+
+fn fixed_spellings() -> impl Iterator<Item = (&'static str, FixedKind)> {
+    FIXED_SPELLINGS.iter().copied().chain(
+        GENERATED_PUNCTUATION_SPELLINGS
+            .iter()
+            .map(|spelling| (*spelling, FixedKind::Punctuation)),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PunctuationMatch {
-    bytes: Vec<u8>,
-    kind: PunctuationKind,
+struct FixedMatch {
+    len: usize,
+    kind: FixedKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -973,16 +1101,23 @@ fn is_identifier_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'$' | b'\'') || byte >= 128
 }
 
-// @##unreadable_code
 fn is_math_operator_pair(first: u8, second: u8) -> bool {
-    let pair = u16::from(first) << 8 | u16::from(second);
-    pair & 0xffe0 == 0xc2a0
-        || matches!(pair, 0xc397 | 0xc3b7)
-        || pair & 0xfffe == 0xe286
-        || pair & 0xfff8 == 0xe288
-        || pair == 0xe29f
-        || pair & 0xfffc == 0xe2a4
-        || pair & 0xfff8 == 0xe2a8
+    matches!(
+        (first, second),
+        (0xc2, 0xa0..=0xbf)
+            | (0xc3, 0x97 | 0xb7)
+            | (0xe2, 0x86..=0x8f | 0x9f | 0xa4..=0xaf)
+    )
+}
+
+fn is_math_operator(spelling: &str) -> bool {
+    let bytes = spelling.as_bytes();
+    bytes
+        .first()
+        .zip(bytes.get(1))
+        .is_some_and(|(first, second)| {
+            is_math_operator_pair(*first, *second) && utf8_char_width(*first) == Some(bytes.len())
+        })
 }
 
 fn utf8_char_width(first: u8) -> Option<usize> {
@@ -997,61 +1132,28 @@ fn utf8_char_width(first: u8) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell as CounterCell;
-
     use super::*;
 
     fn tokens(source: &str) -> TokenStream {
-        let stream = lex_str(source, SourceId(11)).unwrap();
+        let mut stream = lex_str(source).unwrap();
         assert_eq!(format!("{stream}"), source);
-        let mut flattened = TokenStream::new();
-        for cell in stream {
-            flattened.extend(cell.into_stream());
+        if matches!(stream.last(), Some(TokenTree::Eoc(_))) {
+            stream.pop();
         }
-        flattened
-    }
-
-    #[test]
-    fn byte_cursor_supports_lazy_arbitrary_finite_lookahead() {
-        let reads = CounterCell::new(0);
-        let iterator = [b'a', b'b', b'c'].into_iter().inspect(|_| {
-            reads.set(reads.get() + 1);
-        });
-        let mut input = ByteCursor::new(iterator);
-
-        assert_eq!(input.peek(0), Some(b'a'));
-        assert_eq!(reads.get(), 1);
-        assert_eq!(input.peek(2), Some(b'c'));
-        assert_eq!(reads.get(), 3);
-        assert_eq!(input.next(), Some(b'a'));
-        assert_eq!(input.peek(0), Some(b'b'));
-        assert_eq!(input.next(), Some(b'b'));
-        assert_eq!(input.next(), Some(b'c'));
-        assert_eq!(input.next(), None);
+        stream
     }
 
     #[test]
     fn lexer_accepts_an_arbitrary_non_peekable_byte_iterator() {
         let bytes = vec![b'a', b'+', b'1'].into_iter();
-        let stream = lex(bytes, SourceId(18)).unwrap();
+        let stream = lex(bytes).unwrap();
         assert_eq!(format!("{stream}"), "a+1");
-    }
-
-    #[test]
-    fn lexer_does_not_eagerly_consume_the_byte_iterator() {
-        let bytes = std::iter::once(0).chain(std::iter::from_fn(|| {
-            panic!("lexer read beyond the byte that already determines the error")
-        }));
-        assert_eq!(
-            lex(bytes, SourceId(19)).unwrap_err().kind(),
-            LexErrorKind::InvalidCharacter
-        );
     }
 
     #[test]
     fn every_short_byte_sequence_returns_without_panicking() {
         fn check(bytes: &[u8]) {
-            let outcome = std::panic::catch_unwind(|| lex(bytes.iter().copied(), SourceId(21)));
+            let outcome = std::panic::catch_unwind(|| lex(bytes.iter().copied()));
             assert!(outcome.is_ok(), "lexer panicked for bytes {bytes:?}");
         }
 
@@ -1067,7 +1169,7 @@ mod tests {
     #[test]
     fn invalid_utf8_is_a_lex_error() {
         assert_eq!(
-            lex([0xf0, 0x80, 0x80], SourceId(22)).unwrap_err().kind(),
+            lex([0xf0, 0x80, 0x80]).unwrap_err().kind(),
             LexErrorKind::InvalidUtf8
         );
     }
@@ -1186,6 +1288,53 @@ mod tests {
     }
 
     #[test]
+    fn qualified_identifier_metadata_uses_subspans_without_splitting_the_atom() {
+        let spelling = "Package$name$12";
+        let stream = tokens(spelling);
+        assert!(matches!(
+            stream.iter().collect::<Vec<_>>().as_slice(),
+            [TokenTree::Ident(_)]
+        ));
+
+        let symbol = crate::Symbol::new(spelling, Span::new(100, 100 + spelling.len()));
+        assert_eq!(
+            symbol.package_qualifier.as_ref().and_then(Span::bounds),
+            Some((100, 107))
+        );
+        assert_eq!(
+            symbol.index_qualifier.as_ref().and_then(Span::bounds),
+            Some((113, 115))
+        );
+        assert!(matches!(
+            crate::Lex::to_token_stream(&symbol)
+                .iter()
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [TokenTree::Ident(identifier)] if identifier.text() == spelling
+        ));
+
+        let package = crate::Symbol::new("Package$name", Span::new(20, 32));
+        assert_eq!(
+            package.package_qualifier.as_ref().and_then(Span::bounds),
+            Some((20, 27))
+        );
+        assert_eq!(package.index_qualifier, None);
+
+        let indexed = crate::Symbol::new("name$12", Span::new(30, 37));
+        assert_eq!(indexed.package_qualifier, None);
+        assert_eq!(
+            indexed.index_qualifier.as_ref().and_then(Span::bounds),
+            Some((35, 37))
+        );
+
+        for unqualified in ["name", "A$B$C", "A$$B", "A$", "A$1B", "Core$Core$not"] {
+            let symbol = crate::Symbol::new(unqualified, Span::detached());
+            assert_eq!(symbol.package_qualifier, None, "`{unqualified}`");
+            assert_eq!(symbol.index_qualifier, None, "`{unqualified}`");
+        }
+    }
+
+    #[test]
     fn radix_literals_stop_before_the_first_invalid_digit() {
         let binary = tokens("0b010201");
         let trees = binary.iter().collect::<Vec<_>>();
@@ -1245,26 +1394,6 @@ mod tests {
     }
 
     #[test]
-    fn cells_use_operator_clause_and_delimiter_state() {
-        fn top_level_cell_count(source: &str) -> usize {
-            lex_str(source, SourceId(11)).unwrap().iter().count()
-        }
-
-        assert_eq!(top_level_cell_count("1\n2"), 2);
-        assert_eq!(top_level_cell_count("1 +\n2"), 1);
-        assert_eq!(top_level_cell_count("not\n1"), 1);
-        assert_eq!(top_level_cell_count("1!\n2"), 2);
-        assert_eq!(top_level_cell_count("if condition\nthen value"), 1);
-        assert_eq!(top_level_cell_count("if condition\nthen value\nnext"), 2);
-        assert_eq!(top_level_cell_count("symbol if\nnext"), 2);
-        assert_eq!(top_level_cell_count("symbol +\nnext"), 2);
-        assert_eq!(top_level_cell_count("1 -* comment\n*- 2"), 2);
-        assert_eq!(top_level_cell_count("1 + -* comment\n*- 2"), 1);
-        assert_eq!(top_level_cell_count("1;2"), 2);
-        assert_eq!(top_level_cell_count("(1\n2;3)"), 1);
-    }
-
-    #[test]
     fn strings_and_raw_strings_are_literal_token_trees() {
         for (source, kind) in [
             (r#""a\n\u0101""#, LiteralKind::String),
@@ -1292,24 +1421,11 @@ mod tests {
         assert_eq!(parenthesized.delim_kind(), DelimiterKind::Parenthesis);
 
         let span = parenthesized.span();
-        assert_eq!(span.start_point().unwrap().byte, 0);
-        assert_eq!(span.end_point().unwrap().byte, 15);
+        assert_eq!(span.start().unwrap(), 0);
+        assert_eq!(span.end().unwrap(), 15);
+        assert_eq!(parenthesized.delimiter().opening_span().end().unwrap(), 1);
         assert_eq!(
-            parenthesized
-                .delimiter()
-                .opening_span()
-                .end_point()
-                .unwrap()
-                .byte,
-            1
-        );
-        assert_eq!(
-            parenthesized
-                .delimiter()
-                .closing_span()
-                .start_point()
-                .unwrap()
-                .byte,
+            parenthesized.delimiter().closing_span().start().unwrap(),
             14
         );
 
@@ -1322,24 +1438,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(bracketed.delim_kind(), DelimiterKind::Bracket);
-        assert_eq!(
-            bracketed
-                .delimiter()
-                .opening_span()
-                .start_point()
-                .unwrap()
-                .byte,
-            4
-        );
-        assert_eq!(
-            bracketed
-                .delimiter()
-                .closing_span()
-                .start_point()
-                .unwrap()
-                .byte,
-            13
-        );
+        assert_eq!(bracketed.delimiter().opening_span().start().unwrap(), 4);
+        assert_eq!(bracketed.delimiter().closing_span().start().unwrap(), 13);
 
         let angle_bar = bracketed
             .stream()
@@ -1352,10 +1452,10 @@ mod tests {
         assert_eq!(angle_bar.delim_kind(), DelimiterKind::AngleBar);
         let opening = angle_bar.delimiter().opening_span();
         let closing = angle_bar.delimiter().closing_span();
-        assert_eq!(opening.start_point().unwrap().byte, 8);
-        assert_eq!(opening.end_point().unwrap().byte, 10);
-        assert_eq!(closing.start_point().unwrap().byte, 11);
-        assert_eq!(closing.end_point().unwrap().byte, 13);
+        assert_eq!(opening.start().unwrap(), 8);
+        assert_eq!(opening.end().unwrap(), 10);
+        assert_eq!(closing.start().unwrap(), 11);
+        assert_eq!(closing.end().unwrap(), 13);
     }
 
     #[test]
@@ -1381,33 +1481,31 @@ mod tests {
             ("///", LexErrorKind::UnterminatedRawString),
             ("-* unterminated", LexErrorKind::UnterminatedBlockComment),
         ] {
-            assert_eq!(lex_str(source, SourceId(11)).unwrap_err().kind(), kind);
+            assert_eq!(lex_str(source).unwrap_err().kind(), kind);
         }
 
         let nested = "(".repeat(MAX_GROUP_DEPTH + 1);
         assert_eq!(
-            lex_str(&nested, SourceId(11)).unwrap_err().kind(),
+            lex_str(&nested).unwrap_err().kind(),
             LexErrorKind::NestingLimitExceeded
         );
     }
 
     #[test]
-    fn spans_track_physical_lines() {
+    fn a_crlf_line_break_counts_as_the_two_bytes_it_is() {
         let stream = tokens("x\r\ny");
         let range = stream
             .iter()
             .find_map(|tree| match tree {
-                TokenTree::Ident(identifier) if identifier.text() == "y" => {
-                    identifier.span().range().ok()
-                }
+                TokenTree::Ident(identifier) if identifier.text() == "y" => Some(identifier.span()),
                 _ => None,
             })
             .unwrap();
-        assert_eq!(range.start(), Some(TextPoint::new(1, 0, 3)));
-        assert_eq!(range.end(), Some(TextPoint::new(1, 1, 4)));
+        // `x` `\r` `\n` `y`, so `y` occupies byte 3 alone.
+        assert_eq!(range.bounds(), Some((3, 4)));
 
-        let error = lex_str("-* x\r\n", SourceId(11)).unwrap_err();
-        assert_eq!(error.span().end_point().unwrap(), TextPoint::new(1, 0, 6));
+        let error = lex_str("-* x\r\n").unwrap_err();
+        assert_eq!(error.span().end(), Some("-* x\r\n".len()));
     }
 
     #[test]
@@ -1482,7 +1580,7 @@ mod tests {
         }
         for source in [r#""\u101""#, r#""\u010g""#, r#""\x4""#] {
             assert_eq!(
-                lex_str(source, SourceId(1)).unwrap_err().kind(),
+                lex_str(source).unwrap_err().kind(),
                 LexErrorKind::InvalidEscape
             );
         }

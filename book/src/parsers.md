@@ -1,64 +1,58 @@
 # Parser adapters
 
-Generated compatibility reconstruction depends only on `ExternalCstNode`.
+Generated reconstruction depends only on `ExternalCstNode`.
 `TreeSitterNode` adapts Tree-sitter identity, field names, source text, extras,
-and ranges to that interface. This homogeneous node view ends at the adapter:
-it is never stored inside a generated typed node. Parsers that already know the
-typed grammar should construct the graph directly, as `NativeParser` does.
+and ranges to that interface for schema-compatible leaves, operators, and
+tokens. Complete-file `TreeSitterParser` lowers Tree-sitter's `muted`, pack,
+delimiter, operator, assignment, and control nodes directly into the cleaned
+typed graph; it does not re-lex the source or call the native parser. The
+external node view ends at the adapter and is never stored in a typed node.
 
-`Parser<T>` is the parser-backend boundary. It receives the `CellStream`
-produced by lexing and returns a generated syntax target. `T` defaults to
+`Parser<T>` is the parser-backend boundary. It receives a `TokenStream` and
+returns a generated syntax target. `T` defaults to
 `SourceFile`, while parsers may implement the trait again for more specific
 targets such as `Expr`. Both built-in backends implement this same token-stream
 API. A parser with its own CST can implement `ExternalCstNode` and call `reconstruct`;
 a parser whose native model already matches the generated graph can construct
 the target directly.
 
-The target-owned `Parse` trait is the dual of `ToTokens`: `parse1::<T>` consumes
+The target-owned `Parse` trait is the dual of `Lex`: `parse2::<T>` consumes
 one complete `TokenStream` as `T`. Generated `Token![..]` atoms, raw token
 categories, token streams, boxes, delimiters, comma-punctuated collections, and
 terminated bodies implement it. `ParseStream` shares immutable token storage
-through `std::io::Cursor<Rc<TokenStream>>`. Its final stored token is an
-internal EOF marker, which iteration does not yield. A `fork` has
-an independent index; `advance_to` explicitly commits successful speculation.
-No `unsafe`, interior mutability, or parser-private token vector is involved.
+through `Rc<TokenStream>`; end-of-input is cursor state rather
+than a synthetic token. A `fork` has an independent index and `advance_to`
+explicitly commits successful speculation.
 `parse_quote_m2!` composes quoting with type-inferred parsing.
 
-`ToTokens::to_token_stream` is the inverse boundary for local syntax.
-`ToCells` is the corresponding global-scope emission interface. Its `to_cells`
-method appends to an existing `CellStream`, while `to_cell_stream` creates one
-with a chosen `SourceId`. Complete expressions, typed cells, `SourceFile`, raw
-token streams, and groups implement both scope projections where meaningful.
-The native parser therefore supports the normalized round trip
-`CellStream -> SourceFile -> CellStream -> SourceFile`. Generated
+`Lex::to_token_stream` is the inverse boundary. The native parser supports the
+normalized round trip `TokenStream -> SourceFile -> TokenStream -> SourceFile`. Generated
 concrete token structs are deliberately underscore-prefixed; use `Token![..]`
-to name their types and inspect the underlying `TokenTree` after `ToTokens`
+to name their types and inspect the underlying `TokenTree` after `Lex`
 when working with a heterogeneous stream. Delimiter structs follow the same
 rule through `Delimiter![..]`.
 
-`CellBlock` and `CellStream` implement `ToTokens`, so placing them inside a
-`Delimited<S, D>` lowers global cells into one local token-tree group. In the
-other direction, `Group::to_cells` removes the outer delimiter and promotes
-the group's contents to global cells; top-level semicolons and terminating
-newlines regain their cell-boundary meaning during that promotion.
+Cell splitting belongs to the native parser because semicolons and line breaks
+are grammatical at global scope. Delimited groups remain opaque while cells
+are split, so nested separators never become top-level boundaries.
 
 ```rust
 # use std::convert::Infallible;
-use m2_syn::{CellStream, Parser, SourceFile, SourceId, lex_str, parse_with};
+use m2_syn::{Eof, Parser, SourceFile, Span, TokenStream, lex_str, parse_with};
 
 struct EmptyParser;
 
 impl Parser for EmptyParser {
     type Error = Infallible;
 
-    fn parse_cells(&mut self, _tokens: CellStream) -> Result<SourceFile, Self::Error> {
-        Ok(SourceFile::new(Vec::new()))
+    fn parse_stream(&mut self, _tokens: TokenStream) -> Result<SourceFile, Self::Error> {
+        Ok(SourceFile::new(Vec::new(), Eof::new("", Span::detached())))
     }
 }
 
-let tokens = lex_str("", SourceId(1)).unwrap();
+let tokens = lex_str("").unwrap();
 let file = parse_with(&mut EmptyParser, tokens).unwrap();
-assert!(file.elements.is_empty());
+assert!(file.cells.is_empty());
 ```
 
 `TreeSitterParser` is the built-in implementation and can be retained across
@@ -69,11 +63,11 @@ single parse.
 
 ```rust
 # fn main() -> Result<(), m2_syn::ParseError> {
-use m2_syn::{SourceId, ToTokens, parse_file};
+use m2_syn::{Lex, parse_file};
 
-let file = parse_file("x + 1\ny + x * 2", SourceId(1))?;
+let file = parse_file("x + 1\ny + x * 2")?;
 let normalized = file.to_m2();
-assert_eq!(parse_file(&normalized, SourceId(2))?.to_m2(), normalized);
+assert_eq!(parse_file(&normalized)?.to_m2(), normalized);
 # Ok(())
 # }
 ```
@@ -82,10 +76,10 @@ assert_eq!(parse_file(&normalized, SourceId(2))?.to_m2(), normalized);
 
 ```rust
 # fn main() -> Result<(), m2_syn::ParseError> {
-use m2_syn::{SourceId, ToTokens, parse_tokens, quote_m2};
+use m2_syn::{Lex, parse_tokens, quote_m2};
 
 let quoted = quote_m2! { left + (right) };
-let file = parse_tokens(&quoted, SourceId(1))?;
+let file = parse_tokens(&quoted)?;
 assert_eq!(file.to_m2(), "left + (right)");
 # Ok(())
 # }
@@ -106,8 +100,8 @@ struct Rename;
 
 impl VisitMut for Rename {
     fn visit_symbol_mut(&mut self, symbol: &mut Symbol) {
-        if symbol.text == "left" {
-            symbol.text = "renamed".into();
+        if symbol.text() == "left" {
+            symbol.set_text("renamed");
         }
     }
 }

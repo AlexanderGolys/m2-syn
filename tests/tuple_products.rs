@@ -6,11 +6,7 @@ use m2_syn::{
 
 syntax! {
     precedence: {}
-    augmented: (14, 13)
     tokens {}
-    keywords: {}
-    markers: {}
-    punct: {}
 
     struct Left;
     struct Right;
@@ -73,6 +69,6 @@ fn positional_fields_reconstruct_from_unnamed_cst_children() {
     })
     .unwrap();
 
-    assert_eq!(pair.left.text, "left");
-    assert_eq!(pair.right.text, "right");
+    assert_eq!(pair.left.text(), "left");
+    assert_eq!(pair.right.text(), "right");
 }

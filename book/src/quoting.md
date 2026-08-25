@@ -1,7 +1,7 @@
 # Quoting
 
 `quote_m2!` constructs an M2 `TokenStream` from Rust tokens. `$(...)`
-interpolates any Rust expression implementing `ToTokens`. Each interpolation is
+interpolates any Rust expression implementing `Lex`. Each interpolation is
 first emitted as a real fragment, so punctuation, identifiers, literals, and
 groups compose according to their actual token boundaries rather than the Rust
 expression's type. Parentheses, brackets, braces, and M2 angle bars are emitted

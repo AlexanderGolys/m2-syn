@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use m2_syn::visit::Visit;
 use m2_syn::{
-    Array, BinaryExpression, BinaryOperator, Component, Expr, ForLoop, IfStatement, IntegerLiteral,
-    List, LoopBody, ParenthesizedExpression, ParseError, Punctuated, ReturnStatement, Sequence,
-    SourceId, StringLiteral, Symbol, WhileLoop, parse_file,
+    Array, BinaryExpr, BinaryOperator, Component, Expr, ExprPack, ForLoop, Holder, IfStatement,
+    IntegerLiteral, IterationDomain, List, LoopBody, ParseError, ReturnExpr, Sequence,
+    StringLiteral, Symbol, WhileLoop, parse_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,12 +42,7 @@ trait InferenceContext {
     fn integer(&self, literal: &IntegerLiteral) -> FactOf<Self>;
     fn string(&self, literal: &StringLiteral) -> FactOf<Self>;
     fn symbol(&self, symbol: &Symbol) -> FactOf<Self>;
-    fn binary(
-        &self,
-        node: &BinaryExpression,
-        left: FactOf<Self>,
-        right: FactOf<Self>,
-    ) -> FactOf<Self>;
+    fn binary(&self, node: &BinaryExpr, left: FactOf<Self>, right: FactOf<Self>) -> FactOf<Self>;
     fn collection(&self, kind: CollectionKind, elements: Vec<FactOf<Self>>) -> FactOf<Self>;
     fn control(&self, kind: ControlKind, neighbours: Vec<FactOf<Self>>) -> FactOf<Self>;
 }
@@ -71,22 +66,26 @@ impl<C: InferenceContext> TypeChecker<'_, C> {
         self.results.pop().expect("expression produced one fact")
     }
 
-    fn components(&mut self, components: &Punctuated<Component>) -> Vec<FactOf<C>> {
+    fn components(&mut self, components: &Option<ExprPack>) -> Vec<FactOf<C>> {
         components
             .iter()
+            .flat_map(|pack| pack.pack.iter())
             .filter_map(|component| match component {
                 Component::Expr(expression) => Some(self.infer(expression)),
-                Component::EmptyComponent(_) => None,
+                Component::Empty(_) => None,
             })
             .collect()
     }
 
     fn loop_body(&mut self, body: &LoopBody) -> Vec<FactOf<C>> {
-        body.listed_value
-            .iter()
-            .chain(&body.ignored_value)
-            .map(|expression| self.infer(expression))
-            .collect()
+        let mut neighbours = Vec::new();
+        if let Some(step) = &body.list_step {
+            neighbours.push(self.infer(&step.expr));
+        }
+        if let Some(step) = &body.do_step {
+            neighbours.push(self.infer(&step.statement));
+        }
+        neighbours
     }
 }
 
@@ -103,14 +102,14 @@ impl<'ast, C: InferenceContext> Visit<'ast> for TypeChecker<'_, C> {
         self.results.push(self.context.symbol(symbol));
     }
 
-    fn visit_binary_expression(&mut self, expression: &'ast BinaryExpression) {
-        let left = self.infer(&expression.left);
-        let right = self.infer(&expression.right);
+    fn visit_binary_expr(&mut self, expression: &'ast BinaryExpr) {
+        let left = self.infer(&expression.left_operand);
+        let right = self.infer(&expression.right_operand);
         self.results
             .push(self.context.binary(expression, left, right));
     }
 
-    fn visit_parenthesized_expression(&mut self, expression: &'ast ParenthesizedExpression) {
+    fn visit_holder(&mut self, expression: &'ast Holder) {
         let fact = expression.value.as_deref().map(|value| self.infer(value));
         self.results.push(fact.unwrap_or_else(|| {
             self.context
@@ -139,10 +138,10 @@ impl<'ast, C: InferenceContext> Visit<'ast> for TypeChecker<'_, C> {
     fn visit_if_statement(&mut self, statement: &'ast IfStatement) {
         let mut neighbours = vec![
             self.infer(&statement.condition),
-            self.infer(&statement.then_clause.value),
+            self.infer(&statement.then_clause.expr),
         ];
         if let Some(clause) = &statement.else_clause {
-            neighbours.push(self.infer(&clause.value));
+            neighbours.push(self.infer(&clause.expr));
         }
         self.results
             .push(self.context.control(ControlKind::If, neighbours));
@@ -150,17 +149,27 @@ impl<'ast, C: InferenceContext> Visit<'ast> for TypeChecker<'_, C> {
 
     fn visit_for_loop(&mut self, statement: &'ast ForLoop) {
         let mut neighbours = Vec::new();
-        if let Some(range) = &statement.range {
-            neighbours.extend(
-                range
-                    .iterated_collection
-                    .iter()
-                    .chain(&range.range_start)
-                    .chain(&range.range_end)
-                    .map(|expression| self.infer(expression)),
-            );
+        if let Some(domain) = &statement.iteration_domain {
+            match domain {
+                IterationDomain::IterRange(range) => {
+                    if let Some(bound) = &range.lower_bound {
+                        neighbours.push(self.infer(&bound.value));
+                    }
+                    if let Some(bound) = &range.upper_bound {
+                        neighbours.push(self.infer(&bound.value));
+                    }
+                }
+                IterationDomain::IterIn(domain) => {
+                    neighbours.push(self.infer(&domain.collection));
+                }
+            }
         }
-        neighbours.extend(statement.filter.iter().map(|value| self.infer(value)));
+        neighbours.extend(
+            statement
+                .when_condition
+                .iter()
+                .map(|condition| self.infer(&condition.condition)),
+        );
         neighbours.extend(self.loop_body(&statement.body));
         self.results
             .push(self.context.control(ControlKind::For, neighbours));
@@ -173,7 +182,7 @@ impl<'ast, C: InferenceContext> Visit<'ast> for TypeChecker<'_, C> {
             .push(self.context.control(ControlKind::While, neighbours));
     }
 
-    fn visit_return_statement(&mut self, statement: &'ast ReturnStatement) {
+    fn visit_return_expr(&mut self, statement: &'ast ReturnExpr) {
         let neighbours = statement
             .value
             .iter()
@@ -230,7 +239,7 @@ impl InferenceContext for DemoRegistry {
     fn integer(&self, literal: &IntegerLiteral) -> DemoFact {
         Self::known(
             vec![DemoType::Integer, DemoType::Number, DemoType::Thing],
-            literal.text.parse().ok().map(DemoValue::Integer),
+            literal.text().parse().ok().map(DemoValue::Integer),
         )
     }
 
@@ -240,12 +249,12 @@ impl InferenceContext for DemoRegistry {
 
     fn symbol(&self, symbol: &Symbol) -> DemoFact {
         self.symbols
-            .get(&symbol.text)
+            .get(symbol.text())
             .cloned()
-            .unwrap_or_else(|| Self::deferred(format!("symbol `{}`", symbol.text)))
+            .unwrap_or_else(|| Self::deferred(format!("symbol `{}`", symbol.text())))
     }
 
-    fn binary(&self, node: &BinaryExpression, left: DemoFact, right: DemoFact) -> DemoFact {
+    fn binary(&self, node: &BinaryExpr, left: DemoFact, right: DemoFact) -> DemoFact {
         match (&node.operator, left.value, right.value) {
             (
                 BinaryOperator::Add(_),
@@ -274,10 +283,10 @@ impl InferenceContext for DemoRegistry {
 }
 
 fn infer(source: &str, context: &DemoRegistry) -> Result<DemoFact, ParseError> {
-    let file = parse_file(source, SourceId(1))?;
-    let expression = match &file.elements[0] {
-        m2_syn::AnyCell::ExpressionCell(cell) => cell.value.as_ref(),
-        _ => panic!("expected an expression cell"),
+    let file = parse_file(source)?;
+    let expression = match file.cells[0].content.pack.first() {
+        Component::Expr(expression) => expression.as_ref(),
+        Component::Empty(_) => panic!("expected an expression component"),
     };
     Ok(TypeChecker {
         context,

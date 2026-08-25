@@ -22,9 +22,9 @@ The current priority is the basic source pipeline:
 3. emit normalized M2 that parses back to the same structure.
 
 The syntax model follows the grammar published as `tree-sitter-macaulay2`
-`6.0.0`; `Cargo.toml` pins that version but resolves it against the sibling
-`../tree-sitter-macaulay2` checkout during local development, so the two stay
-in lockstep without a registry round trip on every grammar change.
+`6.0.0`, resolved from the registry like any other dependency. Local builds and
+tests therefore exercise the same grammar downstream users get, rather than
+whatever happens to be checked out beside the repository.
 
 Round-tripping through both the Tree-sitter and native parser backends works
 end to end, and `quote_m2!`/`parse_quote_m2!` are stable enough for everyday

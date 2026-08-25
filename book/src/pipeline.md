@@ -3,46 +3,44 @@
 The frontend has one raw syntax representation and one generated typed graph:
 
 ```text
-source bytes --lex--> CellStream --per cell--> TokenStream --parse--> typed CST
-                                                               ^          |
-                                                               | ToTokens |
-                                                               +----------+
-
-CellStream --Display--> source text
-TokenStream --Display--> source fragment
+source --lex--> TokenStream --NativeParser-----------> typed CST
+   |                                                     |
+   +--> Tree-sitter CST --Reconstruct--------------------+
+                                                         |
+source <--Display-- TokenStream <---------Lex-------------+
 ```
 
-`CellStream` is the linear outer layer because a cell is the smallest block of
-M2 code that is normally parsed independently. Each `CellBlock` contains a
-`TokenStream`; cells cannot occur recursively. `TokenStream` is recursive only
-through balanced `Group` token trees.
+`TokenStream` is the only raw representation. It is flat at the top level and
+recursive only through balanced `Group` token trees. The native parser decides
+top-level cell boundaries after lexing.
 
-`Parse` and `ToTokens` are the two directions at the typed boundary. For a
+`Parse` and `Lex` are the two directions at the typed boundary. For a
 typed value `c`, parsing its emission should recover `c`. Emitting a parsed raw
 stream may normalize insignificant layout:
 
 ```text
-Parse(ToTokens(c)) = c
-ToTokens(Parse(tokens)) = normalize(tokens)
+Parse(Lex(c)) = c
+Lex(Parse(tokens)) = normalize(tokens)
 ```
 
 The two parser backends differ only in how they reach the generated graph.
 `NativeParser` constructs it directly from the shared token cursor.
-`TreeSitterParser` temporarily projects Tree-sitter's untyped nodes through
-`ExternalCstNode` and `Reconstruct`. Those adapter traits are not an alternative graph
-or a traversal API; typed traversal is generated as `Visit`, `VisitMut`, and
-`Fold`.
+`TreeSitterParser` lowers Tree-sitter's concrete grammar layout directly and
+uses `ExternalCstNode` plus generated `Reconstruct` for compatible leaves,
+operators, and tokens. It never routes the source through `NativeParser`.
+Those adapter traits are not an alternative graph or a traversal API; typed
+traversal is generated as `Visit`, `VisitMut`, and `Fold`.
 
 The ownership boundaries are intentionally narrow:
 
 | Location | Owns |
 | --- | --- |
-| `token_stream.rs` | raw atoms, recursive groups, and the non-recursive cell layer |
-| `lexer.rs` | byte recognition, delimiter balancing, and cell splitting |
-| `parse.rs` | the shared `Rc<TokenStream>` parser position and parser traits |
-| `native.rs` | precedence execution and typed-node construction decisions |
-| `treesitter.rs` / `cst.rs` | the external-CST compatibility adapter |
-| `nodes.rs` | the compact typed grammar and token parser metadata declaration |
+| `lex/token_stream.rs` | raw atoms and recursive groups |
+| `lex/lexer.rs` | byte recognition and delimiter balancing |
+| `parser/parse.rs` | the shared token cursor and parser traits |
+| `parser/native.rs` | cell boundaries, precedence, and typed-node construction |
+| `cst/` | the external-CST reconstruction adapter |
+| `schema/nodes.rs` | the compact grammar and token parser metadata declaration |
 | `m2-syn-macros/src/` | generation of tokens, nodes, traversal, parsing, and emission |
 
 ```text
@@ -53,17 +51,21 @@ syntax! {
         PREC_CONTROL = 12,
     }
 
-    augmented: (14, 13)
-
     tokens {
-        // (precedence, binary_strength, unary_strength); `_` marks a slot
-        // the row's flags don't use.
-        [+] { bin, pref, aug } (50, 50, 50)
-        [=] { infix }          (14, 13, _)
+        // L/R is the binary associativity. A third slot overrides the
+        // prefix strength when it differs from the precedence.
+        [+] { bin, pref, aug } (50, L)
+        [=] { infix }          (14, R)
+        [if] [then] [else]     (PREC_CONTROL)
+        [,]
     }
-    keywords: { [if] [then] [else] }
-    markers: {}
-    punct: { [,] }
+
+    #[operator(prefix)]
+    enum PrefixOperator {}
+    #[operator(binary)]
+    enum BinaryOperator {}
+    #[operator(postfix)]
+    enum PostfixOperator {}
 
     struct Symbol;
 
@@ -80,6 +82,13 @@ syntax! {
 }
 ```
 
-The canonical declaration lives in `src/nodes.rs`. Run the generator after
-editing it; the checked-in expansion is split across `src/gen/`. Generated
-files are reviewable build inputs and must not be edited directly.
+The canonical declaration lives in `src/schema/nodes.rs`, where the `syntax!`
+procedural macro expands it into the token, node, traversal, and fold items,
+and into the `visit`, `visit_mut`, and `fold` modules re-exported at the crate
+root. The expansion is items only — no `macro_rules!` — so rust-analyzer
+resolves every generated name.
+
+`Token!` and `Delimiter!` are ordinary source in `src/schema/macros.rs` instead of
+part of that expansion. Neither depends on the schema: `Token!` forwards the
+spelling to the `token!` procedural macro, and the delimiter families are a
+fixed set.

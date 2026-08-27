@@ -1,8 +1,8 @@
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicU16, Ordering},
 };
 
@@ -17,6 +17,47 @@ use std::sync::{
 /// and `hi` byte positions and nothing else, and `SourceMap` binary-searches a
 /// line table on demand.
 pub type Offset = usize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// A human-facing position in a source snapshot.
+///
+/// Lines and columns are one-based. Columns count Unicode scalar values rather
+/// than bytes or terminal cells, so the first character on every line is at
+/// column one regardless of its UTF-8 width.
+pub struct LineColumn {
+    /// The one-based line number.
+    pub line: usize,
+    /// The one-based character column.
+    pub column: usize,
+}
+
+impl Display for LineColumn {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}:{}", self.line, self.column)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// The human-facing opening and closing positions of a source span.
+///
+/// Like the underlying byte range, this range is half-open: `end` is the
+/// position immediately after the final character.
+pub struct LineColumnRange {
+    /// The position at which the span opens.
+    pub start: LineColumn,
+    /// The position immediately after the span closes.
+    pub end: LineColumn,
+}
+
+impl Display for LineColumnRange {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.start == self.end {
+            Display::fmt(&self.start, formatter)
+        } else {
+            write!(formatter, "{}-{}", self.start, self.end)
+        }
+    }
+}
 
 /// One text change: the text a buffer gains at a point, or the stretch it
 /// loses.
@@ -160,6 +201,7 @@ pub type SourceId = File;
 pub struct Source {
     file: File,
     text: Arc<str>,
+    line_starts: OnceLock<Arc<[Offset]>>,
 }
 
 impl Source {
@@ -176,9 +218,11 @@ impl Source {
 
     /// Creates a source snapshot with an explicitly selected source kind.
     pub fn with_file(file: File, text: impl Into<Arc<str>>) -> Arc<Self> {
+        let text = text.into();
         Arc::new(Self {
             file,
-            text: text.into(),
+            text,
+            line_starts: OnceLock::new(),
         })
     }
 
@@ -190,6 +234,34 @@ impl Source {
     /// Returns the complete immutable source snapshot.
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Converts a byte boundary into a one-based line and character column.
+    ///
+    /// Returns `None` when `offset` lies outside this snapshot or inside a
+    /// multi-byte UTF-8 character.
+    pub fn line_column(&self, offset: Offset) -> Option<LineColumn> {
+        self.text.get(..offset)?;
+        let line_starts = self.line_starts.get_or_init(|| {
+            std::iter::once(0)
+                .chain(
+                    self.text
+                        .bytes()
+                        .enumerate()
+                        .filter_map(|(offset, byte)| (byte == b'\n').then_some(offset + 1)),
+                )
+                .collect::<Vec<_>>()
+                .into()
+        });
+        let line_index = line_starts
+            .partition_point(|line_start| *line_start <= offset)
+            .checked_sub(1)?;
+        let line_start = line_starts[line_index];
+        let column = self.text.get(line_start..offset)?.chars().count() + 1;
+        Some(LineColumn {
+            line: line_index + 1,
+            column,
+        })
     }
 }
 
@@ -329,6 +401,18 @@ impl Span {
     /// The boundaries this span lies between.
     pub fn bounds(&self) -> Option<(Offset, Offset)> {
         self.range.as_ref().map(|range| (range.start, range.end))
+    }
+
+    /// Returns this span as one-based line and character-column positions.
+    ///
+    /// Returns `None` for an unlocated span, a range outside its source
+    /// snapshot, or a boundary inside a multi-byte UTF-8 character.
+    pub fn line_column_range(&self) -> Option<LineColumnRange> {
+        let (start, end) = self.bounds()?;
+        Some(LineColumnRange {
+            start: self.source.line_column(start)?,
+            end: self.source.line_column(end)?,
+        })
     }
 
     /// How many bytes this span covers, or `None` when it is unlocated.
@@ -480,11 +564,22 @@ impl Hash for Span {
 impl Debug for Span {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         let mut span = formatter.debug_struct("Span");
-        span.field("file", &self.file()).field("range", &self.range);
+        span.field("file", &self.file())
+            .field("range", &self.line_column_range())
+            .field("bytes", &self.range);
         if let Some(text) = self.text() {
             span.field("text", &text);
         }
         span.finish()
+    }
+}
+
+impl Display for Span {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.line_column_range() {
+            Some(range) => Display::fmt(&range, formatter),
+            None => formatter.write_str("unlocated"),
+        }
     }
 }
 
@@ -620,5 +715,34 @@ mod source_tests {
 
         assert!(Arc::ptr_eq(&source, shifted.source()));
         assert_eq!(shifted.range(), Some(7..11));
+    }
+
+    #[test]
+    fn line_columns_are_one_based_and_count_characters() {
+        let source = Source::new("aα\nβc");
+
+        assert_eq!(
+            source.line_column(0),
+            Some(LineColumn { line: 1, column: 1 }),
+        );
+        assert_eq!(
+            source.line_column("aα\n".len()),
+            Some(LineColumn { line: 2, column: 1 }),
+        );
+        assert_eq!(
+            source.line_column("aα\nβ".len()),
+            Some(LineColumn { line: 2, column: 2 }),
+        );
+        assert_eq!(source.line_column(2), None);
+    }
+
+    #[test]
+    fn spans_format_as_half_open_line_column_ranges() {
+        let source = Source::new("one\ntwo");
+        let range = Span::ranged(Arc::clone(&source), 2..6);
+        let point = range.at(4);
+
+        assert_eq!(range.to_string(), "1:3-2:3");
+        assert_eq!(point.to_string(), "2:1");
     }
 }

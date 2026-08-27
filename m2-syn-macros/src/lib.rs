@@ -8,25 +8,52 @@ mod roles;
 mod syntax;
 mod tokens;
 
-use proc_macro::TokenStream;
 use std::collections::BTreeSet;
 
-use proc_macro2::{TokenStream as TokenStream2, TokenTree};
+use proc_macro2::{TokenStream, TokenTree};
 use quote::{ToTokens, format_ident, quote};
 use syn::{Data, DeriveInput, Error, Fields, Member, Result, Type, parse_macro_input, parse_quote};
 
-fn base_crate() -> TokenStream2 {
+fn base_crate() -> TokenStream {
     quote!(::m2_syn)
 }
 
-/// Declares typed syntax nodes, token atoms, and traversal implementations.
-#[proc_macro]
-pub fn syntax(input: TokenStream) -> TokenStream {
-    let expansion = match syntax::generate(input.into()) {
+fn expand_syntax(
+    input: proc_macro::TokenStream,
+    features: syntax::SyntaxFeatures,
+) -> proc_macro::TokenStream {
+    let expansion = match syntax::generate(input.into(), features) {
         Ok(expansion) => expansion,
         Err(error) => return error.into_compile_error().into(),
     };
     expansion.into()
+}
+
+/// Declares typed syntax nodes and token atoms.
+#[proc_macro]
+pub fn syntax(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    expand_syntax(input, syntax::SyntaxFeatures::CORE)
+}
+
+/// Declares typed syntax nodes with presentation-tree implementations.
+#[doc(hidden)]
+#[proc_macro]
+pub fn syntax_pretty(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    expand_syntax(input, syntax::SyntaxFeatures::PRETTY)
+}
+
+/// Declares typed syntax nodes with traversal implementations.
+#[doc(hidden)]
+#[proc_macro]
+pub fn syntax_walk(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    expand_syntax(input, syntax::SyntaxFeatures::WALK)
+}
+
+/// Declares typed syntax nodes with presentation-tree and traversal implementations.
+#[doc(hidden)]
+#[proc_macro]
+pub fn syntax_pretty_walk(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    expand_syntax(input, syntax::SyntaxFeatures::PRETTY_WALK)
 }
 
 /// Resolves a token spelling to the type `syntax!` generates for it.
@@ -35,10 +62,10 @@ pub fn syntax(input: TokenStream) -> TokenStream {
 /// computation over the spelling, so it needs no access to the schema and
 /// nothing has to be generated for it.
 #[proc_macro]
-pub fn token(input: TokenStream) -> TokenStream {
+pub fn token(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let base = base_crate();
     match tokens::token_type_name(&input.into()) {
-        Ok(name) => quote!(#base::#name).into(),
+        Ok(name) => quote!(#base::nodes::#name).into(),
         Err(error) => error.into_compile_error().into(),
     }
 }
@@ -48,14 +75,14 @@ pub fn token(input: TokenStream) -> TokenStream {
 /// `$[pattern in iterator] { template }` repeats a recursively quoted template
 /// with an explicit Rust `for` loop.
 #[proc_macro]
-pub fn quote_m2(input: TokenStream) -> TokenStream {
-    quote_m2::expand(input)
+pub fn quote_m2(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    quote_m2::expand(input.into()).into()
 }
 
 /// Quotes M2 syntax and parses it as the type inferred at the call site.
 #[proc_macro]
-pub fn parse_quote_m2(input: TokenStream) -> TokenStream {
-    let input = TokenStream2::from(input);
+pub fn parse_quote_m2(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = TokenStream::from(input);
     let base = base_crate();
     quote!({
         let tokens = #base::quote_m2!(#input);
@@ -66,7 +93,7 @@ pub fn parse_quote_m2(input: TokenStream) -> TokenStream {
 
 /// Derives `m2_syn::Spanned` by joining the spans of a value's fields.
 #[proc_macro_derive(Spanned)]
-pub fn derive_spanned(input: TokenStream) -> TokenStream {
+pub fn derive_spanned(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_spanned(&input) {
         Ok(expansion) => expansion.into(),
@@ -74,9 +101,7 @@ pub fn derive_spanned(input: TokenStream) -> TokenStream {
     }
 }
 
-fn expand_spanned_members(
-    members: impl IntoIterator<Item = (Member, TokenStream2)>,
-) -> TokenStream2 {
+fn expand_spanned_members(members: impl IntoIterator<Item = (Member, TokenStream)>) -> TokenStream {
     let members = members.into_iter().collect::<Vec<_>>();
     let base = base_crate();
     let span = quote! {#base::Spanned::try_span};
@@ -98,7 +123,7 @@ fn expand_spanned_members(
     }
 }
 
-fn expand_spanned(input: &DeriveInput) -> Result<TokenStream2> {
+fn expand_spanned(input: &DeriveInput) -> Result<TokenStream> {
     let name = &input.ident;
     let base = base_crate();
     let span_ty = quote! {#base::Span};
@@ -188,7 +213,7 @@ fn expand_spanned(input: &DeriveInput) -> Result<TokenStream2> {
 }
 
 fn type_mentions_parameter(ty: &impl ToTokens, parameters: &BTreeSet<String>) -> bool {
-    fn stream_mentions_parameter(stream: TokenStream2, parameters: &BTreeSet<String>) -> bool {
+    fn stream_mentions_parameter(stream: TokenStream, parameters: &BTreeSet<String>) -> bool {
         stream.into_iter().any(|token| match token {
             TokenTree::Ident(ident) => parameters.contains(&ident.to_string()),
             TokenTree::Group(group) => stream_mentions_parameter(group.stream(), parameters),

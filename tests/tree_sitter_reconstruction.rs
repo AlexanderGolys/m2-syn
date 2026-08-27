@@ -1,7 +1,8 @@
-use m2_syn::{
-    Assignment, BinaryOperator, Collection, Component, DelimiterToken, Expr, Lex, OperatorExpr,
-    SimpleBinding, Span, Spanned, parse_file, parse_file_recovering, parse_native,
+use m2_syn::nodes::{
+    Assignment, BinaryOperator, Collection, Component, Expr, OperatorExpr, SimpleBinding,
 };
+use m2_syn::{DelimiterToken, Lex, Span, Spanned, parse_file, parse_file_recovering, parse_native};
+use m2_syn::{Tokenize, lex_str, parse_tokens};
 
 fn expression(source: &str) -> Expr {
     let mut file = parse_file(source).unwrap();
@@ -22,6 +23,18 @@ fn native_expression(source: &str) -> Expr {
     };
     assert!(components.next().is_none());
     *expression
+}
+
+#[test]
+fn token_parsing_uses_the_supplied_transformed_stream() {
+    let mut tokens = lex_str("left\nright").unwrap();
+    tokens.pop();
+
+    let parsed = parse_tokens(&tokens).unwrap();
+
+    assert_eq!(parsed.cells.len(), 1);
+    assert_eq!(parsed.to_cell_stream().unwrap().to_string(), "left");
+    assert_eq!(parsed.span().text(), Some("left"));
 }
 
 #[test]
@@ -52,7 +65,7 @@ fn implicit_application_has_its_own_empty_marker() {
 }
 
 #[test]
-fn adjacency_is_syntactic_and_never_reconstructed_from_trivia() {
+fn adjacency_is_syntactic_and_never_migrated_from_trivia() {
     for source in ["f(x)", "f (x)"] {
         let Expr::OperatorExpr(OperatorExpr::AdjacentExpr(application)) = expression(source) else {
             panic!("`{source}` must be an adjacency expression");
@@ -61,7 +74,8 @@ fn adjacency_is_syntactic_and_never_reconstructed_from_trivia() {
         assert_eq!(application.operator.to_m2(), "");
     }
 
-    let Expr::ControlFlow(m2_syn::ControlFlow::ReturnExpr(returned)) = expression("return 1")
+    let Expr::ControlFlow(m2_syn::nodes::ControlFlow::ReturnExpr(returned)) =
+        expression("return 1")
     else {
         panic!("return must own its operand directly");
     };
@@ -138,7 +152,7 @@ fn tree_sitter_symbols_derive_qualifier_metadata_from_one_identifier_node() {
 fn both_backends_keep_precision_and_exponent_in_one_float_literal() {
     for source in ["1p53", "1.25p53", "1.25p53e3", ".5p20"] {
         for parsed in [expression(source), native_expression(source)] {
-            let Expr::Literal(m2_syn::Literal::FloatLiteral(literal)) = parsed else {
+            let Expr::Literal(m2_syn::nodes::Literal::FloatLiteral(literal)) = parsed else {
                 panic!("`{source}` must be represented as a float literal");
             };
             assert_eq!(literal.text(), source);
@@ -169,7 +183,7 @@ fn tree_sitter_recovery_keeps_unclosed_collection_contents_and_source_spans() {
         recovered.diagnostics[0].span().bounds(),
         Some((0, source.len()))
     );
-    assert_eq!(recovered.value.to_m2(), "[x,y");
+    assert_eq!(recovered.value.to_m2(), "[x, y");
 
     let mut cells = recovered.value.cells;
     let mut components = cells.pop().unwrap().content.pack.into_iter();
@@ -181,10 +195,7 @@ fn tree_sitter_recovery_keeps_unclosed_collection_contents_and_source_spans() {
     };
     assert_eq!(array.elements.as_ref().unwrap().pack.len(), 2);
     assert_eq!(array.span().bounds(), Some((0, source.len())));
-    assert_eq!(
-        array.delimiter.spans().close().bounds(),
-        Some((source.len(), source.len()))
-    );
+    assert!(array.delimiter.spans().close().is_none());
 }
 
 #[test]
@@ -195,7 +206,7 @@ fn delimited_nodes_retain_both_boundary_spans() {
 
     let spans = group.delimiter.spans();
     assert_eq!(spans.open().bounds(), Some((0, 1)));
-    assert_eq!(spans.close().bounds(), Some((2, 3)));
+    assert_eq!(spans.close().unwrap().bounds(), Some((2, 3)));
 }
 
 #[test]
@@ -212,14 +223,44 @@ fn complete_source_files_retain_cells_and_boundary_nodes() {
 }
 
 #[test]
-fn both_backends_locate_virtual_cell_boundaries_after_the_separator() {
+fn trivia_only_source_files_place_eof_at_the_physical_end() {
+    let source = "-- comment";
+    let source_file = parse_file(source).unwrap();
+
+    assert!(source_file.cells.is_empty());
+    assert_eq!(source_file.comments.inner().len(), 1);
+    assert_eq!(source_file.comments.inner()[0].text(), source);
+    assert_eq!(
+        source_file.eof.span().bounds(),
+        Some((source.len(), source.len()))
+    );
+    assert_eq!(source_file.span().bounds(), Some((0, source.len())));
+    assert_eq!(source_file.to_m2(), source);
+}
+
+#[test]
+fn tree_sitter_preserves_cell_owned_documentation_blocks() {
+    let source = "-- first line\n-- second line\nrecordValue := value;";
+    let source_file = parse_file(source).unwrap();
+
+    assert_eq!(source_file.cells.len(), 1);
+    assert_eq!(source_file.cells[0].comments.outer().len(), 1);
+    assert_eq!(
+        source_file.cells[0].comments.outer()[0].text(),
+        "-- first line\n-- second line"
+    );
+    assert_eq!(source_file.to_m2(), source);
+}
+
+#[test]
+fn both_backends_locate_structural_boundaries_between_cell_streams() {
     let source = "x\n  y; z";
     let tree_sitter = parse_file(source).unwrap();
     let native = parse_native(source).unwrap();
 
     let expected = [
-        Some((2, 2)),
-        Some((6, 6)),
+        Some((4, 4)),
+        Some((7, 7)),
         Some((source.len(), source.len())),
     ];
     assert_eq!(

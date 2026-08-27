@@ -1,5 +1,6 @@
+use m2_syn::nodes::Symbol;
 use m2_syn::visit::Visit;
-use m2_syn::{Lex, ParseError, Symbol, parse_tokens, quote_m2};
+use m2_syn::{Lex, ParseError, parse_tokens, quote_m2};
 
 #[derive(Default)]
 struct SymbolCollector {

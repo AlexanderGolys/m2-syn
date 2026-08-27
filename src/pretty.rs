@@ -8,8 +8,8 @@ use std::fmt::{Display, Formatter, Result as FmtResult, Write as FmtWrite};
 use std::io::{self, IsTerminal as _, Write as IoWrite};
 
 use crate::{
-    DelimiterKind, DoubleSpan, Punctuated, Span, Spanned, TokenStream, TokenTree,
-    token_stream::delim::Delimiter,
+    CommentTrivia, DelimiterKind, DoubleSpan, Punctuated, Span, Spanned, TokenStream, TokenTree,
+    Trivia, TriviaKind, token_stream::delim::Delimiter,
 };
 
 const RESET: &str = "\u{1b}[0m";
@@ -38,51 +38,124 @@ pub trait PrettyTree {
     fn pretty_tree(&self) -> PrettyNode;
 }
 
-/// One owned node in the terminal presentation tree.
+/// One owned node in a syntax presentation tree.
 ///
-/// This is primarily useful to implementations of [`PrettyTree`]. Most users
-/// obtain it through [`crate::ParsedFile::pretty_cst`] or [`PrettyReport`].
-#[doc(hidden)]
+/// The structure is independent of terminal layout. External renderers can
+/// recursively inspect [`Self::children`], use [`Self::role`] and
+/// [`PrettyDetail::role`] for styling, and apply their own width and glyph
+/// policies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrettyNode {
     name: String,
     detail: Option<PrettyDetail>,
     span: Option<Span>,
-    role: NodeRole,
+    role: PrettyNodeRole,
     children: Vec<PrettyEdge>,
 }
 
+/// Additional text displayed alongside a [`PrettyNode`].
+///
+/// Token nodes use details for their source spelling, while virtual syntax
+/// elements use them for their conventional display glyph.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PrettyDetail {
+pub struct PrettyDetail {
     text: String,
-    role: DetailRole,
+    role: PrettyDetailRole,
 }
 
+/// The semantic role of a [`PrettyDetail`].
+///
+/// Renderers can use this role to select their own highlight group without
+/// depending on the built-in ANSI palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DetailRole {
+pub enum PrettyDetailRole {
+    /// Source text belonging to a lexical token.
     Text,
+    /// A conventional glyph representing a virtual syntax element.
     Glyph,
 }
 
+/// The semantic role of a [`PrettyNode`].
+///
+/// This is presentation metadata rather than a replacement for the generated
+/// typed syntax hierarchy. It lets external renderers distinguish structural
+/// nodes, lexical leaves, collection wrappers, and absent optional values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NodeRole {
+pub enum PrettyNodeRole {
+    /// A concrete node from the generated typed syntax hierarchy.
     Syntax,
+    /// A lexical token or virtual syntax leaf.
     Token,
+    /// A transparent syntax container such as a list or delimiter pair.
     Collection,
+    /// An optional syntax value that is not present.
     Absent,
 }
 
+/// A labeled parent-to-child edge in a [`PrettyNode`] tree.
+///
+/// The label is normally the generated field name or the index of an element
+/// in a collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PrettyEdge {
+pub struct PrettyEdge {
     label: String,
     node: PrettyNode,
 }
 
+impl PrettyDetail {
+    /// Returns the text carried by this detail.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Returns the semantic role of this detail.
+    pub fn role(&self) -> PrettyDetailRole {
+        self.role
+    }
+}
+
+impl PrettyEdge {
+    /// Returns the field name or collection index labeling this edge.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns the child presentation node.
+    pub fn node(&self) -> &PrettyNode {
+        &self.node
+    }
+}
+
 impl PrettyNode {
+    /// Returns the display name of this node.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the optional token spelling or virtual-element glyph.
+    pub fn detail(&self) -> Option<&PrettyDetail> {
+        self.detail.as_ref()
+    }
+
+    /// Returns the source span represented by this node, when available.
+    pub fn span(&self) -> Option<&Span> {
+        self.span.as_ref()
+    }
+
+    /// Returns the semantic presentation role of this node.
+    pub fn role(&self) -> PrettyNodeRole {
+        self.role
+    }
+
+    /// Returns the labeled children in source-tree order.
+    pub fn children(&self) -> &[PrettyEdge] {
+        &self.children
+    }
+
     /// Creates a generated concrete syntax node.
     #[doc(hidden)]
     pub fn syntax(name: impl Into<String>, span: Option<Span>) -> Self {
-        Self::new(name, span, NodeRole::Syntax)
+        Self::new(name, span, PrettyNodeRole::Syntax)
     }
 
     /// Creates a generated enum-variant node.
@@ -109,10 +182,9 @@ impl PrettyNode {
             "opening",
             Self::token("Token", kind.opening(), delimiter.opening_span()),
         );
-        node.push_node(
-            "closing",
-            Self::token("Token", kind.closing(), delimiter.closing_span()),
-        );
+        if let Some(closing) = delimiter.closing_span() {
+            node.push_node("closing", Self::token("Token", kind.closing(), closing));
+        }
         node
     }
 
@@ -126,12 +198,12 @@ impl PrettyNode {
         {
             return Self::delimiter(kind, DoubleSpan::new(span.clone(), span));
         }
-        let role = if matches!(text.as_str(), "∅" | "EOC") {
-            DetailRole::Glyph
+        let role = if matches!(text.as_str(), "∅" | "EOC" | "EOF") {
+            PrettyDetailRole::Glyph
         } else {
-            DetailRole::Text
+            PrettyDetailRole::Text
         };
-        let mut node = Self::new(name, Some(span), NodeRole::Token);
+        let mut node = Self::new(name, Some(span), PrettyNodeRole::Token);
         node.detail = Some(PrettyDetail { text, role });
         node
     }
@@ -139,16 +211,16 @@ impl PrettyNode {
     /// Creates a collection wrapper.
     #[doc(hidden)]
     pub fn collection(name: impl Into<String>, span: Option<Span>) -> Self {
-        Self::new(name, span, NodeRole::Collection)
+        Self::new(name, span, PrettyNodeRole::Collection)
     }
 
     /// Creates an absent optional value.
     #[doc(hidden)]
     pub fn absent() -> Self {
-        Self::new("None", None, NodeRole::Absent)
+        Self::new("None", None, PrettyNodeRole::Absent)
     }
 
-    fn new(name: impl Into<String>, span: Option<Span>, role: NodeRole) -> Self {
+    fn new(name: impl Into<String>, span: Option<Span>, role: PrettyNodeRole) -> Self {
         Self {
             name: name.into(),
             detail: None,
@@ -215,6 +287,30 @@ impl<T: PrettyTree + Spanned> PrettyTree for Vec<T> {
         let mut node = PrettyNode::collection(item_count("List", self.len()), span);
         for (index, value) in self.iter().enumerate() {
             node.push(format!("[{index}]"), value);
+        }
+        node
+    }
+}
+
+impl PrettyTree for Trivia {
+    fn pretty_tree(&self) -> PrettyNode {
+        let name = match self.kind() {
+            TriviaKind::LineComment => "LineCommentBlock",
+            TriviaKind::BlockComment => "BlockComment",
+        };
+        PrettyNode::token(name, self.text(), self.span())
+    }
+}
+
+impl PrettyTree for CommentTrivia {
+    fn pretty_tree(&self) -> PrettyNode {
+        let count = self.outer().len() + self.inner().len();
+        let mut node = PrettyNode::collection(item_count("Comments", count), self.try_span());
+        for (index, comment) in self.outer().iter().enumerate() {
+            node.push(format!("outer[{index}]"), comment);
+        }
+        for (index, comment) in self.inner().iter().enumerate() {
+            node.push(format!("inner[{index}]"), comment);
         }
         node
     }
@@ -476,7 +572,7 @@ fn write_source(output: &mut impl FmtWrite, source: &str) -> FmtResult {
 
 #[derive(Clone, Copy)]
 enum FlatKind {
-    Eoc,
+    Adj,
     Open,
     Close,
     Ident,
@@ -499,7 +595,7 @@ pub(crate) fn format_tokens(tokens: &TokenStream, options: PrettyOptions) -> Str
     output
 }
 
-/// Formats a raw token stream as a table with explicit group and cell markers.
+/// Formats a raw token stream as a table with explicit group boundaries.
 pub fn format_pretty_tokens(tokens: &TokenStream) -> String {
     format_tokens(tokens, PrettyOptions::PLAIN)
 }
@@ -545,15 +641,6 @@ fn write_flat(
         }
         used += chunk_width;
         band.extend_from_slice(chunk);
-        if matches!(chunk.last().map(|token| token.kind), Some(FlatKind::Eoc)) {
-            if wrote_band {
-                writeln!(output)?;
-            }
-            write_token_band(output, &band, options)?;
-            wrote_band = true;
-            band.clear();
-            used = 0;
-        }
     }
     if !band.is_empty() {
         if wrote_band {
@@ -636,17 +723,10 @@ fn clipped(text: &str, width: usize) -> String {
 }
 
 fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
+    flatten_trivia(tokens.prefix_trivia(), depth, output);
     for token in tokens.iter() {
+        flatten_trivia(token.leading_trivia().as_slice(), depth, output);
         match token {
-            TokenTree::Eoc(token) => push_flat(
-                output,
-                FlatToken {
-                    depth,
-                    kind: FlatKind::Eoc,
-                    text: "EOC".into(),
-                    span: token.expect_span(),
-                },
-            ),
             TokenTree::Group(group) => {
                 let kind = group.delim_kind();
                 push_flat(
@@ -659,15 +739,17 @@ fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
                     },
                 );
                 flatten(group.stream(), depth + 1, output);
-                push_flat(
-                    output,
-                    FlatToken {
-                        depth,
-                        kind: FlatKind::Close,
-                        text: kind.closing().into(),
-                        span: group.delimiter().closing_span(),
-                    },
-                );
+                if let Some(closing) = group.delimiter().closing_span() {
+                    push_flat(
+                        output,
+                        FlatToken {
+                            depth,
+                            kind: FlatKind::Close,
+                            text: kind.closing().into(),
+                            span: closing,
+                        },
+                    );
+                }
             }
             TokenTree::Ident(token) => push_flat(
                 output,
@@ -691,21 +773,36 @@ fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
                 output,
                 FlatToken {
                     depth,
-                    kind: FlatKind::Punct,
-                    text: token.text().into(),
-                    span: token.expect_span(),
-                },
-            ),
-            TokenTree::Trivia(token) => push_flat(
-                output,
-                FlatToken {
-                    depth,
-                    kind: FlatKind::Trivia,
-                    text: token.text().into(),
+                    kind: if token.text().is_empty() {
+                        FlatKind::Adj
+                    } else {
+                        FlatKind::Punct
+                    },
+                    text: if token.text().is_empty() {
+                        "Adj".into()
+                    } else {
+                        token.text().into()
+                    },
                     span: token.expect_span(),
                 },
             ),
         }
+        flatten_trivia(token.trailing_trivia().as_slice(), depth, output);
+    }
+    flatten_trivia(tokens.suffix_trivia(), depth, output);
+}
+
+fn flatten_trivia(trivia: &[crate::Trivia], depth: usize, output: &mut Vec<FlatToken>) {
+    for token in trivia {
+        push_flat(
+            output,
+            FlatToken {
+                depth,
+                kind: FlatKind::Trivia,
+                text: token.text().into(),
+                span: token.expect_span(),
+            },
+        );
     }
 }
 
@@ -728,7 +825,7 @@ fn push_flat(output: &mut Vec<FlatToken>, token: FlatToken) {
 
 fn flat_kind(kind: FlatKind) -> &'static str {
     match kind {
-        FlatKind::Eoc => "EOC",
+        FlatKind::Adj => "ADJ",
         FlatKind::Open => "DELIM->",
         FlatKind::Close => "<-DELIM",
         FlatKind::Ident => "IDENT",
@@ -740,7 +837,7 @@ fn flat_kind(kind: FlatKind) -> &'static str {
 
 fn token_color(kind: FlatKind) -> &'static str {
     match kind {
-        FlatKind::Eoc => BRIGHT_BLACK,
+        FlatKind::Adj => BRIGHT_BLACK,
         FlatKind::Open => BLUE,
         FlatKind::Close => MAGENTA,
         FlatKind::Ident => CYAN,
@@ -845,34 +942,27 @@ fn write_node(
     Ok(())
 }
 
-fn node_color(role: NodeRole) -> &'static str {
+fn node_color(role: PrettyNodeRole) -> &'static str {
     match role {
-        NodeRole::Syntax => NON_TERMINAL_BLUE,
-        NodeRole::Token => BOLD_CYAN,
-        NodeRole::Collection => BRIGHT_YELLOW,
-        NodeRole::Absent => DIM,
+        PrettyNodeRole::Syntax => NON_TERMINAL_BLUE,
+        PrettyNodeRole::Token => BOLD_CYAN,
+        PrettyNodeRole::Collection => BRIGHT_YELLOW,
+        PrettyNodeRole::Absent => DIM,
     }
 }
 
-fn detail_color(role: DetailRole) -> &'static str {
+fn detail_color(role: PrettyDetailRole) -> &'static str {
     match role {
-        DetailRole::Text => WHITE,
-        DetailRole::Glyph => BRIGHT_BLACK,
+        PrettyDetailRole::Text => WHITE,
+        PrettyDetailRole::Glyph => BRIGHT_BLACK,
     }
 }
 
 fn format_span(span: &Span) -> String {
-    let Some((start, end)) = span.bounds() else {
+    let Some(range) = span.line_column_range() else {
         return "@unlocated".into();
     };
-    // Byte offsets rather than `line:column`, because turning an offset into a
-    // line and column is a question about the buffer's contents and the pretty
-    // printer does not hold the buffer.
-    if start == end {
-        format!("@{start}")
-    } else {
-        format!("@{start}–{end}")
-    }
+    format!("@{range}")
 }
 
 fn paint(style: &'static str, text: &str, options: PrettyOptions) -> String {
@@ -890,7 +980,7 @@ mod tests {
 
     #[test]
     fn adjacent_trivia_is_hidden_or_rendered_as_one_token() {
-        let source = " \n";
+        let source = "-- note";
         let tokens = lex_str(source).unwrap();
 
         let hidden = format_tokens(&tokens, PrettyOptions::PLAIN);
@@ -903,7 +993,6 @@ mod tests {
             },
         );
         assert_eq!(shown.matches("TRIVIA").count(), 1);
-        assert!(shown.contains("' '"));
     }
 
     #[test]
@@ -921,22 +1010,20 @@ mod tests {
                 ..PrettyOptions::ANSI
             },
         );
-        for color in [BRIGHT_BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN] {
+        for color in [RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN] {
             assert!(colored.contains(color));
         }
     }
 
     #[test]
-    fn eoc_starts_a_new_token_band() {
+    fn raw_tokens_have_no_virtual_cell_boundaries() {
         let source = "first\nsecond";
         let tokens = lex_str(source).unwrap();
         let rendered = format_tokens(&tokens, PrettyOptions::PLAIN);
 
-        assert_eq!(rendered.matches("token │").count(), 2);
-        let bands = rendered.split("\n\n").collect::<Vec<_>>();
-        assert_eq!(bands.len(), 2);
-        assert!(bands[0].contains("EOC"));
-        assert!(bands[1].contains("second"));
+        assert_eq!(rendered.matches("token │").count(), 1);
+        assert!(!rendered.contains("EOC"));
+        assert!(rendered.contains("second"));
     }
 
     #[test]
@@ -981,7 +1068,7 @@ mod tests {
             DoubleSpan::new(source.subspan(0, 1), source.subspan(1, 2)),
         );
 
-        assert_eq!(delimiter.role, NodeRole::Collection);
+        assert_eq!(delimiter.role, PrettyNodeRole::Collection);
         assert_eq!(delimiter.name, "(…) · 2 tokens");
         assert!(!format_tree(&delimiter, PrettyOptions::PLAIN).contains("Delimiter"));
     }

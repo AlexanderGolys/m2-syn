@@ -8,10 +8,11 @@
 
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::mem::take;
 use std::sync::Arc;
 
 use crate::{
-    Delimiter, DelimiterKind, DoubleSpan, EocToken, GENERATED_OPERATOR_SPELLINGS,
+    Delimiter, DelimiterKind, DoubleSpan, GENERATED_OPERATOR_SPELLINGS,
     GENERATED_POSTFIX_OPERATOR_SPELLINGS, GENERATED_PUNCTUATION_SPELLINGS,
     GENERATED_WORD_TOKEN_SPELLINGS, IdentToken, LiteralKind, LiteralToken, Offset, Punct,
     Recovered, Source, Span, Spanned, TokenGroup, TokenStream, TokenTree, Trivia, TriviaKind,
@@ -184,12 +185,12 @@ pub fn lex<I>(bytes: I) -> Result<TokenStream, LexError>
 where
     I: IntoIterator<Item = u8>,
 {
-    lexer_from_bytes(bytes)?.lex(true)
+    lexer_from_bytes(bytes)?.lex()
 }
 
 /// Lexes bytes while retaining groups whose closing delimiter is missing.
 ///
-/// Every missing closer becomes a zero-width closing boundary at end of input.
+/// Every missing closer becomes an unbounded closing boundary.
 /// The corresponding [`LexErrorKind::UnterminatedGroup`] diagnostic spans from
 /// that group's opening delimiter through end of input. Other lexical failures
 /// remain fatal.
@@ -202,7 +203,7 @@ pub fn lex_recovering<I>(bytes: I) -> Result<Recovered<TokenStream, LexError>, L
 where
     I: IntoIterator<Item = u8>,
 {
-    lexer_from_bytes(bytes)?.lex_recovering(true)
+    lexer_from_bytes(bytes)?.lex_recovering()
 }
 
 /// Lexes M2 source text into its source-spanned token tree.
@@ -211,7 +212,7 @@ where
 ///
 /// Returns [`LexError`] when the source contains malformed lexical syntax.
 pub fn lex_str(source: &str) -> Result<TokenStream, LexError> {
-    NativeLexer::new(Arc::<str>::from(source)).lex(true)
+    NativeLexer::new(Arc::<str>::from(source)).lex()
 }
 
 /// Lexes source text while retaining the interior of unclosed groups.
@@ -221,7 +222,7 @@ pub fn lex_str(source: &str) -> Result<TokenStream, LexError> {
 /// Returns [`LexError`] for malformed lexical syntax other than missing group
 /// closers, which are returned in [`Recovered::diagnostics`].
 pub fn lex_str_recovering(source: &str) -> Result<Recovered<TokenStream, LexError>, LexError> {
-    NativeLexer::new(Arc::<str>::from(source)).lex_recovering(true)
+    NativeLexer::new(Arc::<str>::from(source)).lex_recovering()
 }
 
 /// Lexes one statically spelled fragment emitted by [`crate::quote_m2!`].
@@ -239,7 +240,7 @@ pub fn lex_str_recovering(source: &str) -> Result<Recovered<TokenStream, LexErro
 #[doc(hidden)]
 pub fn __quote_fragment(source: &str) -> TokenStream {
     NativeLexer::new(Arc::<str>::from(source))
-        .lex(false)
+        .lex()
         .unwrap_or_else(|error| panic!("invalid static M2 quote fragment: {error}"))
 }
 
@@ -273,18 +274,15 @@ impl NativeLexer {
         }
     }
 
-    fn lex(self, terminate_final_cell: bool) -> Result<TokenStream, LexError> {
-        let recovered = self.lex_recovering(terminate_final_cell)?;
+    fn lex(self) -> Result<TokenStream, LexError> {
+        let recovered = self.lex_recovering()?;
         match recovered.diagnostics.into_iter().next() {
             Some(error) => Err(error),
             None => Ok(recovered.value),
         }
     }
 
-    fn lex_recovering(
-        mut self,
-        terminate_final_cell: bool,
-    ) -> Result<Recovered<TokenStream, LexError>, LexError> {
+    fn lex_recovering(mut self) -> Result<Recovered<TokenStream, LexError>, LexError> {
         let mut output = TokenStream::new();
         let mut groups = Vec::<OpenGroup>::new();
         // A quote specifier takes the following token literally, so that token
@@ -294,6 +292,7 @@ impl NativeLexer {
         let mut quote_next = false;
         loop {
             let Some(first) = self.peek(0) else {
+                output.set_physical_eof(self.source_span.at(self.source.len()));
                 let mut diagnostics = Vec::with_capacity(groups.len());
                 while let Some(group) = groups.pop() {
                     diagnostics.push(LexError {
@@ -301,29 +300,12 @@ impl NativeLexer {
                         delimiter: Some(group.kind),
                         span: self.span_from(group.opening_start),
                     });
-                    let contents = std::mem::replace(&mut output, group.parent);
-                    output.extend([TokenGroup::new(
-                        Delimiter::new(
-                            group.kind,
-                            DoubleSpan::unclosed(group.opening, self.offset),
-                        ),
-                        contents,
-                    )]);
-                }
-                if terminate_final_cell {
-                    terminate_cell(&mut output, self.offset, false);
                 }
                 return Ok(Recovered::new(output, diagnostics));
             };
 
             if first == b'\n' || (first == b'\r' && self.byte_after_current() == Some(b'\n')) {
                 self.lex_line_break(&mut output)?;
-                if groups.is_empty()
-                    && current_cell_has_syntax(&output)
-                    && newline_ends_cell(&output)
-                {
-                    terminate_cell(&mut output, self.offset, false);
-                }
             } else if first == b'\r' {
                 self.lex_carriage_return(&mut output)?;
             } else if matches!(first, b' ' | b'\t') {
@@ -332,7 +314,7 @@ impl NativeLexer {
                 self.lex_math_operator(width, &mut output)?;
                 quote_next = false;
             } else if is_identifier_start(first) {
-                let quoted = std::mem::take(&mut quote_next);
+                let quoted = take(&mut quote_next);
                 self.lex_identifier(&mut output)?;
                 quote_next = !quoted && last_token_quotes_next(&output);
             } else if first.is_ascii_digit()
@@ -347,7 +329,7 @@ impl NativeLexer {
                 self.lex_string(&mut output)?;
                 quote_next = false;
             } else if let Some(fixed) = self.match_fixed() {
-                let quoted = std::mem::take(&mut quote_next);
+                let quoted = take(&mut quote_next);
                 match fixed.kind {
                     // A quoted bracket is an ordinary token, not a group
                     // boundary; the parser reads it as the quoted symbol.
@@ -356,9 +338,6 @@ impl NativeLexer {
                     }
                     FixedKind::Punctuation => {
                         self.lex_punctuation(fixed.len, &mut output)?;
-                        if !quoted && groups.is_empty() && first == b';' {
-                            terminate_cell(&mut output, self.offset, true);
-                        }
                     }
                     // A comment does not consume the pending quote: M2 reads
                     // `symbol -- note⏎x` as the quoted `x`.
@@ -369,15 +348,6 @@ impl NativeLexer {
                     FixedKind::BlockComment => {
                         self.lex_block_comment(fixed.len, &mut output)?;
                         quote_next = quoted;
-                        if groups.is_empty()
-                            && output.last().is_some_and(
-                                |token| matches!(token, TokenTree::Trivia(trivia) if trivia.contains_line_break()),
-                            )
-                            && current_cell_has_syntax(&output)
-                            && newline_ends_cell(&output)
-                        {
-                            terminate_cell(&mut output, self.offset, false);
-                        }
                     }
                     FixedKind::RawString => {
                         self.lex_raw_string(fixed.len, &mut output)?;
@@ -392,9 +362,11 @@ impl NativeLexer {
                         groups.push(OpenGroup {
                             kind,
                             opening_start,
-                            opening,
-                            parent: std::mem::take(&mut output),
                         });
+                        output.extend([TokenGroup::new(
+                            Delimiter::new(kind, DoubleSpan::unclosed(opening)),
+                            TokenStream::new(),
+                        )]);
                     }
                     FixedKind::Close(kind) => {
                         let closing_start = self.offset;
@@ -410,11 +382,10 @@ impl NativeLexer {
                                 self.error(LexErrorKind::UnexpectedClosingDelimiter, closing_start)
                             );
                         }
-                        let contents = std::mem::replace(&mut output, group.parent);
-                        output.extend([TokenGroup::new(
-                            Delimiter::new(kind, DoubleSpan::new(group.opening, closing)),
-                            contents,
-                        )]);
+                        assert!(
+                            output.complete_last_group(kind, closing),
+                            "the open-group stack and token stream must agree"
+                        );
                     }
                 }
             } else {
@@ -425,7 +396,7 @@ impl NativeLexer {
         }
     }
 
-    fn lex_line_break(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
+    fn lex_line_break(&mut self, _output: &mut TokenStream) -> Result<(), LexError> {
         let start = self.offset;
         let first = self.next_or_error(LexErrorKind::InvalidCharacter, start)?;
         let mut bytes = vec![first];
@@ -433,33 +404,19 @@ impl NativeLexer {
             bytes.push(self.next_or_error(LexErrorKind::InvalidCharacter, start)?);
         }
         let _ = bytes;
-        let span = self.span_from(start);
-        output.extend([TokenTree::Trivia(Trivia::from_span(
-            TriviaKind::Whitespace,
-            span,
-        ))]);
         Ok(())
     }
 
-    fn lex_carriage_return(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
+    fn lex_carriage_return(&mut self, _output: &mut TokenStream) -> Result<(), LexError> {
         let start = self.offset;
         let byte = self.next_or_error(LexErrorKind::InvalidCharacter, start)?;
         let _ = byte;
-        output.extend([TokenTree::Trivia(Trivia::from_span(
-            TriviaKind::Whitespace,
-            self.span_from(start),
-        ))]);
         Ok(())
     }
 
-    fn lex_whitespace(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
-        let start = self.offset;
+    fn lex_whitespace(&mut self, _output: &mut TokenStream) -> Result<(), LexError> {
         let bytes = self.take_while(|byte| matches!(byte, b' ' | b'\t'));
         let _ = bytes;
-        output.extend([TokenTree::Trivia(Trivia::from_span(
-            TriviaKind::Whitespace,
-            self.span_from(start),
-        ))]);
         Ok(())
     }
 
@@ -667,10 +624,10 @@ impl NativeLexer {
             }
         }
         let _ = bytes;
-        output.extend([TokenTree::Trivia(Trivia::from_span(
+        output.push_line_comment(Trivia::from_span(
             TriviaKind::LineComment,
             self.span_from(start),
-        ))]);
+        ));
         Ok(())
     }
 
@@ -688,10 +645,10 @@ impl NativeLexer {
             if self.peek(0) == Some(b'*') && self.byte_after_current() == Some(b'-') {
                 bytes.extend(self.take_exact(2, start)?);
                 let _ = bytes;
-                output.extend([TokenTree::Trivia(Trivia::from_span(
+                output.push_block_comment(Trivia::from_span(
                     TriviaKind::BlockComment,
                     self.span_from(start),
-                ))]);
+                ));
                 return Ok(());
             }
             bytes.push(self.next_or_error(LexErrorKind::UnterminatedBlockComment, start)?);
@@ -835,12 +792,6 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
 
     for tree in stream.iter() {
         let text = match tree {
-            TokenTree::Eoc(_) => {
-                required_clauses.clear();
-                last_text = None;
-                quote_next = false;
-                None
-            }
             TokenTree::Ident(token) => Some(token.text()),
             TokenTree::Punct(token) => Some(token.text()),
             TokenTree::Literal(_) | TokenTree::Group(_) => {
@@ -848,7 +799,6 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
                 last_text = None;
                 None
             }
-            TokenTree::Trivia(_) => None,
         };
 
         let Some(text) = text else {
@@ -898,81 +848,6 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
         || GENERATED_POSTFIX_OPERATOR_SPELLINGS.contains(&last)
 }
 
-fn current_cell_has_syntax(stream: &TokenStream) -> bool {
-    stream
-        .iter()
-        .rev()
-        .take_while(|token| !matches!(token, TokenTree::Eoc(_)))
-        .any(|token| !matches!(token, TokenTree::Trivia(_)))
-}
-
-fn terminate_cell(stream: &mut TokenStream, offset: Offset, after_semicolon: bool) {
-    if current_cell_has_syntax(stream) {
-        let span = stream
-            .last()
-            .map(|token| token.expect_span().at(offset))
-            .expect("a cell with syntax contains a token");
-        let marker = if after_semicolon {
-            EocToken::after_semicolon(span)
-        } else {
-            EocToken::new(span)
-        };
-        stream.extend([TokenTree::Eoc(marker)]);
-    }
-}
-
-/// One lexer-delimited top-level cell.
-pub(crate) struct RawCell {
-    pub(crate) stream: TokenStream,
-    pub(crate) semicolon: Option<Span>,
-    pub(crate) eoc: Span,
-}
-
-/// Partitions a token stream at the EOC markers inserted during lexing.
-pub(crate) fn split_cells(tokens: TokenStream) -> Vec<RawCell> {
-    let mut cells = Vec::new();
-    let mut current = TokenStream::new();
-
-    for token in tokens {
-        let TokenTree::Eoc(marker) = token else {
-            current.extend([token]);
-            continue;
-        };
-        let semicolon = marker.follows_semicolon().then(|| {
-            current
-                .pop()
-                .expect("the semicolon was just observed")
-                .expect_span()
-        });
-        if current_cell_has_syntax(&current) || semicolon.is_some() {
-            cells.push(RawCell {
-                stream: std::mem::take(&mut current),
-                semicolon,
-                eoc: marker.expect_span(),
-            });
-        }
-    }
-
-    if current_cell_has_syntax(&current) {
-        let eoc = current
-            .last()
-            .map(|token| {
-                let span = token.expect_span();
-                span.end().map_or_else(
-                    || Span::unlocated(std::sync::Arc::clone(span.source())),
-                    |end| span.at(end),
-                )
-            })
-            .expect("a cell with syntax contains a token");
-        cells.push(RawCell {
-            stream: current,
-            semicolon: None,
-            eoc,
-        });
-    }
-    cells
-}
-
 fn remove_last_clause(clauses: &mut Vec<RequiredClause>, clause: RequiredClause) -> bool {
     let Some(position) = clauses.iter().rposition(|candidate| *candidate == clause) else {
         return false;
@@ -1019,7 +894,7 @@ fn keyword_requires_value(keyword: &str) -> bool {
 
 /// Whether the token just lexed quotes the one after it.
 fn last_token_quotes_next(stream: &TokenStream) -> bool {
-    matches!(stream.last(), Some(TokenTree::Ident(token))
+    matches!(stream.last_innermost(), Some(TokenTree::Ident(token))
         if is_quote_specifier(canonical_word_spelling(token.text())))
 }
 
@@ -1043,8 +918,6 @@ pub(crate) fn punctuation_would_merge(left: &str, right: &str) -> bool {
 struct OpenGroup {
     kind: DelimiterKind,
     opening_start: Offset,
-    opening: Span,
-    parent: TokenStream,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1144,11 +1017,8 @@ mod tests {
     use super::*;
 
     fn tokens(source: &str) -> TokenStream {
-        let mut stream = lex_str(source).unwrap();
+        let stream = lex_str(source).unwrap();
         assert_eq!(stream.to_source(), source);
-        if matches!(stream.last(), Some(TokenTree::Eoc(_))) {
-            stream.pop();
-        }
         stream
     }
 
@@ -1216,24 +1086,19 @@ mod tests {
     fn comment_openers_only_win_at_the_current_position() {
         let ordinary = tokens("|--1");
         assert!(
-            ordinary
-                .iter()
-                .all(|tree| !matches!(tree, TokenTree::Trivia(_)))
+            ordinary.iter().all(|tree| {
+                tree.leading_trivia().is_empty() && tree.trailing_trivia().is_empty()
+            })
         );
 
         let source = "-- comment\n-* block *-";
         let comments = tokens(source);
-        let trees = comments.iter().collect::<Vec<_>>();
+        assert!(comments.is_empty());
         assert!(matches!(
-            trees.as_slice(),
-            [
-                TokenTree::Trivia(line),
-                TokenTree::Trivia(newline),
-                TokenTree::Trivia(block),
-            ] if line.kind() == TriviaKind::LineComment
-                && newline.kind() == TriviaKind::Whitespace
-                && newline.contains_line_break()
-                && block.kind() == TriviaKind::BlockComment
+            comments.suffix_trivia(),
+            [line, block]
+                if line.kind() == TriviaKind::LineComment
+                    && block.kind() == TriviaKind::BlockComment
         ));
     }
 
@@ -1264,16 +1129,12 @@ mod tests {
             trees.as_slice(),
             [
                 TokenTree::Ident(qualified),
-                TokenTree::Trivia(first_space),
                 TokenTree::Literal(one),
                 TokenTree::Ident(not),
-                TokenTree::Trivia(second_space),
                 TokenTree::Ident(not_one),
             ] if qualified.text() == "Core$foo'12"
-                && first_space.kind() == TriviaKind::Whitespace
                 && one.text() == "1"
                 && not.text() == "not"
-                && second_space.kind() == TriviaKind::Whitespace
                 && not_one.text() == "not1"
         ));
 
@@ -1395,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn trivia_preserves_physical_separation_between_punctuation_tokens() {
+    fn spans_preserve_physical_separation_between_punctuation_tokens() {
         let source = "++x +\n+";
         let stream = tokens(source);
         let trees = stream.iter().collect::<Vec<_>>();
@@ -1404,18 +1265,19 @@ mod tests {
             [
                 increment,
                 TokenTree::Ident(identifier),
-                TokenTree::Trivia(space),
                 first_plus,
-                TokenTree::Trivia(newline),
                 second_plus,
             ] if increment.spelling() == Some("++")
                 && identifier.text() == "x"
-                && space.kind() == TriviaKind::Whitespace
                 && first_plus.spelling() == Some("+")
-                && newline.kind() == TriviaKind::Whitespace
-                && newline.contains_line_break()
                 && second_plus.spelling() == Some("+")
         ));
+        let first_plus = trees[2].expect_span();
+        let second_plus = trees[3].expect_span();
+        assert_eq!(
+            &first_plus.source().text()[first_plus.end().unwrap()..second_plus.start().unwrap()],
+            "\n"
+        );
     }
 
     #[test]
@@ -1450,7 +1312,12 @@ mod tests {
         assert_eq!(span.end().unwrap(), 15);
         assert_eq!(parenthesized.delimiter().opening_span().end().unwrap(), 1);
         assert_eq!(
-            parenthesized.delimiter().closing_span().start().unwrap(),
+            parenthesized
+                .delimiter()
+                .closing_span()
+                .unwrap()
+                .start()
+                .unwrap(),
             14
         );
 
@@ -1464,7 +1331,15 @@ mod tests {
             .unwrap();
         assert_eq!(bracketed.delim_kind(), DelimiterKind::Bracket);
         assert_eq!(bracketed.delimiter().opening_span().start().unwrap(), 4);
-        assert_eq!(bracketed.delimiter().closing_span().start().unwrap(), 13);
+        assert_eq!(
+            bracketed
+                .delimiter()
+                .closing_span()
+                .unwrap()
+                .start()
+                .unwrap(),
+            13
+        );
 
         let angle_bar = bracketed
             .stream()
@@ -1476,7 +1351,7 @@ mod tests {
             .unwrap();
         assert_eq!(angle_bar.delim_kind(), DelimiterKind::AngleBar);
         let opening = angle_bar.delimiter().opening_span();
-        let closing = angle_bar.delimiter().closing_span();
+        let closing = angle_bar.delimiter().closing_span().unwrap();
         assert_eq!(opening.start().unwrap(), 8);
         assert_eq!(opening.end().unwrap(), 10);
         assert_eq!(closing.start().unwrap(), 11);

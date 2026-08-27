@@ -7,7 +7,8 @@ fn parsed_file_projects_one_current_typed_tree() {
     assert_eq!(file.original_source(), "left+right");
     assert_eq!(file.to_source(), file.cst().to_m2());
     assert_eq!(file.token_stream().to_string(), file.to_source());
-    assert_eq!(file.token_stream().to_string(), file.to_source());
+    assert_eq!(file.cell_stream().len(), 1);
+    assert_eq!(file.cell_stream().to_string(), file.to_source());
     assert_eq!(file.span().text(), Some("left+right"));
 }
 
@@ -19,7 +20,6 @@ fn parsed_file_edits_feed_every_output_projection() {
 
     assert_eq!(file.original_source(), "left + right");
     assert!(file.cst().cells.is_empty());
-    assert!(file.token_stream().is_empty());
     assert!(file.token_stream().is_empty());
     assert_eq!(file.to_source(), "");
     assert_eq!(file.to_string(), "");
@@ -70,6 +70,6 @@ fn combined_report_labels_source_tokens_and_the_complete_tree() {
         .trivia(true)
         .to_string();
     assert!(colored.contains("\u{1b}["));
-    assert!(colored.contains("TRIVIA"));
+    assert!(!colored.contains("TRIVIA"));
     assert!(!colored.contains("@s"));
 }

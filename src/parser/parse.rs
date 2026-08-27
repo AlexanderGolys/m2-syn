@@ -1,6 +1,6 @@
-//! Parsing boundaries over the shared raw token representation.
+//! Parsing boundaries over tokenized cells and their shared token representation.
 //!
-//! [`Parser`] consumes a whole [`TokenStream`] and is the backend interface.
+//! [`Parser`] consumes a whole [`CellStream`] and is the backend interface.
 //! [`Parse`] consumes one value from a [`ParseStream`] and is the generated
 //! dual of [`crate::Lex`]. Both native parsing and generated token parsing use the
 //! same cursor facts instead of maintaining parallel token arrays.
@@ -10,38 +10,39 @@ use std::fmt::{Display, Formatter};
 use std::iter::FusedIterator;
 use std::rc::Rc;
 
-use crate::lexer::split_cells;
+use crate::cell_stream::frame_recovering;
 use crate::{
-    ExternalCstNode, IdentToken, LexError, LiteralToken, Punct, Reconstruct, ReconstructError,
-    SourceFile, Span, Spanned, Token, TokenGroup, TokenStream, TokenTree, Trivia, lex_str,
+    Adj, CellStream, ExternalCstNode, IdentToken, LexError, LiteralToken, Migrate, MigrateError,
+    Punct, SourceFile, Span, Spanned, Terminal, Token, TokenGroup, TokenStream, TokenTree,
+    TrailingTrivia, lex_str,
 };
 
 /// A parser backend that produces one typed syntax target.
 ///
 /// Backends may construct `T` directly or adapt their concrete syntax tree
-/// through [`ExternalCstNode`] and [`reconstruct`].
+/// through [`ExternalCstNode`] and [`migrate`].
 pub trait Parser<T = SourceFile> {
     /// The backend-specific parse failure.
     type Error: Error;
 
-    /// Parses `tokens` into one typed syntax target.
+    /// Parses `cells` into one typed syntax target.
     ///
     /// # Errors
     ///
     /// Returns the backend's [`Self::Error`] when it cannot produce `T`.
-    fn parse_stream(&mut self, tokens: TokenStream) -> Result<T, Self::Error>;
+    fn parse_cells(&mut self, cells: CellStream) -> Result<T, Self::Error>;
 }
 
-/// Parses an existing token stream with an explicitly selected backend.
+/// Parses an existing cell stream with an explicitly selected backend.
 ///
 /// # Errors
 ///
 /// Returns the selected backend's error when parsing fails.
-pub fn parse_with<T, P>(parser: &mut P, tokens: TokenStream) -> Result<T, P::Error>
+pub fn parse_with<T, P>(parser: &mut P, cells: CellStream) -> Result<T, P::Error>
 where
     P: Parser<T>,
 {
-    parser.parse_stream(tokens)
+    parser.parse_cells(cells)
 }
 
 /// A typed syntax value that can consume itself from an M2 token cursor.
@@ -86,7 +87,25 @@ parse_raw_variant!(TokenGroup, Group, "a delimited group");
 parse_raw_variant!(LiteralToken, Literal, "a literal");
 parse_raw_variant!(Punct, Punct, "punctuation");
 parse_raw_variant!(IdentToken, Ident, "an identifier");
-parse_raw_variant!(Trivia, Trivia, "trivia");
+
+impl Parse for Adj {
+    fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
+        let Some(token) = input.next_significant() else {
+            return Err(TokenParseError::unexpected_end(
+                "adjacency",
+                input.eof_span(),
+            ));
+        };
+        match token.token {
+            TokenTree::Punct(punctuation) if punctuation.text().is_empty() => {
+                let mut adjacency = Self::new("", punctuation.expect_span());
+                *adjacency.trailing_trivia_mut() = token.trailing_trivia;
+                Ok(adjacency)
+            }
+            token => Err(TokenParseError::unexpected_token("adjacency", &token)),
+        }
+    }
+}
 
 impl Parse for TokenStream {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
@@ -111,7 +130,8 @@ pub fn parse2<T: Parse>(tokens: TokenStream) -> Result<T, TokenParseError> {
 ///
 /// This applies the grammar expressed by `T`'s [`Parse`] implementation. It
 /// does not validate the fragment against the complete Macaulay2 grammar; use
-/// [`crate::parse_native`] or [`crate::parse_file`] when parsing a source file.
+/// [`crate::parse_native`], or `parse_file` with the `tree-sitter` feature,
+/// when parsing a source file.
 /// A delimited fragment containing semicolons is still one cell because cell
 /// boundaries are recognized only at the top level.
 ///
@@ -120,13 +140,13 @@ pub fn parse2<T: Parse>(tokens: TokenStream) -> Result<T, TokenParseError> {
 /// Returns [`FragmentParseError`] when lexing fails, the source contains
 /// multiple top-level cells, or the cell does not parse as `T`.
 pub fn parse_fragment_str<T: Parse>(source: &str) -> Result<T, FragmentParseError> {
-    let mut cells = split_cells(lex_str(source)?);
+    let framed = frame_recovering(lex_str(source)?);
+    let mut cells = framed.cells;
+    cells.extend(framed.incomplete);
     if cells.len() > 1 {
         return Err(FragmentParseError::MultipleCells { count: cells.len() });
     }
-    let tokens = cells
-        .pop()
-        .map_or_else(TokenStream::new, |cell| cell.stream);
+    let tokens = cells.pop().unwrap_or_default();
     parse2(tokens).map_err(Into::into)
 }
 
@@ -186,9 +206,11 @@ impl From<TokenParseError> for FragmentParseError {
 pub(crate) struct SignificantToken {
     pub(crate) token: TokenTree,
     pub(crate) crossed_newline: bool,
+    pub(crate) trailing_trivia: TrailingTrivia,
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Lookahead {
     Token(SignificantToken),
     End(Span),
@@ -254,37 +276,45 @@ impl ParseStream {
         self.position = fork.position;
     }
 
-    /// Returns the next non-trivia token without consuming it.
+    /// Returns the next token without consuming it.
     pub fn peek(&self) -> Option<&TokenTree> {
-        self.tokens().get(self.significant_position())
+        self.tokens().get(self.position)
     }
 
     pub(crate) fn lookahead(&self) -> Lookahead {
-        let mut position = self.position;
-        let mut crossed_newline = false;
-        while let Some(TokenTree::Trivia(trivia)) = self.tokens().get(position) {
-            crossed_newline |= trivia.contains_line_break();
-            position += 1;
-        }
-        let Some(token) = self.tokens().get(position).cloned() else {
+        let Some(mut token) = self.tokens().get(self.position).cloned() else {
             return Lookahead::End(self.eof_span.clone());
         };
+        let crossed_newline = self.position.checked_sub(1).is_some_and(|left| {
+            self.tokens()
+                .get(left)
+                .is_some_and(|left| tokens_cross_line_break(left, &token))
+        });
+        let trailing_trivia = std::mem::take(token.trailing_trivia_mut());
         Lookahead::Token(SignificantToken {
             token,
             crossed_newline,
+            trailing_trivia,
         })
     }
 
     pub(crate) fn consume_lookahead(&mut self) -> Lookahead {
         let lookahead = self.lookahead();
         if matches!(lookahead, Lookahead::Token(_)) {
-            self.set_position(self.significant_position() + 1);
+            self.position += 1;
         }
         lookahead
     }
 
+    pub(crate) fn next_significant(&mut self) -> Option<SignificantToken> {
+        match self.consume_lookahead() {
+            Lookahead::Token(token) => Some(token),
+            Lookahead::End(_) => None,
+        }
+    }
+
     pub(crate) fn skip_trivia(&mut self) {
-        self.set_position(self.significant_position());
+        // Comments are owned by tokens, so every stream element is significant.
     }
 
     pub(crate) fn eof_span(&self) -> Span {
@@ -293,7 +323,6 @@ impl ParseStream {
 
     /// Consumes and returns the next non-trivia token.
     pub fn next_token(&mut self) -> Option<TokenTree> {
-        self.set_position(self.significant_position());
         self.next_raw_token()
     }
 
@@ -309,15 +338,14 @@ impl ParseStream {
     /// Returns [`TokenParseError`] when input ends or the next significant token does
     /// not match `T`.
     pub fn parse_token<T: Token>(&mut self) -> Result<T, TokenParseError> {
-        let token = self.next_token();
-        let Some(token) = token else {
+        let Some(token) = self.next_significant() else {
             return Err(TokenParseError::unexpected_end(
                 T::SPELLING,
                 self.eof_span(),
             ));
         };
-        let error = TokenParseError::unexpected_token(T::SPELLING, &token);
-        T::from_token_tree(token).ok_or(error)
+        let error = TokenParseError::unexpected_token(T::SPELLING, &token.token);
+        T::from_token_tree_with_trivia(token.token, token.trailing_trivia).ok_or(error)
     }
 
     /// Returns whether no significant token remains.
@@ -325,27 +353,12 @@ impl ParseStream {
         self.peek().is_none()
     }
 
-    fn significant_position(&self) -> usize {
-        let mut position = self.position;
-        while matches!(self.tokens().get(position), Some(TokenTree::Trivia(_))) {
-            position += 1;
-        }
-        position
-    }
-
     fn tokens(&self) -> &TokenStream {
         &self.tokens
     }
 
-    fn set_position(&mut self, position: usize) {
-        self.position = position;
-    }
-
     fn finish(&mut self) -> Result<(), TokenParseError> {
-        for token in self.by_ref() {
-            if matches!(token, TokenTree::Trivia(_) | TokenTree::Eoc(_)) {
-                continue;
-            }
+        if let Some(token) = self.next() {
             return Err(TokenParseError::TrailingToken {
                 found: token.description(),
                 span: token.expect_span(),
@@ -353,6 +366,18 @@ impl ParseStream {
         }
         Ok(())
     }
+}
+
+fn tokens_cross_line_break(left: &TokenTree, right: &TokenTree) -> bool {
+    let left = left.expect_span();
+    let right = right.expect_span();
+    if !left.shares_source(&right) {
+        return false;
+    }
+    let (Some(end), Some(start)) = (left.end(), right.start()) else {
+        return false;
+    };
+    end <= start && left.source().text()[end..start].contains('\n')
 }
 
 impl Iterator for ParseStream {
@@ -445,17 +470,17 @@ impl Display for TokenParseError {
 
 impl Error for TokenParseError {}
 
-/// Reconstructs a typed syntax target from a parser-specific CST root.
+/// Migrates a typed syntax target from a parser-specific CST root.
 ///
 /// # Errors
 ///
-/// Returns [`ReconstructError`] when the root cannot reconstruct `T`.
-pub fn reconstruct<T, N>(root: N) -> Result<T, ReconstructError>
+/// Returns [`MigrateError`] when the root cannot migrate `T`.
+pub fn migrate<T, N>(root: N) -> Result<T, MigrateError>
 where
     N: ExternalCstNode,
-    T: Reconstruct<N>,
+    T: Migrate<N>,
 {
-    T::reconstruct(root)
+    T::migrate(root)
 }
 
 #[cfg(test)]

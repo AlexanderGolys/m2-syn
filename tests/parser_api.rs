@@ -2,10 +2,11 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 use std::vec::IntoIter;
 
+use m2_syn::nodes::{EOF, Expr, SourceFile, Symbol};
 use m2_syn::{
-    CSTNodeClassLabel, Eof, Expr, ExternalCstChild, ExternalCstNode, Lex, NativeParser, Parse,
-    ParseStream, Parser, SourceFile, Span, Spanned, Symbol, Token, TokenStream, TreeSitterParser,
-    lex_str, parse_quote_m2, parse_with, quote_m2, reconstruct,
+    CSTNodeClassLabel, CellStream, ExternalCstChild, ExternalCstNode, Lex, NativeParser, Parse,
+    ParseStream, Parser, Span, Spanned, Token, Tokenize, TreeSitterParser, lex_str, migrate,
+    parse_quote_m2, parse_with, quote_m2,
 };
 
 struct EmptyFileParser;
@@ -13,10 +14,10 @@ struct EmptyFileParser;
 impl Parser for EmptyFileParser {
     type Error = Infallible;
 
-    fn parse_stream(&mut self, _tokens: TokenStream) -> Result<SourceFile, Self::Error> {
+    fn parse_cells(&mut self, _cells: CellStream) -> Result<SourceFile, Self::Error> {
         Ok(SourceFile::new(
             Vec::new(),
-            Eof::new("", Span::for_text("")),
+            EOF::new("", Span::for_text("")),
         ))
     }
 }
@@ -26,15 +27,23 @@ struct SymbolParser;
 impl Parser<Symbol> for SymbolParser {
     type Error = Infallible;
 
-    fn parse_stream(&mut self, tokens: TokenStream) -> Result<Symbol, Self::Error> {
-        Ok(Symbol::new(tokens.to_string(), Span::for_text("")))
+    fn parse_cells(&mut self, cells: CellStream) -> Result<Symbol, Self::Error> {
+        Ok(Symbol::new(cells.to_string(), Span::for_text("")))
     }
 }
 
 #[test]
 fn external_parsers_can_produce_files_or_more_specific_targets() {
-    let file = parse_with(&mut EmptyFileParser, lex_str("").unwrap()).unwrap();
-    let symbol: Symbol = parse_with(&mut SymbolParser, lex_str("example").unwrap()).unwrap();
+    let file = parse_with(
+        &mut EmptyFileParser,
+        lex_str("").unwrap().to_cell_stream().unwrap(),
+    )
+    .unwrap();
+    let symbol: Symbol = parse_with(
+        &mut SymbolParser,
+        lex_str("example").unwrap().to_cell_stream().unwrap(),
+    )
+    .unwrap();
 
     assert!(file.cells.is_empty());
     assert_eq!(symbol.text(), "example");
@@ -43,9 +52,10 @@ fn external_parsers_can_produce_files_or_more_specific_targets() {
 #[test]
 fn both_built_in_parsers_use_the_same_generic_entry_point() {
     let tokens = lex_str("left + right").unwrap();
+    let cells = tokens.to_cell_stream().unwrap();
     let tree_sitter_file: SourceFile =
-        parse_with(&mut TreeSitterParser::new().unwrap(), tokens.clone()).unwrap();
-    let native_file: SourceFile = parse_with(&mut NativeParser, tokens).unwrap();
+        parse_with(&mut TreeSitterParser::new().unwrap(), cells.clone()).unwrap();
+    let native_file: SourceFile = parse_with(&mut NativeParser, cells).unwrap();
 
     assert_eq!(tree_sitter_file.cells.len(), 1);
     assert_eq!(native_file.cells.len(), 1);
@@ -67,7 +77,7 @@ fn generated_expression_and_source_roots_parse_quoted_tokens() {
     let expression: Expr = parse_quote_m2!(left + right);
     let file: SourceFile = parse_quote_m2!(left; right);
 
-    assert_eq!(expression.to_m2(), "left + right");
+    assert_eq!(expression.to_m2(), "left+right");
     assert_eq!(file.to_m2(), "left;\nright");
 }
 
@@ -105,8 +115,8 @@ impl Spanned for SymbolCst {
 }
 
 #[test]
-fn parser_specific_csts_can_use_generated_reconstruction() {
-    let symbol: Symbol = reconstruct(SymbolCst).unwrap();
+fn parser_specific_csts_can_use_generated_migration() {
+    let symbol: Symbol = migrate(SymbolCst).unwrap();
 
     assert_eq!(symbol.text(), "from_cst");
 }

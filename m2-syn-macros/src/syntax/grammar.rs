@@ -12,6 +12,8 @@ struct Declaration {
     name: Ident,
     expression: GrammarExpr,
     boxed: bool,
+    cell_stream: bool,
+    comments: bool,
 }
 
 struct GrammarField {
@@ -72,6 +74,12 @@ fn parse_struct_declaration(
     let boxed_before_name = parse_box_marker(input)?;
     let name: Ident = input.parse()?;
     let boxed = boxed_before_name || parse_box_marker(input)?;
+    let cell_stream = attrs
+        .iter()
+        .any(|attribute| attribute.path().is_ident("cell_stream"));
+    let comments = attrs
+        .iter()
+        .any(|attribute| attribute.path().is_ident("comments"));
 
     if input.peek(Token![;]) {
         input.parse::<Token![;]>()?;
@@ -82,7 +90,9 @@ fn parse_struct_declaration(
                 let kind: Ident = attribute.parse_args()?;
                 match kind.to_string().as_str() {
                     "empty" => Ok(LeafKind::Empty),
+                    "adj" => Ok(LeafKind::Adj),
                     "eoc" => Ok(LeafKind::Eoc),
+                    "eof" => Ok(LeafKind::Eof),
                     "float" => Ok(LeafKind::Float),
                     "integer" => Ok(LeafKind::Integer),
                     "qualified" => Ok(LeafKind::QualifiedIdent),
@@ -95,6 +105,8 @@ fn parse_struct_declaration(
             name,
             expression: GrammarExpr::Leaf(leaf),
             boxed,
+            cell_stream,
+            comments,
         });
     }
 
@@ -121,6 +133,8 @@ fn parse_struct_declaration(
         name,
         expression,
         boxed,
+        cell_stream,
+        comments,
     })
 }
 
@@ -256,6 +270,8 @@ fn parse_enum_declaration(
         name,
         expression: GrammarExpr::Sum(variants, operator),
         boxed,
+        cell_stream: false,
+        comments: false,
     })
 }
 
@@ -329,6 +345,8 @@ fn parse_type_expression(
             name: name.clone(),
             expression: body,
             boxed,
+            cell_stream: false,
+            comments: false,
         });
         Ok(GrammarExpr::Named(name))
     } else if attrs.is_empty() && !boxed {
@@ -416,7 +434,13 @@ impl<'tokens> Lowerer<'tokens> {
         declarations: Vec<Declaration>,
     ) -> Result<(Vec<StructDefinition>, Vec<EnumDefinition>)> {
         for declaration in declarations {
-            self.lower_declaration(declaration.name, declaration.expression, declaration.boxed)?;
+            self.lower_declaration(
+                declaration.name,
+                declaration.expression,
+                declaration.boxed,
+                declaration.cell_stream,
+                declaration.comments,
+            )?;
         }
         Ok((self.structs, self.enums))
     }
@@ -426,14 +450,28 @@ impl<'tokens> Lowerer<'tokens> {
         name: Ident,
         expression: GrammarExpr,
         boxed: bool,
+        cell_stream: bool,
+        comments: bool,
     ) -> Result<()> {
         match expression {
-            GrammarExpr::Leaf(leaf) => {
-                self.push_struct(name, StructFields::Leaf(leaf), None, boxed)
-            }
+            GrammarExpr::Leaf(leaf) => self.push_struct(
+                name,
+                StructFields::Leaf(leaf),
+                None,
+                boxed,
+                cell_stream,
+                comments,
+            ),
             GrammarExpr::Product(fields, style) => {
                 let fields = lower_fields(&name, fields, style)?;
-                self.push_struct(name, StructFields::Product { fields, style }, None, boxed);
+                self.push_struct(
+                    name,
+                    StructFields::Product { fields, style },
+                    None,
+                    boxed,
+                    cell_stream,
+                    comments,
+                );
             }
             GrammarExpr::Wrapped(delimiter, fields) => {
                 let fields = lower_fields(&name, fields, ProductStyle::Named)?;
@@ -445,11 +483,13 @@ impl<'tokens> Lowerer<'tokens> {
                     },
                     Some(delimiter),
                     boxed,
+                    cell_stream,
+                    comments,
                 );
             }
             GrammarExpr::Node(kind, fields) => {
                 let fields = lower_fields(&name, fields, ProductStyle::Named)?;
-                self.push_node(name, kind.to_string(), fields, boxed);
+                self.push_node(name, kind.to_string(), fields, boxed, cell_stream, comments);
             }
             GrammarExpr::Punctuated(inner) => {
                 let fields = lower_fields(
@@ -468,6 +508,8 @@ impl<'tokens> Lowerer<'tokens> {
                     },
                     None,
                     boxed,
+                    cell_stream,
+                    comments,
                 );
             }
             GrammarExpr::Sum(variants, operator) => {
@@ -529,6 +571,8 @@ impl<'tokens> Lowerer<'tokens> {
                         StructFields::Product { fields, style },
                         None,
                         false,
+                        false,
+                        false,
                     );
                     (variant_name.clone(), variant_name)
                 }
@@ -542,6 +586,8 @@ impl<'tokens> Lowerer<'tokens> {
                             style: ProductStyle::Named,
                         },
                         Some(delimiter),
+                        false,
+                        false,
                         false,
                     );
                     (variant_name.clone(), variant_name)
@@ -563,6 +609,8 @@ impl<'tokens> Lowerer<'tokens> {
                             style: ProductStyle::Tuple,
                         },
                         None,
+                        false,
+                        false,
                         false,
                     );
                     (variant_name.clone(), variant_name)
@@ -711,6 +759,8 @@ impl Lowerer<'_> {
         fields: StructFields,
         wrapper: Option<Wrapper>,
         boxed: bool,
+        cell_stream: bool,
+        comments: bool,
     ) {
         self.structs.push(StructDefinition {
             name,
@@ -718,6 +768,8 @@ impl Lowerer<'_> {
             wrapper,
             cst_kind: None,
             boxed,
+            cell_stream,
+            comments,
         });
     }
 
@@ -727,6 +779,8 @@ impl Lowerer<'_> {
         cst_kind: String,
         fields: Vec<FieldDefinition>,
         boxed: bool,
+        cell_stream: bool,
+        comments: bool,
     ) {
         self.structs.push(StructDefinition {
             name,
@@ -737,6 +791,8 @@ impl Lowerer<'_> {
             wrapper: None,
             cst_kind: Some(cst_kind),
             boxed,
+            cell_stream,
+            comments,
         });
     }
 }
@@ -800,7 +856,7 @@ fn ensure_plain_element(shape: &Shape) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::syntax::Syntax;
+    use crate::syntax::{Syntax, SyntaxFeatures};
     use quote::quote;
     use syn::parse2;
 
@@ -830,7 +886,7 @@ mod tests {
         assert!(syntax.structs.iter().any(|node| node.name == "Pair"));
         assert!(syntax.structs.iter().any(|node| node.name == "Wrapped"));
         assert!(syntax.enums.iter().any(|node| node.name == "Choice"));
-        let expansion = syntax.expand().unwrap();
+        let expansion = syntax.expand(SyntaxFeatures::PRETTY_WALK).unwrap();
         syn::parse2::<syn::File>(expansion).unwrap();
     }
 
@@ -862,7 +918,7 @@ mod tests {
                 .any(|node| node.name == "Expr" && node.boxed)
         );
 
-        let expansion = syntax.expand().unwrap();
+        let expansion = syntax.expand(SyntaxFeatures::PRETTY_WALK).unwrap();
         let rendered = expansion.to_string();
         assert!(rendered.contains("Box < Expr >"));
         assert!(rendered.contains("Delimited <"));

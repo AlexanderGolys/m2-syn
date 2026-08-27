@@ -1,13 +1,16 @@
-use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
+use m2_syn::nodes::{
+    Assignment, Collection, Component, Expr, Installation, Literal, StringElement,
+};
 use m2_syn::{
-    Assignment, Collection, Component, Expr, Installation, Literal, NativeParser, Parse,
-    ParseStream, Parser, Spanned, StringElement, TreeSitterParser, lex_str, parse_file,
-    parse_fragment_str, parse_native, parse_with, quote_m2,
+    NativeParser, Parse, ParseStream, Parser, Spanned, Tokenize, TreeSitterParser, lex_str,
+    parse_file, parse_fragment_str, parse_native, parse_with, quote_m2,
 };
 
 fn expression_with(parser: &mut impl Parser<Error = impl std::fmt::Debug>, source: &str) -> Expr {
-    let mut file = parse_with(parser, lex_str(source).unwrap()).unwrap();
+    let cells = lex_str(source).unwrap().to_cell_stream().unwrap();
+    let mut file = parse_with(parser, cells).unwrap();
     let mut components = file.cells.pop().unwrap().content.pack.into_iter();
     let Some(Component::Expr(expression)) = components.next() else {
         panic!("expected one expression component");
@@ -88,8 +91,9 @@ fn quote_keeps_punctuation_fragments_lexically_separate() {
     let tokens = quote_m2!($(plus) + 1);
 
     assert_eq!(tokens.to_string(), "+ +1");
-    parse_with(&mut NativeParser, tokens.clone()).unwrap();
-    parse_with(&mut TreeSitterParser::new().unwrap(), tokens).unwrap();
+    let cells = tokens.to_cell_stream().unwrap();
+    parse_with(&mut NativeParser, cells.clone()).unwrap();
+    parse_with(&mut TreeSitterParser::new().unwrap(), cells).unwrap();
 
     let plus = parse_fragment_str::<m2_syn::Token![+]>("+").unwrap();
     assert_eq!(quote_m2!($(plus) * 1).to_string(), "+*1");
@@ -100,14 +104,19 @@ fn source_identities_participate_in_span_equality_and_hashing() {
     let first = lex_str("a").unwrap().span();
     let second = lex_str("b").unwrap().span();
     let same_text_but_distinct_source = lex_str("a").unwrap().span();
-    let mut spans = HashSet::new();
-
     assert_ne!(first, second);
     assert_ne!(first, same_text_but_distinct_source);
-    spans.insert(first);
-    spans.insert(second);
-    spans.insert(same_text_but_distinct_source);
-    assert_eq!(spans.len(), 3);
+    let mut hashes = [first, second, same_text_but_distinct_source]
+        .into_iter()
+        .map(|span| {
+            let mut hasher = DefaultHasher::new();
+            span.hash(&mut hasher);
+            hasher.finish()
+        })
+        .collect::<Vec<_>>();
+    hashes.sort_unstable();
+    hashes.dedup();
+    assert_eq!(hashes.len(), 3);
 }
 
 #[test]
@@ -178,19 +187,19 @@ fn typed_token_fragments_skip_leading_and_trailing_trivia() {
     assert_eq!(token.span().bounds(), Some((1, 2)));
 }
 
-struct RawToken;
+struct RawToken(m2_syn::TokenTree);
 
 impl Parse for RawToken {
     fn parse(input: &mut ParseStream) -> Result<Self, m2_syn::TokenParseError> {
-        let _ = input.next_raw_token();
-        Ok(Self)
+        Ok(Self(input.next_raw_token().expect("one lexical atom")))
     }
 }
 
 #[test]
-fn raw_token_consumption_remains_lossless() {
+fn raw_token_consumption_visits_only_lexical_atoms() {
     let mut input = ParseStream::new(lex_str(" +").unwrap());
-    let _ = RawToken::parse(&mut input).unwrap();
+    let token = RawToken::parse(&mut input).unwrap();
 
-    assert_eq!(input.next_token().unwrap().spelling(), Some("+"));
+    assert_eq!(token.0.spelling(), Some("+"));
+    assert!(input.next_token().is_none());
 }

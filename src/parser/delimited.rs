@@ -1,9 +1,11 @@
 //! Typed syntax contained by one of the six delimiter families.
 
 use crate::{
-    Delimiter, DelimiterValue, Lex, Parse, ParseStream, PrettyNode, PrettyTree, Spanned,
-    TokenParseError, TokenStream, parse2, token_stream::delim::parse_any_group,
+    Delimiter, DelimiterValue, Lex, Parse, ParseStream, Spanned, TokenParseError, TokenStream,
+    parse2, token_stream::delim::parse_any_group,
 };
+#[cfg(feature = "pretty")]
+use crate::{PrettyNode, PrettyTree};
 
 /// Syntax contained by an arbitrary or statically known delimiter family.
 ///
@@ -132,6 +134,7 @@ where
     }
 }
 
+#[cfg(feature = "pretty")]
 impl<S, D> PrettyTree for Delimited<S, D>
 where
     S: PrettyTree + Spanned,

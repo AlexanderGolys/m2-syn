@@ -1,7 +1,7 @@
+use m2_syn::nodes::{BinaryOperator, Collection, Component, ControlFlow, Expr, OperatorExpr};
 use m2_syn::{
-    BinaryOperator, Collection, Component, ControlFlow, DelimiterToken, Expr, Lex, LexErrorKind,
-    LiteralKind, NativeParseError, OperatorExpr, Span, Spanned, TokenTree, lex_str, parse_native,
-    parse_native_recovering, parse_with,
+    DelimiterToken, Lex, LexErrorKind, LiteralKind, NativeParseError, Span, Spanned, Terminal,
+    TokenTree, Tokenize, lex_str, parse_native, parse_native_recovering, parse_with,
 };
 
 fn expression(source: &str) -> Expr {
@@ -133,6 +133,15 @@ fn application_is_independent_of_physical_whitespace() {
 }
 
 #[test]
+fn physical_eof_retains_trailing_layout_after_the_final_cell() {
+    let file = parse_native("x   ").unwrap();
+
+    assert_eq!(file.cells[0].eoc.span().bounds(), Some((1, 1)));
+    assert_eq!(file.eof.span().bounds(), Some((4, 4)));
+    assert_eq!(file.span().bounds(), Some((0, 4)));
+}
+
+#[test]
 fn compiler_edge_case_examples_reach_the_precedence_parser() {
     for source in [
         r#""1!!!1_!!!_!^^1!!(*)!(*()(*))1!Core$not$1$\\Core$symbol((*)""#,
@@ -145,10 +154,10 @@ fn compiler_edge_case_examples_reach_the_precedence_parser() {
 }
 
 #[test]
-fn precedence_parser_consumes_the_shared_token_stream_directly() {
+fn precedence_parser_consumes_the_tokenized_cell_stream() {
     let tokens = lex_str("a @ b @ c").unwrap();
     let mut parser = m2_syn::NativeParser;
-    let file = parse_with(&mut parser, tokens).unwrap();
+    let file = parse_with(&mut parser, tokens.to_cell_stream().unwrap()).unwrap();
     assert_eq!(file.to_m2(), "a @ b @ c");
 }
 
@@ -164,19 +173,18 @@ fn typed_tokens_and_cells_round_trip_through_the_native_parser() {
         .expect("the lexer should emit the shared raw punctuation atom");
 
     let mut parser = m2_syn::NativeParser;
-    let file = parse_with(&mut parser, lexed).unwrap();
+    let file = parse_with(&mut parser, lexed.to_cell_stream().unwrap()).unwrap();
     assert!(file.to_token_stream().into_iter().any(|tree| {
         matches!(tree, TokenTree::Punct(token)
             if token.text() == "*" && token.span() == expected_multiply_span)
     }));
 
-    // Cells are a parse result now, so the round trip goes back through the
-    // flat stream the parser accepts.
+    // The typed graph projects back through the same explicit cell boundary.
     assert_eq!(file.cells.len(), 2);
     let emitted = file.to_token_stream();
     assert_eq!(emitted.to_string(), file.to_m2());
 
-    let reparsed = parse_with(&mut parser, emitted).unwrap();
+    let reparsed = parse_with(&mut parser, emitted.to_cell_stream().unwrap()).unwrap();
     assert_eq!(reparsed.to_m2(), file.to_m2());
 }
 
@@ -188,13 +196,12 @@ fn typed_strings_emit_literal_tokens_instead_of_delimiter_groups() {
     ] {
         let file = parse_native(source).unwrap();
         let tokens = file.to_token_stream().into_iter().collect::<Vec<_>>();
-        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens.len(), 1);
         let TokenTree::Literal(literal) = &tokens[0] else {
             panic!("`{source}` emitted a non-literal token: {:?}", tokens[0]);
         };
         assert_eq!(literal.kind, expected_kind);
         assert_eq!(literal.text(), source);
-        assert!(matches!(tokens[1], TokenTree::Eoc(_)));
     }
 }
 
@@ -250,7 +257,7 @@ fn clause_control_forms_build_the_existing_typed_nodes() {
     else {
         panic!("expected a for loop");
     };
-    let Some(m2_syn::IterationDomain::IterRange(range)) = &statement.iteration_domain else {
+    let Some(m2_syn::nodes::IterationDomain::IterRange(range)) = &statement.iteration_domain else {
         panic!("expected a range");
     };
     assert!(range.lower_bound.is_some());
@@ -271,7 +278,7 @@ fn clause_control_forms_build_the_existing_typed_nodes() {
     assert!(statement.on_success.is_some());
     assert!(matches!(
         statement.fallback.as_ref(),
-        Some(m2_syn::TryFallback::ExceptDo(_))
+        Some(m2_syn::nodes::TryFallback::ExceptDo(_))
     ));
 }
 
@@ -560,7 +567,7 @@ fn recovering_native_parser_keeps_unclosed_collection_contents() {
         recovered.diagnostics[0].span().bounds(),
         Some((0, source.len()))
     );
-    assert_eq!(recovered.value.to_m2(), "[x,y");
+    assert_eq!(recovered.value.to_m2(), "[x, y");
 
     let mut cells = recovered.value.cells;
     let mut components = cells.pop().unwrap().content.pack.into_iter();
@@ -571,8 +578,81 @@ fn recovering_native_parser_keeps_unclosed_collection_contents() {
         panic!("the recovered expression must retain its array node");
     };
     assert_eq!(array.elements.unwrap().pack.len(), 2);
-    assert_eq!(
-        array.delimiter.spans().close().bounds(),
-        Some((source.len(), source.len()))
+    assert!(array.delimiter.spans().close().is_none());
+}
+
+#[test]
+fn documentation_line_blocks_belong_to_the_following_cell() {
+    let source = concat!(
+        "    -- Recording rather than printing keeps the captured transcript free of\n",
+        "    -- everything but genuinely printed text. A `;` still suppresses the value:\n",
+        "    -- NoPrint deliberately skips `net value`, which is the render the punctuation\n",
+        "    -- exists to avoid on large objects. The type is read either way, so the shell\n",
+        "    -- can say what a suppressed result is without paying to render it.\n",
+        "    recordValue := value -> output.value = \"\" | toString net value;",
     );
+
+    let file = parse_native(source).unwrap();
+
+    assert_eq!(file.cells.len(), 1);
+    assert_eq!(file.cells[0].comments.outer().len(), 1);
+    assert!(file.cells[0].comments.inner().is_empty());
+    assert_eq!(
+        file.cells[0].comments.outer()[0].text(),
+        source.split_once("\n    recordValue").unwrap().0
+    );
+    assert_eq!(file.to_m2(), source);
+}
+
+#[test]
+fn cell_owned_documentation_does_not_leak_onto_its_first_leaf() {
+    let file = parse_native("-- documentation\nvalue").unwrap();
+    let Some(Component::Expr(expression)) = file.cells[0].content.pack.iter().next() else {
+        panic!("the cell must contain its documented expression");
+    };
+    let Expr::Symbol(symbol) = expression.as_ref() else {
+        panic!("the documented cell must contain the symbol expression");
+    };
+
+    assert_eq!(file.cells[0].comments.outer().len(), 1);
+    assert!(symbol.leading_trivia().is_empty());
+    assert!(symbol.trailing_trivia().is_empty());
+}
+
+#[test]
+fn inline_line_comments_are_inner_comments_of_their_cell() {
+    let source = "value := 1; -- suppressed\nnext";
+    let file = parse_native(source).unwrap();
+
+    assert_eq!(file.cells.len(), 2);
+    assert_eq!(file.cells[0].comments.inner().len(), 1);
+    assert_eq!(file.cells[0].comments.inner()[0].text(), "-- suppressed");
+    assert!(file.cells[1].comments.is_empty());
+    assert_eq!(file.to_m2(), source);
+}
+
+#[test]
+fn comment_only_source_is_owned_by_the_source_file() {
+    let source = "-- first\n-- second";
+    let file = parse_native(source).unwrap();
+
+    assert!(file.cells.is_empty());
+    assert_eq!(file.comments.inner().len(), 1);
+    assert_eq!(file.comments.inner()[0].text(), source);
+    assert_eq!(file.to_m2(), source);
+}
+
+#[test]
+fn block_comments_are_inner_comments_of_the_containing_cell() {
+    let source = "-* implementation note *-\nvalue";
+    let file = parse_native(source).unwrap();
+
+    assert_eq!(file.cells.len(), 1);
+    assert!(file.cells[0].comments.outer().is_empty());
+    assert_eq!(file.cells[0].comments.inner().len(), 1);
+    assert_eq!(
+        file.cells[0].comments.inner()[0].text(),
+        "-* implementation note *-"
+    );
+    assert_eq!(file.to_m2(), source);
 }

@@ -8,25 +8,30 @@
 //! stream out of sync.
 
 use std::fmt::{Display, Formatter};
+#[cfg(feature = "pretty")]
 use std::io;
 
-use crate::{
-    Lex, NativeParseError, ParseError, SourceFile, Span, Spanned, TokenStream, parse_file,
-    parse_native,
-    pretty::{PrettyOptions, PrettyReport, PrettyTree, format_tokens, format_tree, print_report},
+#[cfg(feature = "pretty")]
+use crate::pretty::{
+    PrettyOptions, PrettyReport, PrettyTree, format_tokens, format_tree, print_report,
 };
+use crate::{
+    CellStream, Lex, NativeParseError, SourceFile, Span, Spanned, TokenStream, parse_native,
+};
+#[cfg(feature = "tree-sitter")]
+use crate::{ParseError, parse_file};
 
 /// An owned typed CST together with the original input.
 ///
-/// [`ParsedFile::from_source`] selects the Tree-sitter adapter, while
-/// [`ParsedFile::from_source_native`] selects the direct precedence parser. After
-/// parsing, callers may mutate [`Self::cst_mut`] or use [`Self::edit`], then
-/// project the resulting tree through [`Self::token_stream`] or
-/// [`Self::to_source`].
+/// With the `tree-sitter` feature, `from_source` selects that adapter;
+/// [`ParsedFile::from_source_native`] always selects the direct precedence
+/// parser. After parsing, callers may mutate [`Self::cst_mut`] or use
+/// [`Self::edit`], then project the resulting tree through
+/// [`Self::token_stream`] or [`Self::to_source`].
 ///
 /// The original string is retained as an immutable snapshot for diagnostics.
-/// Current emission is normalized by [`Lex`]; it will become lossless as
-/// trivia ownership is completed in the typed graph.
+/// Cell and source-file comment ownership is retained by the typed graph;
+/// source-backed layout is recovered from spans during emission.
 #[derive(Debug)]
 pub struct ParsedFile {
     original_source: String,
@@ -39,7 +44,8 @@ impl ParsedFile {
     /// # Errors
     ///
     /// Returns [`ParseError`] when Tree-sitter rejects the source or typed
-    /// reconstruction fails.
+    /// migration fails.
+    #[cfg(feature = "tree-sitter")]
     pub fn from_source(source: impl Into<String>) -> Result<Self, ParseError> {
         let original_source = source.into();
         let cst = parse_file(&original_source)?;
@@ -94,23 +100,35 @@ impl ParsedFile {
         self.cst.to_token_stream()
     }
 
+    /// Projects the current CST as independently parseable cells.
+    ///
+    /// This is the normal macro-facing representation after tokenisation. Use
+    /// [`Self::token_stream`] when a function-like transformation intentionally
+    /// needs the less structured lexical representation.
+    pub fn cell_stream(&self) -> CellStream {
+        CellStream::from_source_file(&self.cst)
+    }
+
     /// Emits the current CST as normalized Macaulay2 source.
     pub fn to_source(&self) -> String {
-        self.token_stream().to_source()
+        self.cell_stream().to_string()
     }
 
     /// Formats the current raw token representation as a recursively flattened
     /// table with explicit group boundaries.
+    #[cfg(feature = "pretty")]
     pub fn pretty_tokens(&self) -> String {
         format_tokens(&self.token_stream(), PrettyOptions::PLAIN)
     }
 
     /// Formats the complete generated typed CST as a Unicode tree.
+    #[cfg(feature = "pretty")]
     pub fn pretty_cst(&self) -> String {
         format_tree(&self.cst.pretty_tree(), PrettyOptions::PLAIN)
     }
 
     /// Builds a combined source, flat-token, and typed-CST inspection report.
+    #[cfg(feature = "pretty")]
     pub fn pretty_report(&self) -> PrettyReport<'_> {
         PrettyReport::new(
             &self.original_source,
@@ -125,6 +143,7 @@ impl ParsedFile {
     /// # Errors
     ///
     /// Returns an I/O error when standard output cannot be written.
+    #[cfg(feature = "pretty")]
     pub fn print_pretty(&self) -> io::Result<()> {
         print_report(self.pretty_report())
     }
@@ -144,7 +163,7 @@ impl AsMut<SourceFile> for ParsedFile {
 
 impl Display for ParsedFile {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        self.token_stream().fmt(formatter)
+        self.cell_stream().fmt(formatter)
     }
 }
 

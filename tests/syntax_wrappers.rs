@@ -89,7 +89,7 @@ fn delimiters_lower_cells_to_local_groups_and_unpack_groups_to_global_cells() {
 
 #[test]
 fn independently_emitted_expressions_compose_as_distinct_global_cells() {
-    let expressions: [m2_syn::Expr; 2] = [parse_quote_m2!(left), parse_quote_m2!(right)];
+    let expressions: [m2_syn::nodes::Expr; 2] = [parse_quote_m2!(left), parse_quote_m2!(right)];
     let file = m2_syn::parse_native("left\nright").unwrap();
 
     assert_eq!(expressions.len(), 2);

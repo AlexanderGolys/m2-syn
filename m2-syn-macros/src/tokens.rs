@@ -125,8 +125,8 @@ impl TokenDefinitions {
         Ident::new(friendly, name_span(name.as_str(), &self.definitions))
     }
 
-    pub(crate) fn expand(&self) -> TokenStream {
-        let delimiters = expand_delimiters();
+    pub(crate) fn expand(&self, pretty: bool) -> TokenStream {
+        let delimiters = expand_delimiters(pretty);
         let precedence_names = self.precedences.iter().map(|(name, _)| name);
         let precedence_values = self.precedences.iter().map(|(_, value)| value);
         let operator_spellings = self
@@ -218,6 +218,22 @@ impl TokenDefinitions {
                     },
                 ),
             };
+            let pretty_impl = pretty.then(|| {
+                quote! {
+                    impl ::m2_syn::PrettyTree for #type_name {
+                        fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                            ::m2_syn::PrettyNode::token(
+                                ::std::format!(
+                                    "Token![{}]",
+                                    <Self as ::m2_syn::Token>::SPELLING,
+                                ),
+                                <Self as ::m2_syn::Token>::SPELLING,
+                                ::m2_syn::Spanned::expect_span(self),
+                            )
+                        }
+                    }
+                }
+            });
 
             quote! {
 
@@ -225,13 +241,17 @@ impl TokenDefinitions {
                 #[doc = concat!("The typed `Token![", #spelling, "]` atom.")]
                 pub struct #type_name {
                     raw: ::std::boxed::Box<::m2_syn::TokenTree>,
+                    trailing_trivia: ::m2_syn::TrailingTrivia,
                 }
 
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub fn #type_name<S: ::m2_syn::Spanned>(span: S) -> #type_name {
                     let span = span.expect_span();
-                    #type_name { raw: ::std::boxed::Box::new(#raw_new) }
+                    #type_name {
+                        raw: ::std::boxed::Box::new(#raw_new),
+                        trailing_trivia: ::m2_syn::TrailingTrivia::default(),
+                    }
                 }
 
                 impl ::m2_syn::Token for #type_name {
@@ -244,7 +264,26 @@ impl TokenDefinitions {
                     fn from_token_tree(token: ::m2_syn::TokenTree) -> ::std::option::Option<Self> {
                         Self::matches_token_tree(&token).then_some(Self {
                             raw: ::std::boxed::Box::new(token),
+                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
                         })
+                    }
+                }
+
+                impl ::m2_syn::Terminal for #type_name {
+                    fn leading_trivia(&self) -> &::m2_syn::LeadingTrivia {
+                        self.raw.leading_trivia()
+                    }
+
+                    fn leading_trivia_mut(&mut self) -> &mut ::m2_syn::LeadingTrivia {
+                        self.raw.leading_trivia_mut()
+                    }
+
+                    fn trailing_trivia(&self) -> &::m2_syn::TrailingTrivia {
+                        &self.trailing_trivia
+                    }
+
+                    fn trailing_trivia_mut(&mut self) -> &mut ::m2_syn::TrailingTrivia {
+                        &mut self.trailing_trivia
                     }
                 }
 
@@ -259,20 +298,13 @@ impl TokenDefinitions {
                 impl ::m2_syn::Lex for #type_name {
                     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
                         ::m2_syn::Lex::to_tokens(&self.raw, output);
+                        ::m2_syn::Lex::to_tokens(&self.trailing_trivia, output);
                     }
                 }
 
-                impl ::m2_syn::PrettyTree for #type_name {
-                    fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
-                        ::m2_syn::PrettyNode::token(
-                            ::std::format!("Token![{}]", <Self as ::m2_syn::Token>::SPELLING),
-                            <Self as ::m2_syn::Token>::SPELLING,
-                            ::m2_syn::Spanned::expect_span(self),
-                        )
-                    }
-                }
+                #pretty_impl
 
-                impl<N> ::m2_syn::Reconstruct<N> for #type_name
+                impl<N> ::m2_syn::Migrate<N> for #type_name
                 where
                     N: ::m2_syn::ExternalCstNode,
                 {
@@ -280,9 +312,9 @@ impl TokenDefinitions {
                         node.identity().matches(#spelling, false)
                     }
 
-                    fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
-                        if !<Self as ::m2_syn::Reconstruct<N>>::matches(&node) {
-                            return Err(::m2_syn::ReconstructError::wrong_node(
+                    fn migrate(node: N) -> Result<Self, ::m2_syn::MigrateError> {
+                        if !<Self as ::m2_syn::Migrate<N>>::matches(&node) {
+                            return Err(::m2_syn::MigrateError::wrong_node(
                                 #spelling,
                                 false,
                                 node.identity(),
@@ -291,6 +323,7 @@ impl TokenDefinitions {
                         let span = node.expect_span();
                         Ok(#type_name {
                             raw: ::std::boxed::Box::new(#raw_from_span),
+                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
                         })
                     }
                 }
@@ -418,7 +451,12 @@ impl TokenDefinitions {
     }
 }
 
-fn expand_delimiters() -> TokenStream {
+fn expand_delimiters(pretty: bool) -> TokenStream {
+    let pretty_import = pretty.then(|| {
+        quote! {
+            use ::m2_syn::{PrettyNode, PrettyTree};
+        }
+    });
     let definitions = [
         (
             format_ident!("_ParenthesisDelimiter"),
@@ -439,11 +477,22 @@ fn expand_delimiters() -> TokenStream {
     ]
     .into_iter()
     .map(|(name, kind)| {
+        let pretty_impl = pretty.then(|| {
+            quote! {
+                impl PrettyTree for #name {
+                    fn pretty_tree(&self) -> PrettyNode {
+                        PrettyNode::delimiter(Self::KIND, self.spans.clone())
+                    }
+                }
+            }
+        });
         quote! {
             #[derive(Debug, Clone, PartialEq, Eq, Spanned)]
             #[doc = concat!("The typed `", stringify!(#name), "` delimiter atom.")]
             pub struct #name {
                 spans: DoubleSpan,
+                opening_trivia: TrailingTrivia,
+                closing_trivia: TrailingTrivia,
             }
 
             #[doc(hidden)]
@@ -457,7 +506,11 @@ fn expand_delimiters() -> TokenStream {
                 const KIND: DelimiterKind = #kind;
 
                 fn new(spans: DoubleSpan) -> Self {
-                    Self { spans }
+                    Self {
+                        spans,
+                        opening_trivia: TrailingTrivia::default(),
+                        closing_trivia: TrailingTrivia::default(),
+                    }
                 }
 
                 fn spans(&self) -> DoubleSpan {
@@ -468,16 +521,37 @@ fn expand_delimiters() -> TokenStream {
             impl DelimiterValue for #name {
                 fn from_delimiter(delimiter: Delimiter) -> Option<Self> {
                     (delimiter.kind == Self::KIND).then_some(Self {
-                        spans: delimiter.spans,
+                        spans: delimiter.spans.clone(),
+                        opening_trivia: delimiter.opening_trivia().clone(),
+                        closing_trivia: delimiter.closing_trivia().clone(),
                     })
                 }
 
                 fn delimiter(&self) -> Delimiter {
-                    Delimiter::new(Self::KIND, self.spans.clone())
+                    let mut delimiter = Delimiter::new(Self::KIND, self.spans.clone());
+                    *delimiter.opening_trivia_mut() = self.opening_trivia.clone();
+                    *delimiter.closing_trivia_mut() = self.closing_trivia.clone();
+                    delimiter
                 }
 
                 fn expected() -> &'static str {
                     Self::KIND.opening()
+                }
+
+                fn opening_trivia(&self) -> &TrailingTrivia {
+                    &self.opening_trivia
+                }
+
+                fn opening_trivia_mut(&mut self) -> &mut TrailingTrivia {
+                    &mut self.opening_trivia
+                }
+
+                fn closing_trivia(&self) -> &TrailingTrivia {
+                    &self.closing_trivia
+                }
+
+                fn closing_trivia_mut(&mut self) -> &mut TrailingTrivia {
+                    &mut self.closing_trivia
                 }
             }
 
@@ -495,11 +569,7 @@ fn expand_delimiters() -> TokenStream {
                 }
             }
 
-            impl PrettyTree for #name {
-                fn pretty_tree(&self) -> PrettyNode {
-                    PrettyNode::delimiter(Self::KIND, self.spans.clone())
-                }
-            }
+            #pretty_impl
         }
     });
 
@@ -508,9 +578,10 @@ fn expand_delimiters() -> TokenStream {
         mod __m2_syn_delimiters {
             use ::m2_syn::{
                 Delimiter, DelimiterKind, DelimiterToken, DelimiterValue, DoubleSpan, Parse,
-                ParseStream, PrettyNode, PrettyTree, Span, Spanned, Lex, TokenParseError,
-                TokenStream, parse_delimiter,
+                ParseStream, Span, Spanned, Lex, TokenParseError, TokenStream, TrailingTrivia,
+                parse_delimiter,
             };
+            #pretty_import
 
             #(#definitions)*
         }

@@ -2,8 +2,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::process::Command;
 
 use m2_syn::{
-    LexError, Spanned, TokenTree, format_pretty_tokens, format_pretty_tree, lex_str_recovering,
-    parse_native_recovering,
+    LexError, NativeRealtimeParser, Spanned, TextEdit, format_pretty_tokens, format_pretty_tree,
 };
 
 struct TerminalMode(Option<String>);
@@ -38,57 +37,58 @@ impl Drop for TerminalMode {
 
 fn write_diagnostic(output: &mut String, diagnostic: &LexError) {
     let span = diagnostic.span();
-    output.push_str(&format!("- {diagnostic} at {:?}\n", span.bounds()));
+    output.push_str(&format!("- {diagnostic} at {span}\n"));
 }
 
-fn render(source: &str, clear: bool) -> String {
+fn render(parser: &NativeRealtimeParser, clear: bool) -> String {
     let mut output = String::new();
     if clear {
         output.push_str("\u{1b}[2J\u{1b}[H");
     }
     output.push_str("m2-syn live parser  (Ctrl-C/Ctrl-D exit, Backspace edits)\n\n");
     output.push_str("SOURCE\n");
-    output.push_str(source);
-    if !source.ends_with('\n') {
+    output.push_str(parser.source());
+    if !parser.source().ends_with('\n') {
         output.push('\n');
     }
 
-    let recovered_tokens = match lex_str_recovering(source) {
-        Ok(tokens) => tokens,
-        Err(error) => {
-            output.push_str(&format!("\nSTATE\nlexical error: {error}\n"));
-            return output;
-        }
-    };
-    let cell_count = recovered_tokens
-        .value
+    let diagnostic_count = parser
+        .cells()
         .iter()
-        .filter(|token| matches!(token, TokenTree::Eoc(_)))
-        .count();
+        .map(|cell| cell.lexer_diagnostics().len())
+        .sum::<usize>();
     output.push_str(&format!(
-        "\nSTATE\n{} lexer cell(s); {} recoverable diagnostic(s)\n",
-        cell_count,
-        recovered_tokens.diagnostics.len()
+        "\nSTATE\n{:?}; {} cell(s); {} reparsed; {} lexer diagnostic(s)\n",
+        parser.state(),
+        parser.cells().len(),
+        parser.reparsed_cells().len(),
+        diagnostic_count,
     ));
-    for diagnostic in &recovered_tokens.diagnostics {
-        write_diagnostic(&mut output, diagnostic);
+    for cell in parser.cells() {
+        for diagnostic in cell.lexer_diagnostics() {
+            write_diagnostic(&mut output, diagnostic);
+        }
     }
 
     output.push_str("\nTOKENS\n");
-    output.push_str(&format_pretty_tokens(&recovered_tokens.value));
+    for (index, cell) in parser.cells().iter().enumerate() {
+        output.push_str(&format!(
+            "cell {} · {:?} · {:?}\n",
+            index + 1,
+            cell.boundary(),
+            cell.state()
+        ));
+        output.push_str(&format_pretty_tokens(cell.tokens()));
+    }
 
     output.push_str("\nSYNTAX\n");
-    match parse_native_recovering(source) {
-        Ok(parsed) => {
-            if parsed.diagnostics.is_empty() {
-                output.push_str("complete\n");
-            } else {
-                output.push_str("incomplete but structurally recovered\n");
-            }
-            output.push_str(&format_pretty_tree(&parsed.value));
+    for (index, cell) in parser.cells().iter().enumerate() {
+        output.push_str(&format!("cell {}\n", index + 1));
+        if let Some(syntax) = cell.syntax() {
+            output.push_str(&format_pretty_tree(syntax));
         }
-        Err(error) => {
-            output.push_str(&format!("expected parser state: {error}\n"));
+        if let Some(error) = cell.parse_error() {
+            output.push_str(&format!("{error}\n"));
         }
     }
     output
@@ -98,10 +98,11 @@ fn main() -> io::Result<()> {
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let _terminal = TerminalMode::raw();
     let mut bytes = Vec::new();
+    let mut parser = NativeRealtimeParser::new("");
     let mut stdout = io::stdout().lock();
 
     if interactive {
-        stdout.write_all(render("", true).as_bytes())?;
+        stdout.write_all(render(&parser, true).as_bytes())?;
         stdout.flush()?;
     }
 
@@ -122,8 +123,17 @@ fn main() -> io::Result<()> {
         let Ok(source) = std::str::from_utf8(&bytes) else {
             continue;
         };
+        if let Some(appended) = source.strip_prefix(parser.source()) {
+            parser.append(appended);
+        } else if parser.source().starts_with(source) {
+            parser
+                .apply_edit(&TextEdit::deletion(source.len(), parser.source().len()))
+                .expect("backspace always removes a valid source suffix");
+        } else {
+            parser = NativeRealtimeParser::new(source);
+        }
         if interactive {
-            stdout.write_all(render(source, true).as_bytes())?;
+            stdout.write_all(render(&parser, true).as_bytes())?;
             stdout.flush()?;
         }
     }
@@ -131,7 +141,8 @@ fn main() -> io::Result<()> {
     if !interactive {
         let source = String::from_utf8(bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        stdout.write_all(render(&source, false).as_bytes())?;
+        debug_assert_eq!(source, parser.source());
+        stdout.write_all(render(&parser, false).as_bytes())?;
     }
     Ok(())
 }

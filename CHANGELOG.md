@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 — 2026-08-27
+
+- Split native processing into lexical `TokenStream` construction and
+  cell-aware `Tokenize`, with structural cell boundaries and syntactic
+  adjacency markers.
+- Add `NativeRealtimeParser`, which reparses only the affected cell suffix and
+  distinguishes incomplete input from invalid syntax for interactive shells.
+- Preserve physical EOF, source identity, delimiter state, and transformed
+  cell contents across native and Tree-sitter parsing.
+- Make `pretty`, `tree-sitter`, and `walk` independent Cargo features, and
+  expose the renderer-independent `PrettyNode` tree for downstream UIs.
+- Place generated nodes under `m2_syn::nodes` while keeping construction,
+  quoting, parsing, and schema macros at the crate root.
+- Export `quote_m2!` through `m2-syn`, leaving `m2-syn-macros` as the internal
+  procedural-macro implementation crate.
+- Make exported `syntax!` expansions follow the features enabled on `m2-syn`
+  without depending on feature names declared by downstream crates.
+- Add explicit `#[cell_stream]` schema metadata and preserve feature-reduced
+  builds and documentation tests.
+- Coalesce complete-line `--` documentation blocks and retain outer and inner
+  comments on typed cells or the source-file root across both parser backends.
+
 ## 0.2.0 — 2026-08-25
 
 - Expand the typed schema directly from `syntax!`; generated Rust files and the

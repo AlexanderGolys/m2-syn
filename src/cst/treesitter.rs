@@ -4,7 +4,7 @@
 //! grammar's concrete nodes directly into the generated typed graph; it never
 //! reparses their source through the native precedence engine.
 //! [`TreeSitterNode`] is also the generic [`ExternalCstNode`] adapter used for
-//! reconstructing leaves, operators, and tokens with the generated machinery.
+//! migrating leaves, operators, and tokens with the generated machinery.
 
 use std::borrow::Cow;
 use std::error::Error;
@@ -16,17 +16,19 @@ use std::vec::IntoIter;
 use crate::native::{assignment_pack, installation_value, lambda_parameters};
 use crate::nodes::*;
 use crate::{
-    CSTNodeClassLabel, DelimiterKind, DelimiterToken, DoubleSpan, ExternalCstChild,
-    ExternalCstNode, LexError, Parser, Punctuated, Reconstruct, ReconstructError, Recovered,
-    Source, SourceFile, Span, Spanned, TextEdit, TokenStream, TokenTree, lex_str,
-    lex_str_recovering,
+    CSTNodeClassLabel, CellStream, CellStreamError, DelimiterKind, DelimiterToken, DoubleSpan,
+    ExternalCstChild, ExternalCstNode, LexError, Migrate, MigrateError, Parser, Punctuated,
+    Recovered, Source, SourceFile, Span, Spanned, TextEdit, TokenStream, TokenTree, Tokenize,
+    lex_str, lex_str_recovering,
 };
 
 #[derive(Debug)]
-/// A failure while parsing or reconstructing a Tree-sitter syntax tree.
+/// A failure while parsing or migrating a Tree-sitter syntax tree.
 pub enum ParseError {
     /// The renaming hook could not inspect the source token stream.
     Lex(LexError),
+    /// The raw token stream could not be partitioned into complete cells.
+    Tokenize(CellStreamError),
     /// The bundled grammar could not be installed in the parser.
     Language(tree_sitter::LanguageError),
     /// Tree-sitter returned no tree.
@@ -35,8 +37,8 @@ pub enum ParseError {
     InvalidEdit,
     /// Tree-sitter produced an error or missing node at this span.
     InvalidSyntax(Span),
-    /// The untyped Tree-sitter node could not reconstruct typed syntax.
-    Reconstruct(ReconstructError),
+    /// The untyped Tree-sitter node could not migrate typed syntax.
+    Migrate(MigrateError),
     /// A valid concrete node has no representation in the typed schema.
     UnsupportedNode {
         /// The Tree-sitter node kind that could not be lowered.
@@ -50,14 +52,15 @@ impl Display for ParseError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Lex(error) => error.fmt(formatter),
+            Self::Tokenize(error) => error.fmt(formatter),
             Self::Language(error) => error.fmt(formatter),
             Self::Cancelled => formatter.write_str("Tree-sitter parsing was cancelled"),
             Self::InvalidEdit => formatter.write_str("source edit is outside the current buffer"),
-            Self::InvalidSyntax(span) => match span.start() {
-                Some(start) => write!(formatter, "invalid Macaulay2 syntax at byte {start}"),
-                None => formatter.write_str("invalid Macaulay2 syntax"),
-            },
-            Self::Reconstruct(error) => error.fmt(formatter),
+            Self::InvalidSyntax(span) if span.line_column_range().is_some() => {
+                write!(formatter, "invalid Macaulay2 syntax at {span}")
+            }
+            Self::InvalidSyntax(_) => formatter.write_str("invalid Macaulay2 syntax"),
+            Self::Migrate(error) => error.fmt(formatter),
             Self::UnsupportedNode { kind, .. } => {
                 write!(
                     formatter,
@@ -72,8 +75,9 @@ impl Error for ParseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Lex(error) => Some(error),
+            Self::Tokenize(error) => Some(error),
             Self::Language(error) => Some(error),
-            Self::Reconstruct(error) => Some(error),
+            Self::Migrate(error) => Some(error),
             Self::Cancelled
             | Self::InvalidEdit
             | Self::InvalidSyntax(_)
@@ -82,15 +86,21 @@ impl Error for ParseError {
     }
 }
 
-impl From<ReconstructError> for ParseError {
-    fn from(error: ReconstructError) -> Self {
-        Self::Reconstruct(error)
+impl From<MigrateError> for ParseError {
+    fn from(error: MigrateError) -> Self {
+        Self::Migrate(error)
     }
 }
 
 impl From<LexError> for ParseError {
     fn from(error: LexError) -> Self {
         Self::Lex(error)
+    }
+}
+
+impl From<CellStreamError> for ParseError {
+    fn from(error: CellStreamError) -> Self {
+        Self::Tokenize(error)
     }
 }
 
@@ -318,10 +328,6 @@ impl TreeSitterParser {
         Ok(Self { parser })
     }
 
-    fn parse_source(&mut self, source: &str) -> Result<SourceFile, ParseError> {
-        self.parse_source_in(Source::new(source))
-    }
-
     fn parse_source_in(&mut self, source: Arc<Source>) -> Result<SourceFile, ParseError> {
         let source_text = source.text();
         let (renamed, aliases) = renamed_source(source_text)?;
@@ -340,7 +346,7 @@ impl TreeSitterParser {
 
     /// Parses incomplete source while retaining syntax inside unclosed groups.
     ///
-    /// The parsing view is completed only for Tree-sitter; reconstructed nodes
+    /// The parsing view is completed only for Tree-sitter; migrated nodes
     /// retain the original source spans and zero-width missing closers.
     ///
     /// # Errors
@@ -373,8 +379,24 @@ impl TreeSitterParser {
 impl Parser for TreeSitterParser {
     type Error = ParseError;
 
-    fn parse_stream(&mut self, tokens: TokenStream) -> Result<SourceFile, Self::Error> {
-        self.parse_source_in(Source::new(tokens.to_source()))
+    fn parse_cells(&mut self, cells: CellStream) -> Result<SourceFile, Self::Error> {
+        let (cell_comments, comments) = cells.comment_ownership();
+        let mut source_file = match cells.complete_source() {
+            Some(source) => self.parse_source_in(source),
+            None => self.parse_source_in(Source::new(cells.to_string())),
+        }?;
+        if source_file.cells.len() == cell_comments.len() {
+            for (cell, comments) in source_file.cells.iter_mut().zip(cell_comments) {
+                cell.comments = comments;
+            }
+            source_file.comments = comments;
+        } else {
+            source_file.comments = comments;
+            for comments in cell_comments {
+                source_file.comments.append(comments);
+            }
+        }
+        Ok(source_file)
     }
 }
 
@@ -382,10 +404,11 @@ impl Parser for TreeSitterParser {
 ///
 /// # Errors
 ///
-/// Returns [`ParseError`] when parsing or typed reconstruction fails.
+/// Returns [`ParseError`] when parsing or typed migration fails.
 pub fn parse_file(source: &str) -> Result<SourceFile, ParseError> {
     let mut parser = TreeSitterParser::new()?;
-    parser.parse_source(source)
+    let cells = lex_str(source)?.to_cell_stream()?;
+    parser.parse_cells(cells)
 }
 
 /// Parses incomplete source while retaining syntax inside unclosed groups.
@@ -402,10 +425,11 @@ pub fn parse_file_recovering(source: &str) -> Result<Recovered<SourceFile, LexEr
 ///
 /// # Errors
 ///
-/// Returns [`ParseError`] when the emitted source is invalid or reconstruction
+/// Returns [`ParseError`] when the emitted source is invalid or migration
 /// fails.
 pub fn parse_tokens(tokens: &TokenStream) -> Result<SourceFile, ParseError> {
-    TreeSitterParser::new()?.parse_stream(tokens.clone())
+    let cells = tokens.to_cell_stream()?;
+    TreeSitterParser::new()?.parse_cells(cells)
 }
 
 fn first_error(root: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -448,9 +472,13 @@ impl<'source> Lowerer<'source> {
                 kind => return Err(self.unsupported(kind, child)),
             }
         }
+        let eof_offset = cells
+            .last()
+            .and_then(|cell| cell.eoc.span().start())
+            .unwrap_or(self.source.len());
         Ok(SourceFile::new(
             cells,
-            Eof::new("", self.source_span.at(self.source.len())),
+            EOF::new("", self.source_span.at(eof_offset)),
         ))
     }
 
@@ -459,7 +487,7 @@ impl<'source> Lowerer<'source> {
             let semicolon = self.required_kind(node, ";")?;
             (
                 self.expr_pack(self.children(node))?,
-                Some(self.reconstruct(semicolon)?),
+                Some(self.migrate(semicolon)?),
             )
         } else {
             let child = self.only_semantic_child(node)?;
@@ -475,26 +503,17 @@ impl<'source> Lowerer<'source> {
         Ok(Cell::new(
             content,
             semicolon,
-            Eoc::new("", self.source_span.at(eoc_offset)),
+            EOC::new("", self.source_span.at(eoc_offset)),
         ))
     }
 
     fn eoc_offset(
         &self,
-        node: tree_sitter::Node<'_>,
+        _node: tree_sitter::Node<'_>,
         next: Option<tree_sitter::Node<'_>>,
     ) -> usize {
-        if node.kind() == "muted" {
-            return node.end_byte().min(self.source.len());
-        }
-        let start = node.end_byte().min(self.source.len());
-        let end = next
-            .map_or(self.source.len(), |next| next.start_byte())
-            .min(self.source.len());
-        self.source[start..end]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(end, |relative| start + relative + 1)
+        next.map_or(self.source.len(), |next| next.start_byte())
+            .min(self.source.len())
     }
 
     fn expr_pack(&self, nodes: Vec<tree_sitter::Node<'_>>) -> Result<ExprPack, ParseError> {
@@ -510,7 +529,7 @@ impl<'source> Lowerer<'source> {
         let mut commas = Vec::new();
         for node in nodes.into_iter().filter(|node| !node.is_extra()) {
             match node.kind() {
-                "," => commas.push(self.reconstruct::<Token![,]>(node)?),
+                "," => commas.push(self.migrate::<Token![,]>(node)?),
                 "empty_component" => values.push(Component::Empty(Empty::new("", self.span(node)))),
                 ";" | "(" | ")" | "[" | "]" | "{" | "}" | "<|" | "|>" | "muted" => {}
                 _ if node.is_named() => values.push(Component::Expr(Box::new(self.expr(node)?))),
@@ -535,12 +554,12 @@ impl<'source> Lowerer<'source> {
 
     fn expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         match node.kind() {
-            "symbol" => Ok(self.reconstruct::<Symbol>(node)?.into()),
+            "symbol" => Ok(self.migrate::<Symbol>(node)?.into()),
             "integer_literal" if self.text(node).contains('p') => {
                 Ok(FloatLiteral::new(self.text(node), self.span(node)).into())
             }
-            "integer_literal" => Ok(self.reconstruct::<IntegerLiteral>(node)?.into()),
-            "float_literal" => Ok(self.reconstruct::<FloatLiteral>(node)?.into()),
+            "integer_literal" => Ok(self.migrate::<IntegerLiteral>(node)?.into()),
+            "float_literal" => Ok(self.migrate::<FloatLiteral>(node)?.into()),
             "string_literal" => self.string_literal(node),
             "raw_string_literal" => self.raw_string_literal(node),
             "array" | "list" | "angle_bar_list" | "sequence" | "parenthesized_expression" => {
@@ -562,13 +581,13 @@ impl<'source> Lowerer<'source> {
             | "local_structured_binding" => self.assignment(node),
             "evaluated_assignment" => Ok(EvaluatedAssignment::new(
                 self.expr(self.required_field(node, "left")?)?,
-                self.reconstruct(self.required_field(node, "operator")?)?,
+                self.migrate(self.required_field(node, "operator")?)?,
                 self.expr(self.required_field(node, "right")?)?,
             )
             .into()),
             "option" => Ok(OptionExpression::new(
                 self.expr(self.required_field(node, "left")?)?,
-                self.reconstruct(self.required_field(node, "operator")?)?,
+                self.migrate(self.required_field(node, "operator")?)?,
                 self.expr(self.required_field(node, "right")?)?,
             )
             .into()),
@@ -579,38 +598,38 @@ impl<'source> Lowerer<'source> {
             "quote_expression" => self.quote_expression(node),
             "new_statement" => self.new_statement(node),
             "break_statement" => Ok(BreakExpr::new(
-                self.reconstruct(self.required_kind(node, "break")?)?,
+                self.migrate(self.required_kind(node, "break")?)?,
                 self.first_expression_child(node)
                     .map(|child| self.expr(child))
                     .transpose()?,
             )
             .into()),
             "continue_statement" => Ok(ContinueExpr::new(
-                self.reconstruct(self.required_kind(node, "continue")?)?,
+                self.migrate(self.required_kind(node, "continue")?)?,
                 self.first_expression_child(node)
                     .map(|child| self.expr(child))
                     .transpose()?,
             )
             .into()),
             "return_statement" => Ok(ReturnExpr::new(
-                self.reconstruct(self.required_kind(node, "return")?)?,
+                self.migrate(self.required_kind(node, "return")?)?,
                 self.first_expression_child(node)
                     .map(|child| self.expr(child))
                     .transpose()?,
             )
             .into()),
             "catch_statement" => Ok(Catch::new(
-                self.reconstruct(self.required_kind(node, "catch")?)?,
+                self.migrate(self.required_kind(node, "catch")?)?,
                 self.expr(self.required_expression_child(node)?)?,
             )
             .into()),
             "throw_statement" => Ok(Throw::new(
-                self.reconstruct(self.required_kind(node, "throw")?)?,
+                self.migrate(self.required_kind(node, "throw")?)?,
                 self.expr(self.required_expression_child(node)?)?,
             )
             .into()),
             "trap_statement" => Ok(Trap::new(
-                self.reconstruct(self.required_kind(node, "trap")?)?,
+                self.migrate(self.required_kind(node, "trap")?)?,
                 self.expr(self.required_expression_child(node)?)?,
             )
             .into()),
@@ -677,7 +696,7 @@ impl<'source> Lowerer<'source> {
     fn statement(&self, node: tree_sitter::Node<'_>) -> Result<Statement, ParseError> {
         Ok(Statement::new(
             self.expr_pack(self.children(node))?,
-            self.reconstruct(self.required_kind(node, ";")?)?,
+            self.migrate(self.required_kind(node, ";")?)?,
         ))
     }
 
@@ -688,8 +707,8 @@ impl<'source> Lowerer<'source> {
             .filter(|child| child.kind() != "\"")
             .filter(|child| !child.is_extra())
             .map(|child| match child.kind() {
-                "escape_sequence" => self.reconstruct(child).map(StringElement::EscapeSequence),
-                "string_content" => self.reconstruct(child).map(StringElement::StringContent),
+                "escape_sequence" => self.migrate(child).map(StringElement::EscapeSequence),
+                "string_content" => self.migrate(child).map(StringElement::StringContent),
                 _ => Ok(StringElement::StringContent(StringContent::new(
                     self.text(child),
                     self.span(child),
@@ -706,12 +725,8 @@ impl<'source> Lowerer<'source> {
             .filter(|child| child.kind() != "///")
             .filter(|child| !child.is_extra())
             .map(|child| match child.kind() {
-                "escape_sequence" => self
-                    .reconstruct(child)
-                    .map(RawStringElement::EscapeSequence),
-                "raw_string_content" => self
-                    .reconstruct(child)
-                    .map(RawStringElement::RawStringContent),
+                "escape_sequence" => self.migrate(child).map(RawStringElement::EscapeSequence),
+                "raw_string_content" => self.migrate(child).map(RawStringElement::RawStringContent),
                 kind => Err(self.unsupported(kind, child)),
             })
             .collect::<Result<Vec<_>, ParseError>>()?;
@@ -725,13 +740,13 @@ impl<'source> Lowerer<'source> {
         if operator.kind() == "SPACE" {
             Ok(AdjacentExpr::new(left, Adj::new("", self.span(operator)), right).into())
         } else {
-            Ok(BinaryExpr::new(left, self.reconstruct(operator)?, right).into())
+            Ok(BinaryExpr::new(left, self.migrate(operator)?, right).into())
         }
     }
 
     fn prefix_expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         Ok(PrefixExpr::new(
-            self.reconstruct(self.required_field(node, "operator")?)?,
+            self.migrate(self.required_field(node, "operator")?)?,
             self.expr(self.required_field(node, "operand")?)?,
         )
         .into())
@@ -740,7 +755,7 @@ impl<'source> Lowerer<'source> {
     fn postfix_expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         Ok(PostfixExpr::new(
             self.expr(self.required_field(node, "operand")?)?,
-            self.reconstruct(self.required_field(node, "operator")?)?,
+            self.migrate(self.required_field(node, "operator")?)?,
         )
         .into())
     }
@@ -751,7 +766,7 @@ impl<'source> Lowerer<'source> {
             .ok_or_else(|| self.unsupported("lambda parameters", node))?;
         Ok(LambdaExpression::new(
             parameters,
-            self.reconstruct(self.required_field(node, "operator")?)?,
+            self.migrate(self.required_field(node, "operator")?)?,
             self.expr(self.required_field(node, "body")?)?,
         )
         .into())
@@ -761,14 +776,14 @@ impl<'source> Lowerer<'source> {
         let right = self.expr(self.required_field(node, "right")?)?;
         Ok(match node.kind() {
             "assignment" => GlobalBinding::new(
-                self.reconstruct(self.required_field(node, "left")?)?,
-                self.reconstruct(self.required_field(node, "operator")?)?,
+                self.migrate(self.required_field(node, "left")?)?,
+                self.migrate(self.required_field(node, "operator")?)?,
                 right,
             )
             .into(),
             "local_assignment" => LocalBinding::new(
-                self.reconstruct(self.required_field(node, "left")?)?,
-                self.reconstruct(self.required_field(node, "operator")?)?,
+                self.migrate(self.required_field(node, "left")?)?,
+                self.migrate(self.required_field(node, "operator")?)?,
                 right,
             )
             .into(),
@@ -779,7 +794,7 @@ impl<'source> Lowerer<'source> {
                 };
                 OperatorAssignment::new(
                     left,
-                    self.reconstruct(self.required_field(node, "operator")?)?,
+                    self.migrate(self.required_field(node, "operator")?)?,
                     right,
                 )
                 .into()
@@ -794,14 +809,14 @@ impl<'source> Lowerer<'source> {
                     OperatorExpr::AdjacentExpr(application) => MethodInstallation::new(
                         *application.left_operand,
                         *application.right_operand,
-                        self.reconstruct(self.required_field(node, "operator")?)?,
+                        self.migrate(self.required_field(node, "operator")?)?,
                         typical_value,
                         function,
                     )
                     .into(),
                     domain => OperatorInstallation::new(
                         domain,
-                        self.reconstruct(self.required_field(node, "operator")?)?,
+                        self.migrate(self.required_field(node, "operator")?)?,
                         typical_value,
                         function,
                     )
@@ -815,14 +830,14 @@ impl<'source> Lowerer<'source> {
                 if node.kind() == "local_structured_binding" {
                     LocalParallelAssignment::new(
                         pack,
-                        self.reconstruct(self.required_field(node, "operator")?)?,
+                        self.migrate(self.required_field(node, "operator")?)?,
                         right,
                     )
                     .into()
                 } else {
                     GlobalParallelAssignment::new(
                         pack,
-                        self.reconstruct(self.required_field(node, "operator")?)?,
+                        self.migrate(self.required_field(node, "operator")?)?,
                         right,
                     )
                     .into()
@@ -834,21 +849,21 @@ impl<'source> Lowerer<'source> {
 
     fn then_clause(&self, node: tree_sitter::Node<'_>) -> Result<ThenClause, ParseError> {
         Ok(ThenClause::new(
-            self.reconstruct(self.required_kind(node, "then")?)?,
+            self.migrate(self.required_kind(node, "then")?)?,
             self.expr(self.required_expression_child(node)?)?,
         ))
     }
 
     fn else_clause(&self, node: tree_sitter::Node<'_>) -> Result<ElseClause, ParseError> {
         Ok(ElseClause::new(
-            self.reconstruct(self.required_kind(node, "else")?)?,
+            self.migrate(self.required_kind(node, "else")?)?,
             self.expr(self.required_expression_child(node)?)?,
         ))
     }
 
     fn if_statement(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         Ok(IfStatement::new(
-            self.reconstruct(self.required_kind(node, "if")?)?,
+            self.migrate(self.required_kind(node, "if")?)?,
             self.expr(self.required_field(node, "condition")?)?,
             self.then_clause(self.required_kind(node, "then_clause")?)?,
             self.optional_kind(node, "else_clause")
@@ -863,7 +878,7 @@ impl<'source> Lowerer<'source> {
             .optional_kind(node, "list")
             .map(|token| {
                 Ok::<_, ParseError>(ListStep::new(
-                    self.reconstruct(token)?,
+                    self.migrate(token)?,
                     self.expr(self.required_field(node, "listed_value")?)?,
                 ))
             })
@@ -872,7 +887,7 @@ impl<'source> Lowerer<'source> {
             .optional_kind(node, "do")
             .map(|token| {
                 Ok::<_, ParseError>(DoStep::new(
-                    self.reconstruct(token)?,
+                    self.migrate(token)?,
                     self.expr(self.required_field(node, "ignored_value")?)?,
                 ))
             })
@@ -889,14 +904,14 @@ impl<'source> Lowerer<'source> {
             .optional_kind(node, "when")
             .map(|token| {
                 Ok::<_, ParseError>(WhenCondition::new(
-                    self.reconstruct(token)?,
+                    self.migrate(token)?,
                     self.expr(self.required_field(node, "filter")?)?,
                 ))
             })
             .transpose()?;
         Ok(ForLoop::new(
-            self.reconstruct(self.required_kind(node, "for")?)?,
-            self.reconstruct(self.required_field(node, "variable")?)?,
+            self.migrate(self.required_kind(node, "for")?)?,
+            self.migrate(self.required_field(node, "variable")?)?,
             iteration_domain,
             when_condition,
             self.loop_body(self.required_kind(node, "loop_body")?)?,
@@ -907,7 +922,7 @@ impl<'source> Lowerer<'source> {
     fn iteration_domain(&self, node: tree_sitter::Node<'_>) -> Result<IterationDomain, ParseError> {
         if let Some(token) = self.optional_kind(node, "in") {
             return Ok(IterIn::new(
-                self.reconstruct(token)?,
+                self.migrate(token)?,
                 self.expr(self.required_field(node, "iterated_collection")?)?,
             )
             .into());
@@ -916,7 +931,7 @@ impl<'source> Lowerer<'source> {
             .optional_kind(node, "from")
             .map(|token| {
                 Ok::<_, ParseError>(RangeBoundFrom::new(
-                    self.reconstruct(token)?,
+                    self.migrate(token)?,
                     self.expr(self.required_field(node, "range_start")?)?,
                 ))
             })
@@ -925,7 +940,7 @@ impl<'source> Lowerer<'source> {
             .optional_kind(node, "to")
             .map(|token| {
                 Ok::<_, ParseError>(RangeBoundTo::new(
-                    self.reconstruct(token)?,
+                    self.migrate(token)?,
                     self.expr(self.required_field(node, "range_end")?)?,
                 ))
             })
@@ -935,7 +950,7 @@ impl<'source> Lowerer<'source> {
 
     fn while_loop(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         Ok(WhileLoop::new(
-            self.reconstruct(self.required_kind(node, "while")?)?,
+            self.migrate(self.required_kind(node, "while")?)?,
             self.expr(self.required_field(node, "condition")?)?,
             self.loop_body(self.required_kind(node, "loop_body")?)?,
         )
@@ -950,7 +965,7 @@ impl<'source> Lowerer<'source> {
             .optional_kind(node, "of")
             .map(|token| {
                 Ok::<_, ParseError>(OfClass::new(
-                    self.reconstruct(token)?,
+                    self.migrate(token)?,
                     self.new_statement_element(
                         self.required_field(node, "parent")?,
                         &mut installation,
@@ -962,7 +977,7 @@ impl<'source> Lowerer<'source> {
             .optional_kind(node, "from")
             .map(|token| {
                 Ok::<_, ParseError>(FromInstance::new(
-                    self.reconstruct(token)?,
+                    self.migrate(token)?,
                     self.new_statement_element(
                         self.required_field(node, "instance")?,
                         &mut installation,
@@ -971,7 +986,7 @@ impl<'source> Lowerer<'source> {
             })
             .transpose()?;
         let statement = NewStatement::new(
-            self.reconstruct(self.required_kind(node, "new")?)?,
+            self.migrate(self.required_kind(node, "new")?)?,
             class,
             parent_class,
             instance,
@@ -995,7 +1010,7 @@ impl<'source> Lowerer<'source> {
             _ => return self.expr(node),
         }
         *installation = Some((
-            self.reconstruct(self.required_field(node, "operator")?)?,
+            self.migrate(self.required_field(node, "operator")?)?,
             self.expr(self.required_field(node, "right")?)?,
         ));
         self.expr(self.required_field(node, "left")?)
@@ -1024,7 +1039,7 @@ impl<'source> Lowerer<'source> {
             })
             .transpose()?;
         Ok(TryStatement::new(
-            self.reconstruct(self.required_kind(node, "try")?)?,
+            self.migrate(self.required_kind(node, "try")?)?,
             self.expr(value)?,
             on_success,
             fallback,
@@ -1034,9 +1049,9 @@ impl<'source> Lowerer<'source> {
 
     fn except_do(&self, node: tree_sitter::Node<'_>) -> Result<ExceptDo, ParseError> {
         Ok(ExceptDo::new(
-            self.reconstruct(self.required_kind(node, "except")?)?,
-            self.reconstruct(self.required_field(node, "exception")?)?,
-            self.reconstruct(self.required_kind(node, "do")?)?,
+            self.migrate(self.required_kind(node, "except")?)?,
+            self.migrate(self.required_field(node, "exception")?)?,
+            self.migrate(self.required_kind(node, "do")?)?,
             self.expr(self.required_expression_child(node)?)?,
         ))
     }
@@ -1053,11 +1068,11 @@ impl<'source> Lowerer<'source> {
             })
             .ok_or_else(|| self.unsupported("quote specifier", node))?;
         let specifier = match token.kind() {
-            "symbol" => QuoteSpecifier::Symbol(self.reconstruct(token)?),
-            "local" => QuoteSpecifier::Local(self.reconstruct(token)?),
-            "global" => QuoteSpecifier::Global(self.reconstruct(token)?),
-            "threadVariable" => QuoteSpecifier::ThreadVariable(self.reconstruct(token)?),
-            "threadLocal" => QuoteSpecifier::ThreadLocal(self.reconstruct(token)?),
+            "symbol" => QuoteSpecifier::Symbol(self.migrate(token)?),
+            "local" => QuoteSpecifier::Local(self.migrate(token)?),
+            "global" => QuoteSpecifier::Global(self.migrate(token)?),
+            "threadVariable" => QuoteSpecifier::ThreadVariable(self.migrate(token)?),
+            "threadLocal" => QuoteSpecifier::ThreadLocal(self.migrate(token)?),
             kind => return Err(self.unsupported(kind, token)),
         };
         let quoted = self.required_field(node, "token")?;
@@ -1075,50 +1090,46 @@ impl<'source> Lowerer<'source> {
             .transpose()?;
         Ok(match keyword.kind() {
             "elapsedTime" => ProfilingExpr::new(
-                ProfilingModifier::ElapsedTime(self.reconstruct(keyword)?),
+                ProfilingModifier::ElapsedTime(self.migrate(keyword)?),
                 value.ok_or_else(|| self.unsupported("profiling operand", node))?,
             )
             .into(),
             "elapsedTiming" => ProfilingExpr::new(
-                ProfilingModifier::ElapsedTiming(self.reconstruct(keyword)?),
+                ProfilingModifier::ElapsedTiming(self.migrate(keyword)?),
                 value.ok_or_else(|| self.unsupported("profiling operand", node))?,
             )
             .into(),
             "profile" => ProfilingExpr::new(
-                ProfilingModifier::Profile(self.reconstruct(keyword)?),
+                ProfilingModifier::Profile(self.migrate(keyword)?),
                 value.ok_or_else(|| self.unsupported("profiling operand", node))?,
             )
             .into(),
             "time" => ProfilingExpr::new(
-                ProfilingModifier::Time(self.reconstruct(keyword)?),
+                ProfilingModifier::Time(self.migrate(keyword)?),
                 value.ok_or_else(|| self.unsupported("profiling operand", node))?,
             )
             .into(),
             "timing" => ProfilingExpr::new(
-                ProfilingModifier::Timing(self.reconstruct(keyword)?),
+                ProfilingModifier::Timing(self.migrate(keyword)?),
                 value.ok_or_else(|| self.unsupported("profiling operand", node))?,
             )
             .into(),
-            "TEST" => DebugExpr::new(DebugKeyword::Test(self.reconstruct(keyword)?), value).into(),
-            "step" => DebugExpr::new(DebugKeyword::Step(self.reconstruct(keyword)?), value).into(),
-            "finish" => {
-                DebugExpr::new(DebugKeyword::Finish(self.reconstruct(keyword)?), value).into()
-            }
-            "shield" => {
-                DebugExpr::new(DebugKeyword::Shield(self.reconstruct(keyword)?), value).into()
-            }
+            "TEST" => DebugExpr::new(DebugKeyword::Test(self.migrate(keyword)?), value).into(),
+            "step" => DebugExpr::new(DebugKeyword::Step(self.migrate(keyword)?), value).into(),
+            "finish" => DebugExpr::new(DebugKeyword::Finish(self.migrate(keyword)?), value).into(),
+            "shield" => DebugExpr::new(DebugKeyword::Shield(self.migrate(keyword)?), value).into(),
             "breakpoint" => {
-                DebugExpr::new(DebugKeyword::Breakpoint(self.reconstruct(keyword)?), value).into()
+                DebugExpr::new(DebugKeyword::Breakpoint(self.migrate(keyword)?), value).into()
             }
             kind => return Err(self.unsupported(kind, keyword)),
         })
     }
 
-    fn reconstruct<T>(&self, node: tree_sitter::Node<'_>) -> Result<T, ParseError>
+    fn migrate<T>(&self, node: tree_sitter::Node<'_>) -> Result<T, ParseError>
     where
-        for<'tree> T: Reconstruct<TreeSitterNode<'tree, 'source>>,
+        for<'tree> T: Migrate<TreeSitterNode<'tree, 'source>>,
     {
-        T::reconstruct(TreeSitterNode::with_span(
+        T::migrate(TreeSitterNode::with_span(
             node,
             self.source,
             self.span(node),
@@ -1136,12 +1147,11 @@ impl<'source> Lowerer<'source> {
         };
         let opening = self.span(self.required_kind(node, kind.opening())?);
         let closing = self.required_kind(node, kind.closing())?;
-        let closing = if closing.start_byte() >= self.source.len() {
-            self.source_span.at(self.source.len())
+        if closing.start_byte() >= self.source.len() {
+            Ok(DoubleSpan::unclosed(opening))
         } else {
-            self.span(closing)
-        };
-        Ok(DoubleSpan::new(opening, closing))
+            Ok(DoubleSpan::new(opening, self.span(closing)))
+        }
     }
 
     fn children<'tree>(&self, node: tree_sitter::Node<'tree>) -> Vec<tree_sitter::Node<'tree>> {
@@ -1345,10 +1355,7 @@ fn collect_core_aliases(tokens: &TokenStream, aliases: &mut Vec<CoreAlias>) {
                     bare: end - bare.len()..end,
                 });
             }
-            TokenTree::Eoc(_)
-            | TokenTree::Literal(_)
-            | TokenTree::Punct(_)
-            | TokenTree::Trivia(_) => {}
+            TokenTree::Literal(_) | TokenTree::Punct(_) => {}
         }
     }
 }
@@ -1362,7 +1369,7 @@ pub struct TreeSitterNode<'tree, 'source> {
 }
 
 impl<'tree, 'source> TreeSitterNode<'tree, 'source> {
-    /// Creates an external reconstruction node.
+    /// Creates an external migration node.
     pub fn new(node: tree_sitter::Node<'tree>, source: &'source [u8]) -> Self {
         Self {
             node,

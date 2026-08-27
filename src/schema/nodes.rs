@@ -1,4 +1,4 @@
-m2_syn_macros::syntax! {
+syntax! {
     // Structural precedences with no single owning operator token; consumed
     // directly by the native parser. Operator tokens below carry their own
     // precedence numbers inline instead of naming a shared table entry.
@@ -90,12 +90,12 @@ m2_syn_macros::syntax! {
     struct Symbol;
     #[leaf(empty)]
     struct Empty;
-    #[leaf(empty)]
+    #[leaf(adj)]
     struct Adj;
     #[leaf(eoc)]
-    struct Eoc;
-    #[leaf(empty)]
-    struct Eof;
+    struct EOC;
+    #[leaf(eof)]
+    struct EOF;
     struct EscapeSequence;
     #[leaf(float)]
     struct FloatLiteral;
@@ -107,15 +107,18 @@ m2_syn_macros::syntax! {
     // `(_)` marks a field addressed positionally rather than by a CST field
     // name. The macro may still give it an artificial Rust name, but that
     // name is not a CST field. `Lines<T>` is `Vec<T>` printed one per line.
+    #[comments]
+    #[cell_stream]
     struct SourceFile {
         cells: Lines<Cell>,
-        eof: Eof
+        eof: EOF
     }
 
+    #[comments]
     struct Cell {
         content: ExprPack,
         semicolon: Token![;]?,
-        eoc: Eoc,
+        eoc: EOC,
     }
 
     enum Component {
@@ -269,7 +272,8 @@ m2_syn_macros::syntax! {
         OperatorExpr,
     }
 
-    struct AssignmentPack*(Delimited<Punctuated<AssignmentPackComponent>?>)
+    struct AssignmentPack*(
+        Delimited<Punctuated<AssignmentPackComponent>?>)
 
 
     struct GlobalParallelAssignment {

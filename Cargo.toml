@@ -4,7 +4,7 @@ members = ["m2-syn-macros"]
 
 [package]
 name = "m2-syn"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Typed syntax trees, traversal, and parser adapters for Macaulay2"
 license = "GPL-3.0-only"
@@ -12,9 +12,60 @@ repository = "https://github.com/AlexanderGolys/m2-syn"
 readme = "README.md"
 keywords = ["macaulay2", "syntax", "syn", "parse", "m2"]
 categories = ["development-tools::ffi", "parser-implementations"]
-exclude = ["book/", "codex-session-*.md"]
+exclude = [
+    "book/",
+    "codex-session-*.md",
+    "examples/example_sequences.m2",
+    "src/schema/nodes_rules.rs",
+]
+
+[features]
+default = ["pretty", "tree-sitter", "walk"]
+pretty = []
+tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-macaulay2"]
+walk = []
 
 [dependencies]
-m2-syn-macros = { version = "0.2.0", path = "m2-syn-macros" }
-tree-sitter = "0.26.12"
-tree-sitter-macaulay2 = "6.0.0"
+m2-syn-macros = { version = "0.3.0", path = "m2-syn-macros" }
+tree-sitter = { version = "0.26.12", optional = true }
+tree-sitter-macaulay2 = { version = "6.0.0", optional = true }
+
+[[example]]
+name = "hierarchy_visit_emit"
+required-features = ["tree-sitter", "walk"]
+
+[[example]]
+name = "inspect"
+required-features = ["pretty", "tree-sitter"]
+
+[[example]]
+name = "live_parser"
+required-features = ["pretty"]
+
+[[example]]
+name = "type_inference"
+required-features = ["tree-sitter", "walk"]
+
+[[test]]
+name = "generated_api"
+required-features = ["tree-sitter", "walk"]
+
+[[test]]
+name = "parsed_file"
+required-features = ["pretty", "tree-sitter"]
+
+[[test]]
+name = "parser_api"
+required-features = ["tree-sitter"]
+
+[[test]]
+name = "realtime_parser"
+required-features = ["tree-sitter"]
+
+[[test]]
+name = "review_regressions"
+required-features = ["tree-sitter"]
+
+[[test]]
+name = "tree_sitter_reconstruction"
+required-features = ["tree-sitter"]

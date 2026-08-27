@@ -5,10 +5,11 @@
 //! delimited nodes, so flattening can recover the corresponding raw group.
 
 use std::fmt::{Display, Formatter};
+use std::ops::Bound;
 
 use crate::{
-    Lex, Offset, Parse, ParseStream, Span, Spanned, TokenGroup, TokenParseError, TokenStream,
-    TokenTree,
+    Lex, Parse, ParseStream, Span, Spanned, TokenGroup, TokenParseError, TokenStream, TokenTree,
+    TrailingTrivia,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,9 +56,25 @@ pub trait DelimiterValue: Spanned + Lex + Sized {
     /// Describes the accepted delimiter family in parse diagnostics.
     fn expected() -> &'static str;
 
+    /// Borrows the non-space trivia following the opening delimiter.
+    fn opening_trivia(&self) -> &TrailingTrivia;
+
+    /// Mutably borrows the non-space trivia following the opening delimiter.
+    fn opening_trivia_mut(&mut self) -> &mut TrailingTrivia;
+
+    /// Borrows the non-space trivia following the closing delimiter.
+    fn closing_trivia(&self) -> &TrailingTrivia;
+
+    /// Mutably borrows the non-space trivia following the closing delimiter.
+    fn closing_trivia_mut(&mut self) -> &mut TrailingTrivia;
+
     /// Emits `contents` surrounded by this delimiter.
     fn surround(&self, output: &mut TokenStream, contents: TokenStream) {
-        output.extend([TokenGroup::new(self.delimiter(), contents)]);
+        let mut grouped = TokenStream::new();
+        self.opening_trivia().to_tokens(&mut grouped);
+        contents.to_tokens(&mut grouped);
+        output.extend([TokenGroup::new(self.delimiter(), grouped)]);
+        self.closing_trivia().to_tokens(output);
     }
 }
 
@@ -78,20 +95,21 @@ pub trait DelimiterToken: Parse + DelimiterValue {
     fn spans(&self) -> DoubleSpan;
 }
 
-/// The real opening and closing boundaries of a paired delimiter.
+/// The source boundaries of a complete or incomplete delimiter pair.
 ///
 /// A delimiter is two spelled tokens, not one span with an inferred width:
 /// storing both is what makes [`Delimiter::opening_span`] and
 /// [`Delimiter::closing_span`] plain field reads instead of arithmetic that
-/// assumes the source layout. `DoubleSpan(open, close)` mirrors
-/// `proc_macro2`'s open/close pair for a `Group`.
+/// assumes the source layout. The closing boundary is [`Bound::Unbounded`]
+/// while the group is incomplete, so a missing token is never confused with
+/// a zero-width token at the current end of input.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DoubleSpan(pub Span, pub Span);
+pub struct DoubleSpan(pub Span, pub Bound<Span>);
 
 impl DoubleSpan {
     /// Creates an opening and closing span pair.
     pub fn new(open: Span, close: Span) -> Self {
-        Self(open, close)
+        Self(open, Bound::Included(close))
     }
 
     /// Creates a pair backed by the delimiter's synthetic source spelling.
@@ -99,16 +117,15 @@ impl DoubleSpan {
         let spelling = format!("{}{}", kind.opening(), kind.closing());
         let span = Span::for_text(spelling);
         let boundary = kind.opening().len();
-        Self(
+        Self::new(
             span.subspan(0, boundary),
             span.subspan(boundary, span.len().unwrap_or(boundary)),
         )
     }
 
-    /// Creates a delimiter whose closing token is missing at `eof`.
-    pub fn unclosed(open: Span, eof: Offset) -> Self {
-        let close = open.at(eof);
-        Self(open, close)
+    /// Creates a delimiter whose closing token is not present yet.
+    pub fn unclosed(open: Span) -> Self {
+        Self(open, Bound::Unbounded)
     }
 
     /// Returns the opening delimiter span.
@@ -116,20 +133,37 @@ impl DoubleSpan {
         self.0.clone()
     }
 
-    /// Returns the closing delimiter span.
-    pub fn close(&self) -> Span {
+    /// Returns the closing delimiter span when it is present.
+    pub fn close(&self) -> Option<Span> {
+        match &self.1 {
+            Bound::Included(span) | Bound::Excluded(span) => Some(span.clone()),
+            Bound::Unbounded => None,
+        }
+    }
+
+    /// Returns the closing boundary, preserving an incomplete delimiter as
+    /// [`Bound::Unbounded`].
+    pub fn close_bound(&self) -> Bound<Span> {
         self.1.clone()
+    }
+
+    /// Records the closing token of an incomplete delimiter pair.
+    pub(crate) fn complete(&mut self, close: Span) {
+        debug_assert!(matches!(self.1, Bound::Unbounded));
+        self.1 = Bound::Included(close);
     }
 
     /// Reports whether a closing delimiter was present or synthetically quoted.
     pub fn is_closed(&self) -> bool {
-        self.1.bounds().is_none_or(|(start, end)| start != end)
+        !matches!(self.1, Bound::Unbounded)
     }
 }
 
 impl Spanned for DoubleSpan {
     fn try_span(&self) -> Option<Span> {
-        self.0.join(self.1.clone())
+        self.close()
+            .and_then(|close| self.0.join(close))
+            .or_else(|| Some(self.0.clone()))
     }
 }
 
@@ -140,12 +174,19 @@ pub struct Delimiter {
     pub kind: DelimiterKind,
     /// The opening and closing source spans.
     pub spans: DoubleSpan,
+    opening_trivia: TrailingTrivia,
+    closing_trivia: TrailingTrivia,
 }
 
 impl Delimiter {
     /// Creates type-erased delimiter data.
     pub fn new(kind: DelimiterKind, spans: DoubleSpan) -> Self {
-        Self { kind, spans }
+        Self {
+            kind,
+            spans,
+            opening_trivia: TrailingTrivia::default(),
+            closing_trivia: TrailingTrivia::default(),
+        }
     }
 
     /// Returns the real span of the opening bracket.
@@ -154,7 +195,7 @@ impl Delimiter {
     }
 
     /// Returns the real span of the closing bracket.
-    pub fn closing_span(&self) -> Span {
+    pub fn closing_span(&self) -> Option<Span> {
         self.spans.close()
     }
 
@@ -181,6 +222,22 @@ impl DelimiterValue for Delimiter {
 
     fn expected() -> &'static str {
         "a delimited group"
+    }
+
+    fn opening_trivia(&self) -> &TrailingTrivia {
+        &self.opening_trivia
+    }
+
+    fn opening_trivia_mut(&mut self) -> &mut TrailingTrivia {
+        &mut self.opening_trivia
+    }
+
+    fn closing_trivia(&self) -> &TrailingTrivia {
+        &self.closing_trivia
+    }
+
+    fn closing_trivia_mut(&mut self) -> &mut TrailingTrivia {
+        &mut self.closing_trivia
     }
 }
 

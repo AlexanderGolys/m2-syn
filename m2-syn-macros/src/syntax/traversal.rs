@@ -1,4 +1,7 @@
-use super::{EnumDefinition, FieldDefinition, ProductStyle, Shape, SyntaxContext, to_snake_case};
+use super::{
+    EnumDefinition, ProductStyle, Shape, StructDefinition, StructFields, SyntaxContext, Wrapper,
+    to_snake_case,
+};
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
@@ -191,13 +194,16 @@ impl Traversal {
 
     pub(super) fn struct_walker(
         self,
-        name: &Ident,
-        fields: &[FieldDefinition],
+        definition: &StructDefinition,
         context: &SyntaxContext<'_>,
-        has_typed_delimiter: bool,
-        has_retained_span: bool,
-        style: ProductStyle,
     ) -> TokenStream {
+        let name = &definition.name;
+        let StructFields::Product { fields, style } = &definition.fields else {
+            unreachable!("only product structs have generated child walkers")
+        };
+        let has_typed_delimiter = definition.wrapper.and_then(Wrapper::delimiter).is_some();
+        let has_retained_span = matches!(definition.wrapper, Some(Wrapper::Literal(_)));
+        let has_comments = definition.comments;
         let snake = to_snake_case(&name.to_string());
         match self {
             Self::Visit => {
@@ -243,9 +249,18 @@ impl Traversal {
                     quote!(#member: #folded)
                 });
                 let delimiter = has_typed_delimiter.then(|| quote!(delimiter: node.delimiter,));
-                let span = has_retained_span.then(|| quote!(span: node.span,));
-                let folded = match style {
-                    ProductStyle::Named => quote!(#name { #(#named_fields,)* #delimiter #span }),
+                let span = has_retained_span.then(|| {
+                    quote!(
+                        span: node.span,
+                        leading_trivia: node.leading_trivia,
+                        trailing_trivia: node.trailing_trivia,
+                    )
+                });
+                let comments = has_comments.then(|| quote!(comments: node.comments,));
+                let folded = match *style {
+                    ProductStyle::Named => {
+                        quote!(#name { #(#named_fields,)* #delimiter #span #comments })
+                    }
                     ProductStyle::Tuple => {
                         let tuple_fields = fields.iter().map(|field| {
                             let member = &field.member;

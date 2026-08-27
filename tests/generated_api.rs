@@ -1,7 +1,9 @@
+use m2_syn::nodes::{
+    Array, BinaryExpr, BinaryOperator, Expr, OperatorExpr, PrefixOperator, Symbol,
+};
 use m2_syn::{
-    Array, BinaryExpr, BinaryOperator, DelimiterKind, DelimiterToken, Expr, Lex, LiteralKind,
-    OperatorExpr, PrefixOperator, Source, Span, Spanned, Symbol, TokenParseError, TokenTree,
-    TriviaKind, fold::Fold, parse_quote_m2, parse_tokens, parse2, quote_m2, visit::Visit,
+    DelimiterKind, DelimiterToken, Lex, LiteralKind, Source, Span, Spanned, TokenParseError,
+    TokenTree, fold::Fold, parse_quote_m2, parse_tokens, parse2, quote_m2, visit::Visit,
     visit_mut::VisitMut,
 };
 
@@ -87,7 +89,7 @@ impl Fold for Uppercase {
 }
 
 #[test]
-fn fold_reconstructs_the_owned_tree() {
+fn fold_migrates_the_owned_tree() {
     let node = Uppercase.fold_expr(assignment());
     let mut collector = SymbolCollector(Vec::new());
 
@@ -202,17 +204,6 @@ fn quote_builds_an_m2_token_stream_with_interpolation() {
     assert_eq!(tokens.to_string(), "result=value+1;return result");
     assert_eq!(tokens.to_m2(), "result=value+1;return result");
     let tokens = tokens.into_iter().collect::<Vec<_>>();
-    assert_eq!(
-        tokens
-            .iter()
-            .filter(|token| matches!(token, TokenTree::Eoc(_)))
-            .count(),
-        1
-    );
-    let tokens = tokens
-        .into_iter()
-        .filter(|token| !matches!(token, TokenTree::Eoc(_)))
-        .collect::<Vec<_>>();
     assert!(matches!(tokens[0], TokenTree::Ident(_)));
     assert!(matches!(&tokens[1], TokenTree::Punct(token) if token.text() == "="));
     assert!(matches!(tokens[2], TokenTree::Ident(_)));
@@ -220,11 +211,7 @@ fn quote_builds_an_m2_token_stream_with_interpolation() {
     assert!(matches!(tokens[4], TokenTree::Literal(_)));
     assert!(matches!(&tokens[5], TokenTree::Punct(token) if token.text() == ";"));
     assert!(matches!(tokens[6], TokenTree::Ident(_)));
-    assert!(matches!(
-        tokens[7],
-        TokenTree::Trivia(ref trivia) if trivia.kind() == TriviaKind::Whitespace
-    ));
-    assert!(matches!(tokens[8], TokenTree::Ident(_)));
+    assert!(matches!(tokens[7], TokenTree::Ident(_)));
 }
 
 #[test]
@@ -286,7 +273,7 @@ fn quote_recurses_through_groups_around_interpolated_values() {
 
     assert_eq!(tokens.to_m2(), "apply (value)");
     assert!(matches!(
-        tokens.iter().nth(2),
+        tokens.iter().nth(1),
         Some(TokenTree::Group(group))
             if group.delim_kind() == DelimiterKind::Parenthesis
                 && matches!(group.stream().iter().next(), Some(TokenTree::Ident(_)))
@@ -335,5 +322,5 @@ fn quoted_m2_loads_as_a_typed_source_file() {
     let source_file = parse_tokens(&tokens).unwrap();
 
     assert_eq!(source_file.cells.len(), 2);
-    assert_eq!(source_file.to_m2(), "left + (right);\nreturn left");
+    assert_eq!(source_file.to_m2(), "left+(right);\nreturn left");
 }

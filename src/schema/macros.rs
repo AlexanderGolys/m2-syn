@@ -9,6 +9,18 @@
 //! to the `token!` procedural macro, and the delimiter families are a fixed
 //! set.
 
+/// Declares typed syntax nodes, token atoms, and enabled derived APIs.
+///
+/// The main crate selects the internal procedural-macro entry point so that
+/// `pretty` and `walk` are resolved as `m2-syn` dependency features rather
+/// than as features of the crate invoking this macro.
+#[macro_export]
+macro_rules! syntax {
+    ($($syntax:tt)*) => {
+        $crate::__m2_syn_syntax! { $($syntax)* }
+    };
+}
+
 /// Names the token type generated for a spelling, as in `Token![;]`.
 #[macro_export]
 macro_rules! Token {
@@ -20,10 +32,10 @@ macro_rules! Token {
 /// Names the delimiter atom for a delimiter family, as in `Delimiter![()]`.
 #[macro_export]
 macro_rules! Delimiter {
-    [()] => { $crate::_ParenthesisDelimiter };
-    [[]] => { $crate::_BracketDelimiter };
-    [{}] => { $crate::_BraceDelimiter };
-    [<| |>] => { $crate::_AngleBarDelimiter };
+    [()] => { $crate::nodes::_ParenthesisDelimiter };
+    [[]] => { $crate::nodes::_BracketDelimiter };
+    [{}] => { $crate::nodes::_BraceDelimiter };
+    [<| |>] => { $crate::nodes::_AngleBarDelimiter };
     [$($unsupported:tt)*] => {
         compile_error!("delimiter was not declared")
     };

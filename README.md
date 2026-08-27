@@ -12,6 +12,22 @@ conversion from a concrete syntax tree.
 The API is experimental and may change while the typed grammar and parser
 adapter interfaces are being established.
 
+## Cargo features
+
+The default feature set preserves the complete API. Consumers can disable it
+and select only the capabilities they use:
+
+- `tree-sitter` enables the Tree-sitter parser adapter, incremental parser,
+  `parse_file`, `parse_tokens`, and `ParsedFile::from_source`;
+- `pretty` enables typed-tree and token inspection through `PrettyTree`,
+  `PrettyReport`, and the `ParsedFile::pretty_*` methods;
+- `walk` generates and exports the `visit`, `visit_mut`, and `fold` traversal
+  modules.
+
+The native lexer, native precedence parser, typed nodes, quoting, emission,
+spans, and parser-independent migration traits remain available with
+`default-features = false`.
+
 ## Project direction
 
 This crate began as the syntax and analysis layer for the Macaulay2 language
@@ -21,7 +37,7 @@ rewritten, and emitted as code.
 
 The current priority is the basic source pipeline:
 
-1. parse M2 source with Tree-sitter and reconstruct its typed graph directly;
+1. parse M2 source with Tree-sitter and migrate its typed graph directly;
 2. parse the lexer's token stream with the independent native precedence parser;
 3. emit normalized M2 that parses back to the same structure.
 
@@ -45,25 +61,33 @@ incremental analysis after referenced code changes, selected node metadata,
 and procedural macros for M2. `Visit`, `VisitMut`, and `Fold` are intended as
 the basic traversal and transformation vocabulary for that work. The guiding
 design rule is to describe as little grammar as possible in `syntax!` and
-generate the repetitive construction, traversal, reconstruction, and printing
+generate the repetitive construction, traversal, migration, and printing
 machinery.
 
 ## Representation pipeline
 
-The frontend has one raw syntax representation and one generated typed graph:
+The frontend has one lexical representation, one cell-partitioned
+representation, and one generated typed graph:
 
 ```text
-source --lex--> TokenStream --NativeParser-----------> typed CST
-   |                                                     |
-   +--> Tree-sitter CST --direct lowering----------------+
-                                                         |
-source <--Display-- TokenStream <---------Lex-------------+
+source --Lex--> TokenStream --Tokenize--> CellStream --Parser--> typed CST
+                       ^                       ^                         |
+                       |                       +--------Tokenize---------+
+                       +--------------------------Lex--------------------+
 ```
 
-`TokenStream` is the only raw representation. It is flat at the top level and
-recursive only through balanced `Group` token trees. The native parser decides
-top-level cell boundaries after lexing because semicolons and line breaks are
-grammatical in M2, not merely lexical.
+`TokenStream` is the raw representation. It is flat at the top level and
+recursive only through balanced `Group` token trees. `Tokenize` partitions it
+into independently parseable cells and inserts inferred `Adj` punctuation.
+`CellStream` expresses end-of-cell and end-of-file structurally rather than as
+virtual token variants. Both parser backends consume this same representation.
+
+These explicit phases are also the intended macro seams. A future
+function-like macro may consume and produce the less constrained
+`TokenStream` before tokenisation. Transformations that should preserve normal
+M2 cell structure can instead use `CellStream`. Macro expansion itself is not
+implemented yet; the representations do not require it to be hidden inside a
+parser backend later.
 
 `Parse` and `Lex` are the two directions at the typed boundary. For a
 typed value `c`, parsing its emission should recover `c`. Emitting a parsed raw
@@ -78,10 +102,21 @@ Lex(Parse(tokens)) = normalize(tokens)
 `TreeSitterParser` lowers the bundled grammar's CST directly, including its
 `muted`, comma-pack, delimiter, operator, and control-form layouts. It does not
 re-lex or invoke `NativeParser`. `TreeSitterNode`, `ExternalCstNode`, and
-`Reconstruct` remain the parser-independent seam used by that adapter for
+`Migrate` remain the parser-independent seam used by that adapter for
 schema-compatible leaves, operators, and tokens; they are not an alternative
 graph or traversal API. Typed traversal is generated as `Visit`, `VisitMut`,
 and `Fold`.
+
+`NativeRealtimeParser` retains this pipeline at cell granularity. A newline or
+semicolon-confirmed cell is a restart point, while a cell ending only at the
+current EOF stays speculative and is reopened by an append. Earlier edits are
+reframed strictly forwards until the next old EOC is restored; the remaining
+cell suffix is reused without lexing or parsing it. Every reparsed region
+regenerates `Adj` together with its cell boundaries, and each cell reports
+`Complete`, `Incomplete`, or `Invalid` independently. Cell spans are local to
+the cell's immutable source allocation, with `document_range()` providing its
+position in the current buffer; this permits unchanged cells to move without
+rewriting every leaf span.
 
 The ownership boundaries are intentionally narrow:
 
@@ -89,9 +124,11 @@ The ownership boundaries are intentionally narrow:
 | --- | --- |
 | `lex/token_stream.rs` | raw atoms and recursive groups |
 | `lex/lexer.rs` | byte recognition and delimiter balancing |
-| `parser/parse.rs` | the shared token cursor and parser traits |
-| `parser/native.rs` | cell boundaries, precedence, and typed-node construction |
-| `cst/` | the external-CST reconstruction adapter |
+| `lex/cell_stream.rs` | cell boundaries and inferred adjacency |
+| `parser/parse.rs` | the per-cell token cursor and parser traits |
+| `parser/native.rs` | precedence and typed-node construction |
+| `parser/realtime.rs` | retained native cells and forward reframing |
+| `cst/` | the external-CST migration adapter |
 | `schema/nodes.rs` | the compact grammar and token parser metadata declaration |
 | `m2-syn-macros/src/` | generation of tokens, nodes, traversal, parsing, and emission |
 
@@ -162,9 +199,9 @@ fixed set.
 | `struct Name* ...` or `enum Name* ...` | a declaration whose recursive references require indirection | `Box<Name>` at references to that type |
 | `Token![=]` | literal token field | the type selected by the generated `Token!` macro |
 | `X?`, `Vec<T>`, `Punctuated<T>`, `Delimited<T>` | optional, repeated, nonempty comma-punctuated, or arbitrarily delimited children | the corresponding public wrapper type |
-| `(_)` | a child without a Tree-sitter field name | positional reconstruction from the next matching child |
+| `(_)` | a child without a Tree-sitter field name | positional migration from the next matching child |
 | `Lines<T>` | a `Vec<T>` printed one element per line | the separator travels with the functor |
-| `#[cst(kind = assignment)]` | a Rust name whose external CST node has another name | reconstruction from the named CST kind |
+| `#[cst(kind = assignment)]` | a Rust name whose external CST node has another name | migration from the named CST kind |
 | `#[delimiter(parenthesis)]` | a product enclosed by a delimiter family | a concrete node with its typed delimiter atom |
 | `#[literal(string)]` | a product spelled as a string literal | emission as one literal token, with no delimiter atom |
 
@@ -188,6 +225,11 @@ Constructors still accept the types written in the declaration and hide the
 storage conversion. Generated signatures consistently refer to literal token
 types through `Token![...]`; their concrete Rust names are an implementation
 detail of the expansion.
+
+Generated concrete syntax nodes and literal-token structs live under
+`m2_syn::nodes`. Construction and type macros such as `Token!`, `Delimiter!`,
+`paren!`, and `punct!` remain available from the crate root, as do generic
+containers such as `Delimited` and `Punctuated`.
 
 `Delimited<T>` retains an arbitrary one of the four paired delimiter families;
 `Delimited<T, Delimiter![()]>` and the other concrete delimiter atoms refine
@@ -232,11 +274,11 @@ grammar-backed enums themselves; there is no parallel global node-kind enum.
 
 | Node form | Generated API |
 | --- | --- |
-| every node and category | `Spanned`, `Reconstruct<N>`, and traversal dispatch |
-| token | `Token`, constructor, reconstruction, and a `Token![spelling]` arm |
-| text leaf | text-plus-span constructor and exact CST reconstruction |
-| product struct | concrete-node matching, storage-aware constructor, child reconstruction, and default child walkers |
-| coproduct enum | category matching, alternative reconstruction, default dispatch, and unambiguous direct/transitive `From` conversions |
+| every node and category | `Spanned`, `Migrate<N>`, and traversal dispatch |
+| token | `Token`, constructor, migration, and a `Token![spelling]` arm |
+| text leaf | text-plus-span constructor and exact CST migration |
+| product struct | concrete-node matching, storage-aware constructor, child migration, and default child walkers |
+| coproduct enum | category matching, alternative migration, default dispatch, and unambiguous direct/transitive `From` conversions |
 
 The traversal traits have ordinary, independently addressable modules:
 `visit::Visit`, `visit_mut::VisitMut`, and `fold::Fold`. Their node-specific
@@ -244,7 +286,7 @@ method inventories and free default walkers are generated from the syntax
 declaration, so adding a node cannot leave one traversal API incomplete. An
 override can inspect a node and call its module's free walker to continue into
 its children. `VisitMut` edits the owned typed graph in place. `Fold` consumes
-nodes and returns the reconstructed graph.
+nodes and returns the migrated graph.
 
 `cargo run --example type_inference` demonstrates the intended analysis path:
 generated `Visit` dispatch selects node-specific rules, and the binary rule
@@ -283,20 +325,19 @@ source; when only its exact position is unavailable, its range is `None`.
 Programmatically generated syntax uses an explicit synthetic `Source`, and
 joining spans from different source snapshots returns `None`.
 
-Line and column are deliberately absent — they are facts about a buffer's
-contents rather than about a position, so they belong to whoever holds the
-buffer, exactly as `rustc` keeps byte positions in `Span` and a line table in
-`SourceMap`. A span is not the identity of a semantic object; incremental
-dependency identity belongs in the semantic layer.
+Line and column remain derived facts rather than stored span coordinates.
+`Source::line_column` resolves a byte boundary through the immutable source's
+line-start index, and `Span::line_column_range` resolves both half-open
+boundaries for diagnostics. A span is not the identity of a semantic object;
+incremental dependency identity belongs in the semantic layer.
 
 ## Native lexer
 
 `lex` is the first native-parser layer. It accepts any byte iterator and
 returns the same source-spanned `TokenStream` used by quoting and emission. The only raw token categories
-are `Group`, `Ident`, `Literal`, `Punct`, and `Trivia`; the lexer does not
-synthesize typed nodes, adjacency, or cells. A lone carriage return and
-physical line breaks are both whitespace trivia, with
-`Trivia::contains_line_break` carrying the structural distinction. After
+are `Group`, `Ident`, `Literal`, and `Punct`; comments are retained as trivia
+beside those atoms, while ordinary layout remains recoverable from source
+spans. The lexer does not synthesize typed nodes, adjacency, or cells. After
 greedy token recognition, structural delimiter pairs become recursive `Group`
 trees that retain exact opening and closing spans.
 
@@ -311,6 +352,13 @@ Consequently `|--1` begins with the `|-` operator rather than a comment, while
 a token beginning with `--` is a line comment. Likewise, `(*)` remains the
 single greedy operator rather than a parenthesized group. Quotation marks are
 part of a single literal token, not delimiter groups.
+
+Consecutive `--` comments occupying complete physical lines coalesce into one
+outer comment block. Cell tokenization attaches that block to the cell on its
+right. A `--` comment following code on the same line and every `-* ... *-`
+comment are inner comments of their containing cell. Comment-only source is
+owned by `SourceFile`; token leaves never become the accidental owners of
+cell documentation.
 
 `$` remains an identifier-continuation character. `Package$name$12` is one
 `IdentToken` with one overall span; the typed `Symbol` additionally records
@@ -350,17 +398,17 @@ assert_eq!(spellings, ["**", "*", "1"]);
 
 ## Parser adapters
 
-Generated reconstruction depends only on `ExternalCstNode`.
+Generated migration depends only on `ExternalCstNode`.
 `TreeSitterNode` adapts Tree-sitter identity, field names, source text, extras,
 and ranges to that interface. This homogeneous node view ends at the adapter:
 it is never stored inside a generated typed node. Parsers that already know the
 typed grammar should construct the graph directly, as `NativeParser` does.
 
-`Parser<T>` is the parser-backend boundary. It receives a `TokenStream` and
+`Parser<T>` is the parser-backend boundary. It receives a `CellStream` and
 returns a generated syntax target. `T` defaults to
 `SourceFile`, while parsers may implement the trait again for more specific
-targets such as `Expr`. Both built-in backends implement this same token-stream
-API. A parser with its own CST can implement `ExternalCstNode` and call `reconstruct`;
+targets such as `Expr`. Both built-in backends implement this same cell-stream
+API. A parser with its own CST can implement `ExternalCstNode` and call `migrate`;
 a parser whose native model already matches the generated graph can construct
 the target directly.
 
@@ -373,35 +421,38 @@ than a synthetic token. A `fork` has an independent index and `advance_to`
 explicitly commits successful speculation.
 `parse_quote_m2!` composes quoting with type-inferred parsing.
 
-`Lex::to_token_stream` is the inverse boundary. The native parser supports the
-normalized round trip `TokenStream -> SourceFile -> TokenStream -> SourceFile`. Generated
+`Lex::to_token_stream` is the lexical projection, while `Tokenize` projects
+raw or typed syntax into cells. The native parser supports the normalized
+round trip `CellStream -> SourceFile -> CellStream -> SourceFile`. Generated
 concrete token structs are deliberately underscore-prefixed; use `Token![..]`
 to name their types and inspect the underlying `TokenTree` after `Lex`
 when working with a heterogeneous stream. Delimiter structs follow the same
 rule through `Delimiter![..]`.
 
-The lexer emits one flat `TokenStream`; splitting it into the cells evaluated
-at global scope is a parse result, because the judgment is grammatical. A `;`
+The lexer emits one flat `TokenStream`; `Tokenize` splits it into the cells
+evaluated at global scope. A `;`
 ends a cell unless a quote specifier took it literally, and a line break ends
 one only where the tokens so far already form a complete expression. Wrapping a
 region in a delimiter therefore never rewrites its tokens.
 
 ```rust
 # use std::convert::Infallible;
-use m2_syn::{Eof, Parser, SourceFile, Span, TokenStream, lex_str, parse_with};
+use m2_syn::nodes::{EOF, SourceFile};
+use m2_syn::{CellStream, Parser, Span, Tokenize, lex_str, parse_with};
 
 struct EmptyParser;
 
 impl Parser for EmptyParser {
     type Error = Infallible;
 
-    fn parse_stream(&mut self, _tokens: TokenStream) -> Result<SourceFile, Self::Error> {
-        Ok(SourceFile::new(Vec::new(), Eof::new("", Span::for_text(""))))
+    fn parse_cells(&mut self, _cells: CellStream) -> Result<SourceFile, Self::Error> {
+        Ok(SourceFile::new(Vec::new(), EOF::new("", Span::for_text(""))))
     }
 }
 
 let tokens = lex_str("").unwrap();
-let file = parse_with(&mut EmptyParser, tokens).unwrap();
+let cells = tokens.to_cell_stream().unwrap();
+let file = parse_with(&mut EmptyParser, cells).unwrap();
 assert!(file.cells.is_empty());
 ```
 
@@ -412,6 +463,7 @@ single parse.
 `parse_file` is the concrete Macaulay2 parser entry point:
 
 ```rust
+# #[cfg(feature = "tree-sitter")]
 # fn main() -> Result<(), m2_syn::ParseError> {
 use m2_syn::{Lex, parse_file};
 
@@ -420,19 +472,24 @@ let normalized = file.to_m2();
 assert_eq!(parse_file(&normalized)?.to_m2(), normalized);
 # Ok(())
 # }
+# #[cfg(not(feature = "tree-sitter"))]
+# fn main() {}
 ```
 
 `parse_tokens` connects generated or quoted M2 back to typed syntax:
 
 ```rust
+# #[cfg(feature = "tree-sitter")]
 # fn main() -> Result<(), m2_syn::ParseError> {
 use m2_syn::{Lex, parse_tokens, quote_m2};
 
 let quoted = quote_m2! { left + (right) };
 let file = parse_tokens(&quoted)?;
-assert_eq!(file.to_m2(), "left + (right)");
+assert_eq!(file.to_m2(), "left+(right)");
 # Ok(())
 # }
+# #[cfg(not(feature = "tree-sitter"))]
+# fn main() {}
 ```
 
 `ParsedFile` provides the convenient source-to-source interface over these
@@ -443,8 +500,10 @@ snapshot. `from_source` uses Tree-sitter; `from_source_native` selects the direc
 precedence parser.
 
 ```rust
+# #[cfg(all(feature = "pretty", feature = "tree-sitter", feature = "walk"))]
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-use m2_syn::{ParsedFile, Symbol, visit_mut::VisitMut};
+use m2_syn::nodes::Symbol;
+use m2_syn::{ParsedFile, visit_mut::VisitMut};
 
 struct Rename;
 
@@ -461,7 +520,7 @@ let file = ParsedFile::from_source("left + right")?.edit(|cst| {
 });
 
 assert_eq!(file.original_source(), "left + right");
-assert_eq!(file.to_source(), "renamed + right");
+assert_eq!(file.to_source(), "renamed+ right");
 
 // Stable, uncolored projections are useful in tests and diagnostics.
 println!("{}", file.pretty_tokens());
@@ -472,6 +531,8 @@ println!("{}", file.pretty_cst());
 file.print_pretty()?;
 # Ok(())
 # }
+# #[cfg(not(all(feature = "pretty", feature = "tree-sitter", feature = "walk")))]
+# fn main() {}
 ```
 
 The CST view is generated from the same schema as node construction and
@@ -494,10 +555,11 @@ cargo run --example inspect
 cargo run --example inspect -- path/to/file.m2
 ```
 
-Tree-sitter extras are not reconstructed yet. `ChildCursor` currently removes
-extra children, so comments are discarded instead of being retained as
-ordered trivia. They must be anchored relative to semantic children before
-comment-preserving round trips can be claimed.
+Both parser adapters transfer cell-token trivia into the same typed ownership:
+outer documentation blocks and inner comments live on `Cell`, while global
+comment-only input lives on `SourceFile`. Raw token projection reattaches the
+comments at their source-relative positions, so unchanged typed trees preserve
+their comment layout across emission.
 
 ## Quoting
 
@@ -513,7 +575,8 @@ ordinary Rust `for` loop. The iterator and pattern are explicit; interpolations
 that do not depend on the pattern are reused normally on each iteration.
 
 ```rust
-use m2_syn::{Span, Symbol, quote_m2};
+use m2_syn::nodes::Symbol;
+use m2_syn::{Span, quote_m2};
 
 let value = Symbol::new("value", Span::for_text("value"));
 let tokens = quote_m2! {
@@ -534,8 +597,9 @@ let repeated = quote_m2! {
 assert_eq!(repeated.to_string(), "left,right,");
 ```
 
-The rendered text is normalized M2 source, not a lossless reproduction of
-whitespace or comments discarded by the typed graph.
+The rendered text preserves retained comments and source-backed layout.
+Generated or moved tokens whose spans no longer share one source snapshot use
+normalized spacing where the original gap cannot be recovered.
 
 ## Development
 

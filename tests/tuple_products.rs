@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use m2_syn::{
-    CSTNodeClassLabel, ExternalCstChild, ExternalCstNode, Reconstruct, Span, Spanned, syntax,
+    CSTNodeClassLabel, ExternalCstChild, ExternalCstNode, Migrate, Span, Spanned, syntax,
 };
 
 syntax! {
@@ -13,6 +13,9 @@ syntax! {
     struct Pair {
         left: (_) Left,
         right: (_) Right,
+    }
+    struct SourceFile {
+        pair: Pair,
     }
 }
 
@@ -62,8 +65,8 @@ impl Spanned for Node {
 }
 
 #[test]
-fn positional_fields_reconstruct_from_unnamed_cst_children() {
-    let pair = Pair::reconstruct(Node {
+fn positional_fields_migrate_from_unnamed_cst_children() {
+    let pair = Pair::migrate(Node {
         name: "pair",
         children: vec![Node::leaf("left"), Node::leaf("right")],
     })
@@ -71,4 +74,11 @@ fn positional_fields_reconstruct_from_unnamed_cst_children() {
 
     assert_eq!(pair.left.text(), "left");
     assert_eq!(pair.right.text(), "right");
+}
+
+#[test]
+fn a_downstream_source_file_name_has_no_builtin_cell_behavior() {
+    fn accepts_downstream_source_file(_: Option<SourceFile>) {}
+
+    accepts_downstream_source_file(None);
 }

@@ -1,5 +1,4 @@
-use proc_macro::TokenStream;
-use proc_macro2::{Delimiter, Group, Ident, Spacing, Span, TokenStream as TokenStream2, TokenTree};
+use proc_macro2::{Delimiter, Group, Ident, Spacing, Span, TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Pat, Result, Token};
@@ -26,22 +25,21 @@ pub fn expand(input: TokenStream) -> TokenStream {
     let output = format_ident!("__m2_output", span = Span::mixed_site());
     let base = base_crate();
     let mut group_index = 0;
-    match expand_stream(input.into(), &output, &mut group_index) {
+    match expand_stream(input, &output, &mut group_index) {
         Ok(statements) => quote!({
             let mut #output = #base::TokenStream::new();
             #(#statements)*
             #output
-        })
-        .into(),
-        Err(error) => error.into_compile_error().into(),
+        }),
+        Err(error) => error.into_compile_error(),
     }
 }
 
 fn expand_stream(
-    input: TokenStream2,
+    input: TokenStream,
     output: &Ident,
     group_index: &mut usize,
-) -> Result<Vec<TokenStream2>> {
+) -> Result<Vec<TokenStream>> {
     let base = base_crate();
     let trees = input.into_iter().collect::<Vec<_>>();
     let mut statements = Vec::new();
@@ -54,7 +52,7 @@ fn expand_stream(
                 let contents = trees[index + 2..closing]
                     .iter()
                     .cloned()
-                    .collect::<TokenStream2>();
+                    .collect::<TokenStream>();
                 let group_output =
                     format_ident!("__m2_group_{}", *group_index, span = Span::mixed_site());
                 *group_index += 1;
@@ -117,7 +115,7 @@ fn group_at(trees: &[TokenTree], index: usize, delimiter: Delimiter) -> Option<&
     }
 }
 
-fn expand_group(group: &Group, output: &Ident, group_index: &mut usize) -> Result<TokenStream2> {
+fn expand_group(group: &Group, output: &Ident, group_index: &mut usize) -> Result<TokenStream> {
     let base = base_crate();
     let group_output = format_ident!("__m2_group_{}", *group_index, span = Span::mixed_site());
     *group_index += 1;
@@ -151,7 +149,7 @@ fn expand_repetition(
     template: &Group,
     output: &Ident,
     group_index: &mut usize,
-) -> Result<TokenStream2> {
+) -> Result<TokenStream> {
     let base = base_crate();
     let Repetition {
         pattern, iterator, ..
@@ -173,8 +171,8 @@ fn expand_static_run(
     trees: &[TokenTree],
     index: &mut usize,
     output: &Ident,
-    base: &TokenStream2,
-) -> TokenStream2 {
+    base: &TokenStream,
+) -> TokenStream {
     let mut spelling = String::new();
     let mut previous_word = false;
     let mut cursor = *index;

@@ -17,6 +17,31 @@ struct Syntax {
     enums: Vec<EnumDefinition>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct SyntaxFeatures {
+    pretty: bool,
+    walk: bool,
+}
+
+impl SyntaxFeatures {
+    pub(crate) const CORE: Self = Self {
+        pretty: false,
+        walk: false,
+    };
+    pub(crate) const PRETTY: Self = Self {
+        pretty: true,
+        walk: false,
+    };
+    pub(crate) const WALK: Self = Self {
+        pretty: false,
+        walk: true,
+    };
+    pub(crate) const PRETTY_WALK: Self = Self {
+        pretty: true,
+        walk: true,
+    };
+}
+
 /// Whole-declaration facts, derived once and shared by every expansion stage.
 ///
 /// Each fact needs the complete declaration to compute — which spelling a name
@@ -26,18 +51,19 @@ struct Syntax {
 /// live in whichever file suits them.
 pub(crate) struct SyntaxContext<'syntax> {
     tokens: &'syntax TokenDefinitions,
+    features: SyntaxFeatures,
     /// Types whose declarations request indirection at inline use sites.
     boxed: BTreeSet<SyntaxTypeName>,
     /// How each declared name is written in generated code, which is
     /// `Token![…]` for a spelled token and the bare name otherwise.
     declarations: BTreeMap<SyntaxTypeName, TokenStream>,
-    /// CST node kinds more than one struct reconstructs from, where the kind
+    /// CST node kinds more than one struct migrates from, where the kind
     /// alone cannot say which type a node is.
     shared_kinds: BTreeSet<String>,
 }
 
 impl<'syntax> SyntaxContext<'syntax> {
-    fn new(syntax: &'syntax Syntax) -> Self {
+    fn new(syntax: &'syntax Syntax, features: SyntaxFeatures) -> Self {
         let tokens = &syntax.tokens;
         let declarations = syntax
             .all_types()
@@ -49,6 +75,7 @@ impl<'syntax> SyntaxContext<'syntax> {
         }
         Self {
             tokens,
+            features,
             boxed: syntax
                 .structs
                 .iter()
@@ -81,6 +108,10 @@ impl<'syntax> SyntaxContext<'syntax> {
         self.tokens
     }
 
+    fn pretty(&self) -> bool {
+        self.features.pretty
+    }
+
     pub(crate) fn is_boxed(&self, name: &Ident) -> bool {
         self.boxed.contains(&name.into())
     }
@@ -102,8 +133,8 @@ fn type_reference(tokens: &TokenDefinitions, name: &Ident) -> TokenStream {
     }
 }
 
-pub(crate) fn generate(input: TokenStream) -> Result<TokenStream> {
-    parse2::<Syntax>(input)?.expand()
+pub(crate) fn generate(input: TokenStream, features: SyntaxFeatures) -> Result<TokenStream> {
+    parse2::<Syntax>(input)?.expand(features)
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -123,6 +154,8 @@ struct StructDefinition {
     wrapper: Option<Wrapper>,
     cst_kind: Option<String>,
     boxed: bool,
+    cell_stream: bool,
+    comments: bool,
 }
 
 enum StructFields {
@@ -143,8 +176,10 @@ enum ProductStyle {
 enum LeafKind {
     Ident,
     QualifiedIdent,
+    Adj,
     Empty,
     Eoc,
+    Eof,
     Float,
     Integer,
 }
@@ -162,7 +197,7 @@ enum FieldSource {
 }
 
 impl StructDefinition {
-    /// The CST node this struct reconstructs from, which is its own name in
+    /// The CST node this struct migrates from, which is its own name in
     /// snake case unless the grammar spells it differently.
     fn cst_kind(&self) -> String {
         self.cst_kind
@@ -307,11 +342,11 @@ impl Parse for Syntax {
     }
 }
 impl Syntax {
-    fn expand(&self) -> Result<TokenStream> {
+    fn expand(&self, features: SyntaxFeatures) -> Result<TokenStream> {
         let names = self.declared_names()?;
         self.validate_references(&names)?;
-        let context = SyntaxContext::new(self);
-        let tokens = self.tokens.expand();
+        let context = SyntaxContext::new(self, features);
+        let tokens = self.tokens.expand(features.pretty);
         let structs = self
             .structs
             .iter()
@@ -323,9 +358,9 @@ impl Syntax {
             .map(|definition| expand_enum(definition, &context))
             .collect::<Vec<_>>();
         let conversions = self.expand_conversions(&context);
-        let visits = self.expand_visit(&context);
-        let visit_muts = self.expand_visit_mut(&context);
-        let folds = self.expand_fold(&context);
+        let visits = features.walk.then(|| self.expand_visit(&context));
+        let visit_muts = features.walk.then(|| self.expand_visit_mut(&context));
+        let folds = features.walk.then(|| self.expand_fold(&context));
 
         Ok(quote! {
             #tokens
@@ -391,22 +426,21 @@ impl Syntax {
         let kind = definition.cst_kind();
         match &definition.fields {
             StructFields::Leaf(leaf) => {
-                let output = if matches!(leaf, LeafKind::Empty) {
-                    format_ident!("_output")
-                } else {
-                    format_ident!("output")
-                };
+                if definition.comments {
+                    return Err(Error::new(
+                        definition.name.span(),
+                        "`#[comments]` requires a named product struct",
+                    ));
+                }
+                let output = format_ident!("output");
                 let emit = match leaf {
                     LeafKind::Empty => quote! {},
-                    LeafKind::Eoc => quote! {
-                        let span = ::m2_syn::Spanned::expect_span(self);
-                        let marker = if output.ends_with_semicolon() {
-                            ::m2_syn::EocToken::after_semicolon(span)
-                        } else {
-                            ::m2_syn::EocToken::new(span)
-                        };
-                        output.extend([marker]);
+                    LeafKind::Adj => quote! {
+                        output.extend([::m2_syn::TokenTree::Punct(
+                            ::m2_syn::Punct::from_span(::m2_syn::Spanned::expect_span(self)),
+                        )]);
                     },
+                    LeafKind::Eoc | LeafKind::Eof => quote! {},
                     LeafKind::Float => quote! {
                         output.extend([::m2_syn::LiteralToken::from_span(
                             ::m2_syn::LiteralKind::Float,
@@ -427,8 +461,14 @@ impl Syntax {
                 };
                 let pretty_text = if matches!(leaf, LeafKind::Empty) {
                     quote!("∅")
-                } else if matches!(leaf, LeafKind::Eoc) {
-                    quote!("EOC")
+                } else if matches!(leaf, LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof) {
+                    let marker = match leaf {
+                        LeafKind::Adj => "Adj",
+                        LeafKind::Eoc => "EOC",
+                        LeafKind::Eof => "EOF",
+                        _ => unreachable!(),
+                    };
+                    quote!(#marker)
                 } else {
                     quote!(self.span.text().expect("textual syntax spans must resolve"))
                 };
@@ -446,19 +486,33 @@ impl Syntax {
                         let span = span.with_text(text);
                         let (package_qualifier, index_qualifier) =
                             ::m2_syn::__qualified_identifier_spans(text, &span);
-                        Self { package_qualifier, index_qualifier, span }
+                        Self {
+                            package_qualifier,
+                            index_qualifier,
+                            span,
+                            leading_trivia: ::m2_syn::LeadingTrivia::default(),
+                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
+                        }
                     },
-                    LeafKind::Empty | LeafKind::Eoc => quote! {
+                    LeafKind::Empty | LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof => quote! {
                         let _ = text;
-                        Self { span }
+                        Self {
+                            span,
+                            leading_trivia: ::m2_syn::LeadingTrivia::default(),
+                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
+                        }
                     },
                     _ => quote! {
                         let span = span.with_text(text.as_ref());
-                        Self { span }
+                        Self {
+                            span,
+                            leading_trivia: ::m2_syn::LeadingTrivia::default(),
+                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
+                        }
                     },
                 };
                 let text_api = match leaf {
-                    LeafKind::Empty | LeafKind::Eoc => quote! {},
+                    LeafKind::Empty | LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof => quote! {},
                     LeafKind::QualifiedIdent => quote! {
                         /// Returns the leaf spelling.
                         pub fn text(&self) -> &str {
@@ -485,13 +539,43 @@ impl Syntax {
                         }
                     },
                 };
+                let derives = if matches!(leaf, LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof) {
+                    quote!(Debug, Clone, PartialEq, Eq, Hash)
+                } else {
+                    quote!(Debug, ::m2_syn::Spanned)
+                };
+                let boundary_spanned =
+                    matches!(leaf, LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof).then(|| {
+                        quote! {
+                            impl ::m2_syn::Spanned for #name {
+                                fn try_span(&self) -> ::std::option::Option<::m2_syn::Span> {
+                                    ::std::option::Option::Some(self.span.clone())
+                                }
+                            }
+                        }
+                    });
+                let pretty_impl = context.pretty().then(|| {
+                    quote! {
+                        impl ::m2_syn::PrettyTree for #name {
+                            fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                                ::m2_syn::PrettyNode::token(
+                                    stringify!(#name),
+                                    #pretty_text,
+                                    ::m2_syn::Spanned::expect_span(self),
+                                )
+                            }
+                        }
+                    }
+                });
                 Ok(quote! {
 
-                #[derive(Debug, ::m2_syn::Spanned)]
+                #[derive(#derives)]
                 #[doc = concat!("A typed Macaulay2 `", #kind, "` syntax leaf.")]
                 pub struct #name {
                     #qualifier_fields
                     span: ::m2_syn::Span,
+                    leading_trivia: ::m2_syn::LeadingTrivia,
+                    trailing_trivia: ::m2_syn::TrailingTrivia,
                 }
 
                 impl #name {
@@ -505,21 +589,35 @@ impl Syntax {
 
                 impl ::m2_syn::Lex for #name {
                     fn to_tokens(&self, #output: &mut ::m2_syn::TokenStream) {
+                        ::m2_syn::Lex::to_tokens(&self.leading_trivia, #output);
                         #emit
+                        ::m2_syn::Lex::to_tokens(&self.trailing_trivia, #output);
                     }
                 }
 
-                impl ::m2_syn::PrettyTree for #name {
-                    fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
-                        ::m2_syn::PrettyNode::token(
-                            stringify!(#name),
-                            #pretty_text,
-                            ::m2_syn::Spanned::expect_span(self),
-                        )
+                impl ::m2_syn::Terminal for #name {
+                    fn leading_trivia(&self) -> &::m2_syn::LeadingTrivia {
+                        &self.leading_trivia
+                    }
+
+                    fn leading_trivia_mut(&mut self) -> &mut ::m2_syn::LeadingTrivia {
+                        &mut self.leading_trivia
+                    }
+
+                    fn trailing_trivia(&self) -> &::m2_syn::TrailingTrivia {
+                        &self.trailing_trivia
+                    }
+
+                    fn trailing_trivia_mut(&mut self) -> &mut ::m2_syn::TrailingTrivia {
+                        &mut self.trailing_trivia
                     }
                 }
 
-                impl<N> ::m2_syn::Reconstruct<N> for #name
+                #boundary_spanned
+
+                #pretty_impl
+
+                impl<N> ::m2_syn::Migrate<N> for #name
                 where
                     N: ::m2_syn::ExternalCstNode,
                 {
@@ -527,9 +625,9 @@ impl Syntax {
                         node.identity().matches(#kind, true)
                     }
 
-                    fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
-                        if !<Self as ::m2_syn::Reconstruct<N>>::matches(&node) {
-                            return Err(::m2_syn::ReconstructError::wrong_node(
+                    fn migrate(node: N) -> Result<Self, ::m2_syn::MigrateError> {
+                        if !<Self as ::m2_syn::Migrate<N>>::matches(&node) {
+                            return Err(::m2_syn::MigrateError::wrong_node(
                                 #kind,
                                 true,
                                 node.identity(),
@@ -543,6 +641,12 @@ impl Syntax {
             }
 
             StructFields::Product { fields, style } => {
+                if definition.comments && *style != ProductStyle::Named {
+                    return Err(Error::new(
+                        definition.name.span(),
+                        "`#[comments]` requires a named product struct",
+                    ));
+                }
                 let structural_matches = if context.kind_is_shared(&kind) {
                     fields
                         .iter()
@@ -571,8 +675,20 @@ impl Syntax {
                         pub delimiter: #ty,
                     )
                 });
+                let comments_field = definition.comments.then(|| {
+                    quote! {
+                        /// Comments structurally owned by this syntax node.
+                        pub comments: ::m2_syn::CommentTrivia,
+                    }
+                });
                 let retains_span = matches!(definition.wrapper, Some(Wrapper::Literal(_)));
-                let retained_span_field = retains_span.then(|| quote!(span: ::m2_syn::Span,));
+                let retained_span_field = retains_span.then(|| {
+                    quote! {
+                        span: ::m2_syn::Span,
+                        leading_trivia: ::m2_syn::LeadingTrivia,
+                        trailing_trivia: ::m2_syn::TrailingTrivia,
+                    }
+                });
                 let struct_definition = match style {
                     ProductStyle::Named => quote! {
                         #[doc = concat!("A typed Macaulay2 `", #kind, "` syntax node.")]
@@ -580,6 +696,7 @@ impl Syntax {
                             #(#expanded_fields,)*
                             #delimiter_field
                             #retained_span_field
+                            #comments_field
                         }
                     },
                     ProductStyle::Tuple => {
@@ -630,14 +747,23 @@ impl Syntax {
                     }
                 });
                 let delimiter_member = typed_delimiter.as_ref().map(|_| quote!(delimiter,));
-                let retained_span_member = retains_span.then(|| quote!(span,));
+                let comments_member = definition
+                    .comments
+                    .then(|| quote!(comments: ::m2_syn::CommentTrivia::default(),));
+                let retained_span_member = retains_span.then(|| {
+                    quote! {
+                        span,
+                        leading_trivia: ::m2_syn::LeadingTrivia::default(),
+                        trailing_trivia: ::m2_syn::TrailingTrivia::default(),
+                    }
+                });
                 let constructor_value = match style {
                     ProductStyle::Named if constructor_delimiter.is_some() => quote!({
                         #constructor_delimiter
-                        Self { #(#constructor_fields,)* #delimiter_member #retained_span_member }
+                        Self { #(#constructor_fields,)* #delimiter_member #retained_span_member #comments_member }
                     }),
                     ProductStyle::Named => {
-                        quote!(Self { #(#constructor_fields,)* #retained_span_member })
+                        quote!(Self { #(#constructor_fields,)* #retained_span_member #comments_member })
                     }
                     ProductStyle::Tuple => quote!(Self(#(#constructor_fields,)*)),
                 };
@@ -656,10 +782,10 @@ impl Syntax {
                 let constructor_span = typed_delimiter
                     .as_ref()
                     .map(|_| quote!(let span = ::m2_syn::Span::join_all([#(#span_fields),*]);));
-                let reconstruct_fields = fields
+                let migrate_fields = fields
                     .iter()
                     .map(|field| {
-                        field.reconstruct(
+                        field.migrate(
                             context,
                             *style == ProductStyle::Tuple
                                 && fields.len() == 1
@@ -667,10 +793,10 @@ impl Syntax {
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let reconstructed_fields = fields.iter().map(|field| &field.binding);
-                let reconstruct_span =
+                let migrated_fields = fields.iter().map(|field| &field.binding);
+                let migrate_span =
                     retains_span.then(|| quote!(let span = ::m2_syn::Spanned::expect_span(&node);));
-                let reconstruct_delimiter = typed_delimiter.as_ref().map(|ty| {
+                let migrate_delimiter = typed_delimiter.as_ref().map(|ty| {
                     quote! {
                         let opening = children.required_anonymous(
                             <#ty as ::m2_syn::DelimiterToken>::KIND.opening(),
@@ -686,44 +812,67 @@ impl Syntax {
                         );
                     }
                 });
-                let reconstructed = match style {
-                    ProductStyle::Named if reconstruct_delimiter.is_some() => {
-                        quote!(Self { #(#reconstructed_fields,)* #delimiter_member #retained_span_member })
+                let migrated = match style {
+                    ProductStyle::Named if migrate_delimiter.is_some() => {
+                        quote!(Self { #(#migrated_fields,)* #delimiter_member #retained_span_member #comments_member })
                     }
                     ProductStyle::Named => {
-                        quote!(Self { #(#reconstructed_fields,)* #retained_span_member })
+                        quote!(Self { #(#migrated_fields,)* #retained_span_member #comments_member })
                     }
-                    ProductStyle::Tuple => quote!(Self(#(#reconstructed_fields,)*)),
+                    ProductStyle::Tuple => quote!(Self(#(#migrated_fields,)*)),
                 };
                 let field_separator = definition.wrapper.map_or(" ", Wrapper::field_separator);
                 let print_fields = fields
                     .iter()
                     .map(|field| field.to_tokens(field_separator, context))
                     .collect::<Result<Vec<_>>>()?;
-                let pretty_fields = fields.iter().map(|field| {
-                    let member = &field.member;
-                    let label = member.to_token_stream().to_string();
+                let pretty_impl = context.pretty().then(|| {
+                    let pretty_fields = fields.iter().map(|field| {
+                        let member = &field.member;
+                        let label = member.to_token_stream().to_string();
+                        quote! {
+                            node.push(#label, &self.#member);
+                        }
+                    });
+                    let pretty_delimiter = typed_delimiter
+                        .as_ref()
+                        .map(|_| quote!(node.push("delimiter", &self.delimiter);));
+                    let pretty_comments = definition
+                        .comments
+                        .then(|| quote!(node.push("comments", &self.comments);));
                     quote! {
-                        node.push(#label, &self.#member);
+                        impl ::m2_syn::PrettyTree for #name {
+                            fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                                let mut node = ::m2_syn::PrettyNode::syntax(
+                                    stringify!(#name),
+                                    ::m2_syn::Spanned::try_span(self),
+                                );
+                                #(#pretty_fields)*
+                                #pretty_delimiter
+                                #pretty_comments
+                                node
+                            }
+                        }
                     }
                 });
-                let pretty_delimiter = typed_delimiter
-                    .as_ref()
-                    .map(|_| quote!(node.push("delimiter", &self.delimiter);));
                 let emit_contents = match definition.wrapper {
                     Some(Wrapper::Literal(Literal::String)) => quote! {
+                        ::m2_syn::Lex::to_tokens(&self.leading_trivia, output);
                         let span = ::m2_syn::Spanned::expect_span(self);
                         output.extend([::m2_syn::LiteralToken::from_span(
                             ::m2_syn::LiteralKind::String,
                             span,
                         )]);
+                        ::m2_syn::Lex::to_tokens(&self.trailing_trivia, output);
                     },
                     Some(Wrapper::Literal(Literal::RawString)) => quote! {
+                        ::m2_syn::Lex::to_tokens(&self.leading_trivia, output);
                         let span = ::m2_syn::Spanned::expect_span(self);
                         output.extend([::m2_syn::LiteralToken::from_span(
                             ::m2_syn::LiteralKind::RawString,
                             span,
                         )]);
+                        ::m2_syn::Lex::to_tokens(&self.trailing_trivia, output);
                     },
                     Some(_) => quote! {
                         ::m2_syn::DelimiterValue::surround(
@@ -736,6 +885,39 @@ impl Syntax {
                         ::m2_syn::Lex::to_tokens(&contents, output);
                     },
                 };
+                let apply_comments = definition
+                    .comments
+                    .then(|| quote!(self.comments.__apply_to(&mut contents);));
+                let terminal_impl = retains_span.then(|| {
+                    quote! {
+                        impl ::m2_syn::Terminal for #name {
+                            fn leading_trivia(&self) -> &::m2_syn::LeadingTrivia {
+                                &self.leading_trivia
+                            }
+
+                            fn leading_trivia_mut(&mut self) -> &mut ::m2_syn::LeadingTrivia {
+                                &mut self.leading_trivia
+                            }
+
+                            fn trailing_trivia(&self) -> &::m2_syn::TrailingTrivia {
+                                &self.trailing_trivia
+                            }
+
+                            fn trailing_trivia_mut(&mut self) -> &mut ::m2_syn::TrailingTrivia {
+                                &mut self.trailing_trivia
+                            }
+                        }
+                    }
+                });
+                let cell_aware_source = definition.cell_stream.then(|| {
+                    quote! {
+                        fn to_m2(&self) -> ::std::string::String {
+                            ::m2_syn::Tokenize::to_cell_stream(self)
+                                .expect("typed source-file cells are complete")
+                                .to_string()
+                        }
+                    }
+                });
                 Ok(quote! {
                     #[derive(Debug, ::m2_syn::Spanned)]
                     #struct_definition
@@ -751,23 +933,18 @@ impl Syntax {
                         fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
                             let mut contents = ::m2_syn::TokenStream::new();
                             #(#print_fields)*
+                            #apply_comments
                             #emit_contents
                         }
+
+                        #cell_aware_source
                     }
 
-                    impl ::m2_syn::PrettyTree for #name {
-                        fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
-                            let mut node = ::m2_syn::PrettyNode::syntax(
-                                stringify!(#name),
-                                ::m2_syn::Spanned::try_span(self),
-                            );
-                            #(#pretty_fields)*
-                            #pretty_delimiter
-                            node
-                        }
-                    }
+                    #terminal_impl
 
-                    impl<N> ::m2_syn::Reconstruct<N> for #name
+                    #pretty_impl
+
+                    impl<N> ::m2_syn::Migrate<N> for #name
                     where
                         N: ::m2_syn::ExternalCstNode,
                     {
@@ -776,19 +953,19 @@ impl Syntax {
                                 #(&& #structural_matches)*
                         }
 
-                        fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
-                            if !<Self as ::m2_syn::Reconstruct<N>>::matches(&node) {
-                                return Err(::m2_syn::ReconstructError::wrong_node(
+                        fn migrate(node: N) -> Result<Self, ::m2_syn::MigrateError> {
+                            if !<Self as ::m2_syn::Migrate<N>>::matches(&node) {
+                                return Err(::m2_syn::MigrateError::wrong_node(
                                     #kind,
                                     true,
                                     node.identity(),
                                 ));
                             }
-                            #reconstruct_span
+                            #migrate_span
                             let mut children = ::m2_syn::ChildCursor::new(&node);
-                            #reconstruct_delimiter
-                            #(#reconstruct_fields)*
-                            Ok(#reconstructed)
+                            #migrate_delimiter
+                            #(#migrate_fields)*
+                            Ok(#migrated)
                         }
                     }
                 })
@@ -977,14 +1154,7 @@ impl Syntax {
             let name = &definition.name;
             match &definition.fields {
                 StructFields::Leaf(_) => traversal.empty_walker(name, quote!(#name)),
-                StructFields::Product { fields, style } => traversal.struct_walker(
-                    name,
-                    fields,
-                    context,
-                    definition.wrapper.and_then(Wrapper::delimiter).is_some(),
-                    matches!(definition.wrapper, Some(Wrapper::Literal(_))),
-                    *style,
-                ),
+                StructFields::Product { .. } => traversal.struct_walker(definition, context),
             }
         });
         let enums = self
@@ -1006,22 +1176,18 @@ impl FieldDefinition {
             FieldSource::Positional => quote!(child.field.is_none()),
         };
         Some(quote!(node.children().any(|child| {
-            #field_match && <#ty as ::m2_syn::Reconstruct<N>>::matches(&child.node)
+            #field_match && <#ty as ::m2_syn::Migrate<N>>::matches(&child.node)
         })))
     }
 
-    fn reconstruct(
-        &self,
-        context: &SyntaxContext<'_>,
-        delimited_newtype: bool,
-    ) -> Result<TokenStream> {
+    fn migrate(&self, context: &SyntaxContext<'_>, delimited_newtype: bool) -> Result<TokenStream> {
         let binding = &self.binding;
         if delimited_newtype {
             let Shape::Delimited(contents) = &self.shape else {
-                unreachable!("only delimited newtypes take this reconstruction path")
+                unreachable!("only delimited newtypes take this migration path")
             };
             let contents =
-                contents.reconstruct_from_cursor(quote!(__m2_syn_delimited_children), context)?;
+                contents.migrate_from_cursor(quote!(__m2_syn_delimited_children), context)?;
             return Ok(quote! {
                 let mut __m2_syn_delimited_children = ::m2_syn::ChildCursor::new(&node);
                 let __m2_syn_delimiter = __m2_syn_delimited_children.required_delimiter()?;
@@ -1054,7 +1220,7 @@ impl FieldDefinition {
         let stored_element = stored_shape.storage_element();
         if matches!(self.shape, Shape::Base(_, _)) {
             let value = stored_element.wrap_value(quote!(
-                <#base_type as ::m2_syn::Reconstruct<N>>::reconstruct(#selected)?
+                <#base_type as ::m2_syn::Migrate<N>>::migrate(#selected)?
             ));
             return Ok(quote!(let #binding = #value;));
         }
@@ -1063,8 +1229,8 @@ impl FieldDefinition {
         // their nodes; only how the results are gathered differs.
         let element_value = stored_element.wrap_value(quote!(value));
         let convert = quote!(|node| {
-            let value = <#base_type as ::m2_syn::Reconstruct<N>>::reconstruct(node)?;
-            Ok::<_, ::m2_syn::ReconstructError>(#element_value)
+            let value = <#base_type as ::m2_syn::Migrate<N>>::migrate(node)?;
+            Ok::<_, ::m2_syn::MigrateError>(#element_value)
         });
         if matches!(&self.shape, Shape::Optional(inner) if !inner.is_sequence()) {
             Ok(quote!(let #binding = #selected.map(#convert).transpose()?;))
@@ -1074,16 +1240,16 @@ impl FieldDefinition {
                 let __m2_syn_values = #selected;
                 let #binding = children.optional_punctuated(__m2_syn_values, ",")?
                     .map(|(first, rest)| {
-                        Ok::<_, ::m2_syn::ReconstructError>(::m2_syn::Punctuated::new(
+                        Ok::<_, ::m2_syn::MigrateError>(::m2_syn::Punctuated::new(
                             (#convert)(first)?,
                             rest.into_iter()
                                 .map(|(punctuation, node)| {
-                                    let punctuation = <::m2_syn::Token![,] as ::m2_syn::Reconstruct<N>>::reconstruct(
+                                    let punctuation = <::m2_syn::Token![,] as ::m2_syn::Migrate<N>>::migrate(
                                         punctuation,
                                     )?;
                                     Ok((punctuation, (#convert)(node)?))
                                 })
-                                .collect::<Result<::std::vec::Vec<_>, ::m2_syn::ReconstructError>>()?,
+                                .collect::<Result<::std::vec::Vec<_>, ::m2_syn::MigrateError>>()?,
                         ))
                     })
                     .transpose()?;
@@ -1098,12 +1264,12 @@ impl FieldDefinition {
                     __m2_syn_rest
                         .into_iter()
                         .map(|(__m2_syn_punctuation, node)| {
-                            let punctuation = <::m2_syn::Token![,] as ::m2_syn::Reconstruct<N>>::reconstruct(
+                            let punctuation = <::m2_syn::Token![,] as ::m2_syn::Migrate<N>>::migrate(
                                 __m2_syn_punctuation,
                             )?;
                             Ok((punctuation, (#convert)(node)?))
                         })
-                        .collect::<Result<::std::vec::Vec<_>, ::m2_syn::ReconstructError>>()?,
+                        .collect::<Result<::std::vec::Vec<_>, ::m2_syn::MigrateError>>()?,
                 );
             })
         } else {
@@ -1118,11 +1284,13 @@ impl FieldDefinition {
     /// spaced away from it, which is what `;`, `,`, and zero-width end-of-cell
     /// markers do.
     fn is_attached(&self, context: &SyntaxContext<'_>) -> bool {
-        self.shape.base_ident() == "Eoc"
-            || context
-                .tokens()
-                .spelling(self.shape.base_ident())
-                .is_some_and(|spelling| matches!(spelling, ";" | ","))
+        matches!(
+            self.shape.base_ident().to_string().as_str(),
+            "Adj" | "EOC" | "EOF"
+        ) || context
+            .tokens()
+            .spelling(self.shape.base_ident())
+            .is_some_and(|spelling| matches!(spelling, ";" | ","))
     }
 
     fn to_tokens(
@@ -1148,12 +1316,23 @@ impl FieldDefinition {
                 }
             } else {
                 let push_separator = push_source_separator(&quote!(field_output), separator);
-                quote! {
-                    for (index, value) in self.#member.iter().enumerate() {
-                        if index != 0 {
-                            #push_separator
+                if separator == "\n" {
+                    quote! {
+                        for (index, value) in self.#member.iter().enumerate() {
+                            if index != 0 && !field_output.ends_with_whitespace() {
+                                #push_separator
+                            }
+                            ::m2_syn::Lex::to_tokens(value, &mut field_output);
                         }
-                        ::m2_syn::Lex::to_tokens(value, &mut field_output);
+                    }
+                } else {
+                    quote! {
+                        for (index, value) in self.#member.iter().enumerate() {
+                            if index != 0 {
+                                #push_separator
+                            }
+                            ::m2_syn::Lex::to_tokens(value, &mut field_output);
+                        }
                     }
                 }
             }
@@ -1162,13 +1341,6 @@ impl FieldDefinition {
         };
         let separator =
             (!self.is_attached(context) && !field_separator.is_empty()).then_some(field_separator);
-        let mark_semicolon_boundary = (self.shape.base_ident() == "Eoc").then(|| {
-            quote! {
-                if contents.ends_with_semicolon() {
-                    field_output.mark_final_eoc_after_semicolon();
-                }
-            }
-        });
         let separate = separator.map(|separator| {
             let push_separator = push_source_separator(&quote!(contents), separator);
             if separator == " " {
@@ -1192,7 +1364,6 @@ impl FieldDefinition {
             {
                 let mut field_output = ::m2_syn::TokenStream::new();
                 #write
-                #mark_semicolon_boundary
                 if !field_output.is_empty() {
                     #separate
                     ::m2_syn::Lex::to_tokens(&field_output, &mut contents);
@@ -1204,30 +1375,11 @@ impl FieldDefinition {
 
 fn push_source_separator(output: &TokenStream, separator: &str) -> TokenStream {
     match separator {
-        "" => quote! {},
-        " " => quote! {
-            #output.extend([::m2_syn::Trivia::new(
-                ::m2_syn::TriviaKind::Whitespace,
-                " ",
-                ::m2_syn::Span::for_text(" "),
-            )]);
-        },
-        "\n" => quote! {
-            #output.extend([::m2_syn::Trivia::new(
-                ::m2_syn::TriviaKind::Whitespace,
-                "\n",
-                ::m2_syn::Span::for_text("\n"),
-            )]);
-        },
+        "" | " " | "\n" => quote! {},
         ", " => quote! {
             #output.extend([::m2_syn::Punct::new(
                 ",",
                 ::m2_syn::Span::for_text(","),
-            )]);
-            #output.extend([::m2_syn::Trivia::new(
-                ::m2_syn::TriviaKind::Whitespace,
-                " ",
-                ::m2_syn::Span::for_text(" "),
             )]);
         },
         separator => panic!("unsupported generated separator `{separator}`"),
@@ -1374,7 +1526,7 @@ impl Shape {
 }
 
 impl Shape {
-    fn reconstruct_from_cursor(
+    fn migrate_from_cursor(
         &self,
         cursor: TokenStream,
         context: &SyntaxContext<'_>,
@@ -1384,14 +1536,14 @@ impl Shape {
                 let ty = self.ty();
                 let stored = self.stored_shape(context, false);
                 let value = stored.wrap_value(quote!(
-                    <#ty as ::m2_syn::Reconstruct<N>>::reconstruct(
+                    <#ty as ::m2_syn::Migrate<N>>::migrate(
                         #cursor.required_matching::<#ty>()?
                     )?
                 ));
                 Ok(value)
             }
             Self::Boxed(inner) => {
-                let value = inner.reconstruct_from_cursor(cursor, context)?;
+                let value = inner.migrate_from_cursor(cursor, context)?;
                 Ok(quote!(::std::boxed::Box::new(#value)))
             }
             Self::Optional(inner) if matches!(inner.as_ref(), Self::Base(_, _)) => {
@@ -1401,8 +1553,8 @@ impl Shape {
                 Ok(quote!(
                     #cursor.optional_matching::<#ty>()
                         .map(|node| {
-                            let value = <#ty as ::m2_syn::Reconstruct<N>>::reconstruct(node)?;
-                            Ok::<_, ::m2_syn::ReconstructError>(#value)
+                            let value = <#ty as ::m2_syn::Migrate<N>>::migrate(node)?;
+                            Ok::<_, ::m2_syn::MigrateError>(#value)
                         })
                         .transpose()?
                 ))
@@ -1415,8 +1567,8 @@ impl Shape {
                     #cursor.repeated_matching::<#ty>()
                         .into_iter()
                         .map(|node| {
-                            let value = <#ty as ::m2_syn::Reconstruct<N>>::reconstruct(node)?;
-                            Ok::<_, ::m2_syn::ReconstructError>(#value)
+                            let value = <#ty as ::m2_syn::Migrate<N>>::migrate(node)?;
+                            Ok::<_, ::m2_syn::MigrateError>(#value)
                         })
                         .collect::<Result<::std::vec::Vec<_>, _>>()?
                 ))
@@ -1425,10 +1577,10 @@ impl Shape {
                 let ty = inner.ty();
                 let stored = inner.stored_shape(context, false);
                 let first = stored.wrap_value(quote!(
-                    <#ty as ::m2_syn::Reconstruct<N>>::reconstruct(__m2_syn_first)?
+                    <#ty as ::m2_syn::Migrate<N>>::migrate(__m2_syn_first)?
                 ));
                 let value = stored.wrap_value(quote!(
-                    <#ty as ::m2_syn::Reconstruct<N>>::reconstruct(node)?
+                    <#ty as ::m2_syn::Migrate<N>>::migrate(node)?
                 ));
                 Ok(quote!({
                     let __m2_syn_values = #cursor.repeated_matching::<#ty>();
@@ -1439,12 +1591,12 @@ impl Shape {
                         __m2_syn_rest
                             .into_iter()
                             .map(|(punctuation, node)| {
-                                let punctuation = <::m2_syn::Token![,] as ::m2_syn::Reconstruct<N>>::reconstruct(
+                                let punctuation = <::m2_syn::Token![,] as ::m2_syn::Migrate<N>>::migrate(
                                     punctuation,
                                 )?;
                                 Ok((punctuation, #value))
                             })
-                            .collect::<Result<::std::vec::Vec<_>, ::m2_syn::ReconstructError>>()?,
+                            .collect::<Result<::std::vec::Vec<_>, ::m2_syn::MigrateError>>()?,
                     )
                 }))
             }
@@ -1455,32 +1607,32 @@ impl Shape {
                 let Self::Base(_, _) = element.as_ref() else {
                     return Err(Error::new(
                         element.base_ident().span(),
-                        "punctuated reconstruction currently requires a plain syntax type",
+                        "punctuated migration currently requires a plain syntax type",
                     ));
                 };
                 let ty = element.ty();
                 let stored = element.stored_shape(context, false);
                 let first = stored.wrap_value(quote!(
-                    <#ty as ::m2_syn::Reconstruct<N>>::reconstruct(__m2_syn_first)?
+                    <#ty as ::m2_syn::Migrate<N>>::migrate(__m2_syn_first)?
                 ));
                 let value = stored.wrap_value(quote!(
-                    <#ty as ::m2_syn::Reconstruct<N>>::reconstruct(node)?
+                    <#ty as ::m2_syn::Migrate<N>>::migrate(node)?
                 ));
                 Ok(quote!({
                     let __m2_syn_values = #cursor.repeated_matching::<#ty>();
                     #cursor.optional_punctuated(__m2_syn_values, ",")?
                         .map(|(__m2_syn_first, __m2_syn_rest)| {
-                            Ok::<_, ::m2_syn::ReconstructError>(::m2_syn::Punctuated::new(
+                            Ok::<_, ::m2_syn::MigrateError>(::m2_syn::Punctuated::new(
                                 #first,
                                 __m2_syn_rest
                                     .into_iter()
                                     .map(|(punctuation, node)| {
-                                        let punctuation = <::m2_syn::Token![,] as ::m2_syn::Reconstruct<N>>::reconstruct(
+                                        let punctuation = <::m2_syn::Token![,] as ::m2_syn::Migrate<N>>::migrate(
                                             punctuation,
                                         )?;
                                         Ok((punctuation, #value))
                                     })
-                                    .collect::<Result<::std::vec::Vec<_>, ::m2_syn::ReconstructError>>()?,
+                                    .collect::<Result<::std::vec::Vec<_>, ::m2_syn::MigrateError>>()?,
                             ))
                         })
                         .transpose()?
@@ -1550,37 +1702,24 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
         let variant = &variant.name;
         quote!(Self::#variant(node) => ::m2_syn::Lex::to_tokens(node, output))
     });
-    let pretty_arms = definition.variants.iter().map(|variant| {
-        let variant = &variant.name;
-        quote! {
-            Self::#variant(value) => {
-                ::m2_syn::PrettyNode::variant(
-                    stringify!(#name),
-                    stringify!(#variant),
-                    ::m2_syn::Spanned::try_span(self),
-                    ::m2_syn::PrettyTree::pretty_tree(value),
-                )
-            }
-        }
-    });
     let matches = definition
         .variants
         .iter()
         .map(|variant| {
             let base = variant.shape.ty();
-            quote!(<#base as ::m2_syn::Reconstruct<N>>::matches(node))
+            quote!(<#base as ::m2_syn::Migrate<N>>::matches(node))
         })
         .reduce(|left, right| quote!(#left || #right))
         .unwrap_or_else(|| quote!(false));
-    let reconstruct_arms = definition.variants.iter().map(|variant| {
+    let migrate_arms = definition.variants.iter().map(|variant| {
         let variant_name = &variant.name;
         let base = variant.shape.ty();
         let stored = variant.shape.stored_shape(context, false);
         let value = stored.wrap_value(quote!(
-            <#base as ::m2_syn::Reconstruct<N>>::reconstruct(node)?
+            <#base as ::m2_syn::Migrate<N>>::migrate(node)?
         ));
         quote! {
-            if <#base as ::m2_syn::Reconstruct<N>>::matches(&node) {
+            if <#base as ::m2_syn::Migrate<N>>::matches(&node) {
                 return Ok(Self::#variant_name(#value));
             }
         }
@@ -1589,6 +1728,28 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
         .variants
         .is_empty()
         .then(|| quote!(_ => unreachable!("empty generated syntax category")));
+    let pretty_impl = context.pretty().then(|| {
+        let pretty_arms = definition.variants.iter().map(|variant| {
+            let variant = &variant.name;
+            quote! {
+                Self::#variant(value) => {
+                    ::m2_syn::PrettyNode::variant(
+                        stringify!(#name),
+                        stringify!(#variant),
+                        ::m2_syn::Spanned::try_span(self),
+                        ::m2_syn::PrettyTree::pretty_tree(value),
+                    )
+                }
+            }
+        });
+        quote! {
+            impl ::m2_syn::PrettyTree for #name {
+                fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                    match self { #(#pretty_arms,)* #borrowed_fallback }
+                }
+            }
+        }
+    });
     let spelling_api = definition.operator.map(|_| {
         let from_token_arms = definition.variants.iter().map(|variant| {
             let variant_name = &variant.name;
@@ -1596,7 +1757,10 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
             quote! {
                 if <#ty as ::m2_syn::Token>::matches_token_tree(&token) {
                     return Some(Self::#variant_name(
-                        <#ty as ::m2_syn::Token>::from_token_tree(token)?
+                        <#ty as ::m2_syn::Token>::from_token_tree_with_trivia(
+                            token,
+                            trailing_trivia,
+                        )?
                     ));
                 }
             }
@@ -1612,6 +1776,17 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
             impl #name {
                 /// Converts a matching raw operator token into this category.
                 pub fn from_token_tree(token: ::m2_syn::TokenTree) -> ::std::option::Option<Self> {
+                    Self::from_token_tree_with_trivia(
+                        token,
+                        ::m2_syn::TrailingTrivia::default(),
+                    )
+                }
+
+                /// Converts a matching raw operator and its following trivia into this category.
+                pub fn from_token_tree_with_trivia(
+                    token: ::m2_syn::TokenTree,
+                    trailing_trivia: ::m2_syn::TrailingTrivia,
+                ) -> ::std::option::Option<Self> {
                     #(#from_token_arms)*
                     None
                 }
@@ -1639,13 +1814,9 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
             }
         }
 
-        impl ::m2_syn::PrettyTree for #name {
-            fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
-                match self { #(#pretty_arms,)* #borrowed_fallback }
-            }
-        }
+        #pretty_impl
 
-        impl<N> ::m2_syn::Reconstruct<N> for #name
+        impl<N> ::m2_syn::Migrate<N> for #name
         where
             N: ::m2_syn::ExternalCstNode,
         {
@@ -1653,9 +1824,9 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
                 #matches
             }
 
-            fn reconstruct(node: N) -> Result<Self, ::m2_syn::ReconstructError> {
-                #(#reconstruct_arms)*
-                Err(::m2_syn::ReconstructError::wrong_category(
+            fn migrate(node: N) -> Result<Self, ::m2_syn::MigrateError> {
+                #(#migrate_arms)*
+                Err(::m2_syn::MigrateError::wrong_category(
                     stringify!(#name),
                     node.identity(),
                 ))
@@ -1712,7 +1883,7 @@ mod tests {
             struct Leaf;
         })
         .unwrap();
-        let expansion = syntax.expand().unwrap();
+        let expansion = syntax.expand(SyntaxFeatures::PRETTY_WALK).unwrap();
         parse2::<syn::File>(expansion.clone()).unwrap();
         let expansion = expansion.to_string();
 
@@ -1726,6 +1897,7 @@ mod tests {
         assert!(expansion.contains("pub mod visit"));
         assert!(expansion.contains("pub mod visit_mut"));
         assert!(expansion.contains("pub mod fold"));
+        assert!(expansion.contains("PrettyTree"));
         assert!(expansion.contains("enum PrefixOperator"));
         assert!(expansion.contains("enum BinaryOperator"));
         assert!(expansion.contains("enum PostfixOperator"));

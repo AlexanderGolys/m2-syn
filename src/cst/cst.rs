@@ -1,7 +1,7 @@
-//! Typed syntax traits and the reconstruction bridge from external CSTs.
+//! Typed syntax traits and the migration bridge from external CSTs.
 //!
 //! [`Token`] and generated node fields are the typed graph.
-//! [`ExternalCstNode`] and [`Reconstruct`] are an adapter-only seam for parsers such as
+//! [`ExternalCstNode`] and [`Migrate`] are an adapter-only seam for parsers such as
 //! Tree-sitter that first produce an untyped concrete tree. They are not a
 //! traversal interface for the typed graph; use `Visit`, `VisitMut`, or `Fold`
 //! for that. A parser that can construct typed nodes directly does not need
@@ -11,12 +11,12 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use crate::{Delimiter, DelimiterKind, DoubleSpan, Spanned, TokenTree};
+use crate::{Delimiter, DelimiterKind, DoubleSpan, Spanned, Terminal, TokenTree, TrailingTrivia};
 
 type PunctuatedNodes<N> = (N, Vec<(N, N)>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// Backend-local node identity used only during external CST reconstruction.
+/// Backend-local node identity used only during external CST migration.
 pub struct CSTNodeClassLabel<'syntax> {
     /// The backend-specific node kind.
     pub name: Cow<'syntax, str>,
@@ -47,7 +47,7 @@ pub struct ExternalCstChild<N> {
     pub node: N,
 }
 
-/// Minimal untyped view required to reconstruct generated typed nodes.
+/// Minimal untyped view required to migrate generated typed nodes.
 ///
 /// This trait is deliberately confined to parser adapters. Its homogeneous
 /// child iterator must not be used to model or walk the typed syntax graph.
@@ -57,7 +57,7 @@ pub trait ExternalCstNode: Sized + Spanned {
     where
         Self: 'syntax;
 
-    /// Returns the node kind used by reconstruction matching.
+    /// Returns the node kind used by migration matching.
     fn identity(&self) -> CSTNodeClassLabel<'_>;
     /// Returns the node's immediate children in source order.
     fn children(&self) -> Self::Children<'_>;
@@ -73,7 +73,7 @@ pub trait ExternalCstNode: Sized + Spanned {
 ///
 /// Parsing validates the raw category and spelling, then retains the raw atom
 /// so emission preserves its source text and span.
-pub trait Token: Spanned + Sized {
+pub trait Token: Terminal + Sized {
     /// Canonical spelling used in diagnostics and freshly constructed atoms.
     const SPELLING: &'static str;
 
@@ -82,22 +82,32 @@ pub trait Token: Spanned + Sized {
 
     /// Validates and retains a raw atom as this typed token.
     fn from_token_tree(token: TokenTree) -> Option<Self>;
+
+    /// Validates a raw atom and attaches the non-space trivia following it.
+    fn from_token_tree_with_trivia(
+        token: TokenTree,
+        trailing_trivia: TrailingTrivia,
+    ) -> Option<Self> {
+        let mut token = Self::from_token_tree(token)?;
+        *token.trailing_trivia_mut() = trailing_trivia;
+        Some(token)
+    }
 }
 
-/// Reconstructs one typed value from a parser backend's untyped CST node.
-pub trait Reconstruct<N: ExternalCstNode>: Sized {
-    /// Reports whether `node` can reconstruct this typed value.
+/// Migrates one typed value from a parser backend's untyped CST node.
+pub trait Migrate<N: ExternalCstNode>: Sized {
+    /// Reports whether `node` can migrate this typed value.
     fn matches(node: &N) -> bool;
     /// Converts a matching external node into typed syntax.
     ///
     /// # Errors
     ///
-    /// Returns a [`ReconstructError`] when the node or its children do not
+    /// Returns a [`MigrateError`] when the node or its children do not
     /// match the requested typed syntax.
-    fn reconstruct(node: N) -> Result<Self, ReconstructError>;
+    fn migrate(node: N) -> Result<Self, MigrateError>;
 }
 
-/// Single-pass field selection used only by generated reconstruction code.
+/// Single-pass field selection used only by generated migration code.
 pub struct ChildCursor<N> {
     children: Vec<Option<ExternalCstChild<N>>>,
     parent: String,
@@ -116,10 +126,10 @@ impl<N: ExternalCstNode> ChildCursor<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`ReconstructError::MissingField`] when no child occupies it.
-    pub fn required_field(&mut self, field: &'static str) -> Result<N, ReconstructError> {
+    /// Returns [`MigrateError::MissingField`] when no child occupies it.
+    pub fn required_field(&mut self, field: &'static str) -> Result<N, MigrateError> {
         self.optional_field(field)
-            .ok_or_else(|| ReconstructError::MissingField {
+            .ok_or_else(|| MigrateError::MissingField {
                 node: self.parent.clone(),
                 field,
             })
@@ -135,37 +145,37 @@ impl<N: ExternalCstNode> ChildCursor<N> {
         self.take_all(|child| !child.node.is_extra() && child.field == Some(field))
     }
 
-    /// Takes a required positional child reconstructible as `T`.
+    /// Takes a required positional child migrateible as `T`.
     ///
     /// # Errors
     ///
-    /// Returns [`ReconstructError::MissingChild`] when no remaining positional
-    /// child can reconstruct `T`.
-    pub fn required_matching<T>(&mut self) -> Result<N, ReconstructError>
+    /// Returns [`MigrateError::MissingChild`] when no remaining positional
+    /// child can migrate `T`.
+    pub fn required_matching<T>(&mut self) -> Result<N, MigrateError>
     where
-        T: Reconstruct<N>,
+        T: Migrate<N>,
     {
         self.optional_matching::<T>()
-            .ok_or_else(|| ReconstructError::MissingChild {
+            .ok_or_else(|| MigrateError::MissingChild {
                 node: self.parent.clone(),
                 expected: std::any::type_name::<T>(),
             })
     }
 
-    /// Takes an optional positional child reconstructible as `T`.
+    /// Takes an optional positional child migrateible as `T`.
     pub fn optional_matching<T>(&mut self) -> Option<N>
     where
-        T: Reconstruct<N>,
+        T: Migrate<N>,
     {
         self.take_first(|child| {
             !child.node.is_extra() && child.field.is_none() && T::matches(&child.node)
         })
     }
 
-    /// Takes every positional child reconstructible as `T`.
+    /// Takes every positional child migrateible as `T`.
     pub fn repeated_matching<T>(&mut self) -> Vec<N>
     where
-        T: Reconstruct<N>,
+        T: Migrate<N>,
     {
         self.take_all(|child| {
             !child.node.is_extra() && child.field.is_none() && T::matches(&child.node)
@@ -176,12 +186,12 @@ impl<N: ExternalCstNode> ChildCursor<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`ReconstructError::MissingChild`] when the child is absent.
-    pub fn required_anonymous(&mut self, spelling: &'static str) -> Result<N, ReconstructError> {
+    /// Returns [`MigrateError::MissingChild`] when the child is absent.
+    pub fn required_anonymous(&mut self, spelling: &'static str) -> Result<N, MigrateError> {
         self.take_first(|child| {
             child.field.is_none() && child.node.identity().matches(spelling, false)
         })
-        .ok_or_else(|| ReconstructError::MissingChild {
+        .ok_or_else(|| MigrateError::MissingChild {
             node: self.parent.clone(),
             expected: spelling,
         })
@@ -194,13 +204,13 @@ impl<N: ExternalCstNode> ChildCursor<N> {
         })
     }
 
-    /// Reconstructs and consumes one of the supported delimiter pairs.
+    /// Migrates and consumes one of the supported delimiter pairs.
     ///
     /// # Errors
     ///
-    /// Returns [`ReconstructError::MissingChild`] when no opening delimiter or
+    /// Returns [`MigrateError::MissingChild`] when no opening delimiter or
     /// its matching closing delimiter remains.
-    pub fn required_delimiter(&mut self) -> Result<Delimiter, ReconstructError> {
+    pub fn required_delimiter(&mut self) -> Result<Delimiter, MigrateError> {
         for kind in [
             DelimiterKind::Parenthesis,
             DelimiterKind::Bracket,
@@ -216,25 +226,25 @@ impl<N: ExternalCstNode> ChildCursor<N> {
                 DoubleSpan::new(opening.expect_span(), closing.expect_span()),
             ));
         }
-        Err(ReconstructError::MissingChild {
+        Err(MigrateError::MissingChild {
             node: self.parent.clone(),
             expected: "a delimiter",
         })
     }
 
-    /// Pairs a nonempty list of reconstructed value nodes with the anonymous
+    /// Pairs a nonempty list of migrated value nodes with the anonymous
     /// punctuation nodes separating them.
     ///
     /// # Errors
     ///
-    /// Returns [`ReconstructError::InvalidPunctuated`] when there is no first
+    /// Returns [`MigrateError::InvalidPunctuated`] when there is no first
     /// value or the parent does not contain exactly one separator between each
     /// adjacent value.
     pub fn punctuated(
         &mut self,
         values: Vec<N>,
         spelling: &'static str,
-    ) -> Result<PunctuatedNodes<N>, ReconstructError> {
+    ) -> Result<PunctuatedNodes<N>, MigrateError> {
         let punctuation = self.take_all(|child| {
             child.field.is_none() && child.node.identity().matches(spelling, false)
         });
@@ -242,14 +252,14 @@ impl<N: ExternalCstNode> ChildCursor<N> {
         let punctuation_count = punctuation.len();
         let mut values = values.into_iter();
         let Some(first) = values.next() else {
-            return Err(ReconstructError::InvalidPunctuated {
+            return Err(MigrateError::InvalidPunctuated {
                 node: self.parent.clone(),
                 values: value_count,
                 punctuation: punctuation_count,
             });
         };
         if punctuation_count + 1 != value_count {
-            return Err(ReconstructError::InvalidPunctuated {
+            return Err(MigrateError::InvalidPunctuated {
                 node: self.parent.clone(),
                 values: value_count,
                 punctuation: punctuation_count,
@@ -263,13 +273,13 @@ impl<N: ExternalCstNode> ChildCursor<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`ReconstructError::InvalidPunctuated`] when separators remain
+    /// Returns [`MigrateError::InvalidPunctuated`] when separators remain
     /// without values or their count does not match the present values.
     pub fn optional_punctuated(
         &mut self,
         values: Vec<N>,
         spelling: &'static str,
-    ) -> Result<Option<PunctuatedNodes<N>>, ReconstructError> {
+    ) -> Result<Option<PunctuatedNodes<N>>, MigrateError> {
         if values.is_empty() {
             let punctuation = self.take_all(|child| {
                 child.field.is_none() && child.node.identity().matches(spelling, false)
@@ -277,7 +287,7 @@ impl<N: ExternalCstNode> ChildCursor<N> {
             return if punctuation.is_empty() {
                 Ok(None)
             } else {
-                Err(ReconstructError::InvalidPunctuated {
+                Err(MigrateError::InvalidPunctuated {
                     node: self.parent.clone(),
                     values: 0,
                     punctuation: punctuation.len(),
@@ -307,8 +317,8 @@ impl<N: ExternalCstNode> ChildCursor<N> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// A typed reconstruction failure.
-pub enum ReconstructError {
+/// A typed migration failure.
+pub enum MigrateError {
     /// A concrete typed node received the wrong backend node kind.
     WrongNode {
         /// The required node kind.
@@ -355,7 +365,7 @@ pub enum ReconstructError {
     },
 }
 
-impl ReconstructError {
+impl MigrateError {
     /// Creates a concrete node-kind mismatch.
     pub fn wrong_node(
         expected: &'static str,
@@ -380,7 +390,7 @@ impl ReconstructError {
     }
 }
 
-impl Display for ReconstructError {
+impl Display for MigrateError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WrongNode {
@@ -421,7 +431,7 @@ impl Display for ReconstructError {
     }
 }
 
-impl Error for ReconstructError {}
+impl Error for MigrateError {}
 
 fn visibility(named: bool) -> &'static str {
     if named { "named" } else { "anonymous" }

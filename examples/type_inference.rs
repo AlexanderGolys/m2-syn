@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use m2_syn::visit::Visit;
-use m2_syn::{
+use m2_syn::nodes::{
     Array, BinaryExpr, BinaryOperator, Component, Expr, ExprPack, ForLoop, Holder, IfStatement,
-    IntegerLiteral, IterationDomain, List, LoopBody, ParseError, ReturnExpr, Sequence,
-    StringLiteral, Symbol, WhileLoop, parse_file,
+    IntegerLiteral, IterationDomain, List, LoopBody, ReturnExpr, Sequence, StringLiteral, Symbol,
+    WhileLoop,
 };
+use m2_syn::visit::Visit;
+use m2_syn::{ParseError, parse_file};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TypeRange<T, Q> {

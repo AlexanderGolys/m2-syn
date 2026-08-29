@@ -13,7 +13,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::vec::IntoIter;
 
-use crate::native::{assignment_pack, installation_value, lambda_parameters};
+use crate::native::{LambdaArguments, assignment_list, installation_value, lambda_arguments};
 use crate::nodes::*;
 use crate::{
     CSTNodeClassLabel, CellStream, CellStreamError, DelimiterKind, DelimiterToken, DoubleSpan,
@@ -106,6 +106,7 @@ impl From<CellStreamError> for ParseError {
 
 /// A reusable Tree-sitter parser and direct typed-CST lowerer.
 pub struct TreeSitterParser {
+    /// The parser.
     parser: tree_sitter::Parser,
 }
 
@@ -117,12 +118,19 @@ pub struct TreeSitterParser {
 /// describes the current source snapshot. Missing group closers are recoverable
 /// and remain available through [`Self::diagnostics`].
 pub struct RealtimeParser {
+    /// The parser.
     parser: tree_sitter::Parser,
+    /// The source.
     source: Arc<Source>,
+    /// The parse view.
     parse_view: String,
+    /// The tree.
     tree: tree_sitter::Tree,
+    /// The syntax.
     syntax: SourceFile,
+    /// The diagnostics.
     diagnostics: Vec<LexError>,
+    /// The changed ranges.
     changed_ranges: Vec<Span>,
 }
 
@@ -232,13 +240,19 @@ impl RealtimeParser {
     }
 }
 
+/// Internal state for ParsedTree.
 struct ParsedTree {
+    /// The parse view.
     parse_view: String,
+    /// The tree.
     tree: tree_sitter::Tree,
+    /// The syntax.
     syntax: SourceFile,
+    /// The diagnostics.
     diagnostics: Vec<LexError>,
 }
 
+/// Parses recovered tree.
 fn parse_recovered_tree(
     parser: &mut tree_sitter::Parser,
     source: Arc<Source>,
@@ -266,6 +280,7 @@ fn parse_recovered_tree(
     })
 }
 
+/// Handles input edit between.
 fn input_edit_between(old: &str, new: &str) -> tree_sitter::InputEdit {
     let mut start = old
         .as_bytes()
@@ -302,6 +317,7 @@ fn input_edit_between(old: &str, new: &str) -> tree_sitter::InputEdit {
     }
 }
 
+/// Handles point at.
 fn point_at(source: &str, offset: usize) -> tree_sitter::Point {
     let before = &source[..offset];
     let row = before.bytes().filter(|byte| *byte == b'\n').count();
@@ -328,6 +344,7 @@ impl TreeSitterParser {
         Ok(Self { parser })
     }
 
+    /// Parses source in.
     fn parse_source_in(&mut self, source: Arc<Source>) -> Result<SourceFile, ParseError> {
         let source_text = source.text();
         let (renamed, aliases) = renamed_source(source_text)?;
@@ -432,6 +449,7 @@ pub fn parse_tokens(tokens: &TokenStream) -> Result<SourceFile, ParseError> {
     TreeSitterParser::new()?.parse_cells(cells)
 }
 
+/// Handles first error.
 fn first_error(root: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
@@ -445,13 +463,26 @@ fn first_error(root: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
     None
 }
 
+/// Internal state for Lowerer.
 struct Lowerer<'source> {
+    /// The source.
     source: &'source [u8],
+    /// The source span.
     source_span: Span,
+    /// The aliases.
     aliases: Vec<CoreAlias>,
 }
 
+/// Internal alternatives for IterationDomain.
+enum IterationDomain {
+    /// The Range alternative.
+    Range(Option<RangeBoundFrom>, Option<RangeBoundTo>),
+    /// The In alternative.
+    In(Token![in], Box<Expr>),
+}
+
 impl<'source> Lowerer<'source> {
+    /// Creates a new value.
     fn new(source_owner: Arc<Source>, source: &'source str, aliases: Vec<CoreAlias>) -> Self {
         Self {
             source: source.as_bytes(),
@@ -460,6 +491,7 @@ impl<'source> Lowerer<'source> {
         }
     }
 
+    /// Handles source file.
     fn source_file(&self, root: tree_sitter::Node<'_>) -> Result<SourceFile, ParseError> {
         let mut cells = Vec::new();
         let raw_cells = self.semantic_children(root);
@@ -482,23 +514,22 @@ impl<'source> Lowerer<'source> {
         ))
     }
 
+    /// Handles cell.
     fn cell(&self, node: tree_sitter::Node<'_>, eoc_offset: usize) -> Result<Cell, ParseError> {
         let (content, semicolon) = if node.kind() == "muted" {
             let semicolon = self.required_kind(node, ";")?;
             (
-                self.expr_pack(self.children(node))?,
+                self.packed_content(self.children(node))?,
                 Some(self.migrate(semicolon)?),
             )
         } else {
             let child = self.only_semantic_child(node)?;
-            let pack = if child.kind() == "naked_sequence" {
-                self.expr_pack(self.children(child))?
+            let content = if child.kind() == "naked_sequence" {
+                self.expr_pack(self.children(child))?.into()
             } else {
-                ExprPack::new(Punctuated::from_single(Component::Expr(Box::new(
-                    self.expr(child)?,
-                ))))
+                self.expr(child)?.into()
             };
-            (pack, None)
+            (content, None)
         };
         Ok(Cell::new(
             content,
@@ -507,6 +538,7 @@ impl<'source> Lowerer<'source> {
         ))
     }
 
+    /// Handles end-of-cell offset.
     fn eoc_offset(
         &self,
         _node: tree_sitter::Node<'_>,
@@ -516,6 +548,7 @@ impl<'source> Lowerer<'source> {
             .min(self.source.len())
     }
 
+    /// Handles expr pack.
     fn expr_pack(&self, nodes: Vec<tree_sitter::Node<'_>>) -> Result<ExprPack, ParseError> {
         let pack_span = nodes
             .iter()
@@ -549,9 +582,38 @@ impl<'source> Lowerer<'source> {
             .into_iter()
             .zip(values)
             .collect::<Vec<(Token![,], Component)>>();
-        Ok(ExprPack::new(Punctuated::new(first, rest)))
+        let mut rest = rest.into_iter();
+        let Some((punctuation, second)) = rest.next() else {
+            return Err(self.unsupported_span("expression pack without a comma", pack_span));
+        };
+        let mut pack = Punctuated::new(first, punctuation, second);
+        for (punctuation, value) in rest {
+            pack.push(punctuation, value);
+        }
+        Ok(ExprPack::new(pack))
     }
 
+    /// Handles packed content.
+    fn packed_content(
+        &self,
+        nodes: Vec<tree_sitter::Node<'_>>,
+    ) -> Result<PackedContent, ParseError> {
+        if nodes.iter().any(|node| node.kind() == ",") {
+            return self.expr_pack(nodes).map(Into::into);
+        }
+        let mut expressions = nodes
+            .into_iter()
+            .filter(|node| !node.is_extra() && node.is_named() && node.kind() != "muted");
+        let Some(expression) = expressions.next() else {
+            return Err(self.unsupported_span("empty packed content", self.source_span.clone()));
+        };
+        if expressions.next().is_some() {
+            return Err(self.unsupported("unseparated packed content", expression));
+        }
+        self.expr(expression).map(Into::into)
+    }
+
+    /// Handles expr.
     fn expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         match node.kind() {
             "symbol" => Ok(self.migrate::<Symbol>(node)?.into()),
@@ -579,65 +641,61 @@ impl<'source> Lowerer<'source> {
             | "postfix_installation"
             | "structured_binding"
             | "local_structured_binding" => self.assignment(node),
-            "evaluated_assignment" => Ok(EvaluatedAssignment::new(
-                self.expr(self.required_field(node, "left")?)?,
-                self.migrate(self.required_field(node, "operator")?)?,
-                self.expr(self.required_field(node, "right")?)?,
-            )
-            .into()),
-            "option" => Ok(OptionExpression::new(
-                self.expr(self.required_field(node, "left")?)?,
-                self.migrate(self.required_field(node, "operator")?)?,
-                self.expr(self.required_field(node, "right")?)?,
-            )
-            .into()),
+            "evaluated_assignment" => Ok(Expr!(Assign::Evaluated {
+                evaluated_domain: Box::new(self.expr(self.required_field(node, "left")?)?),
+                operator: self.migrate(self.required_field(node, "operator")?)?,
+                value: Box::new(self.expr(self.required_field(node, "right")?)?),
+            })),
+            "option" => Ok(Expr!(Option {
+                key: Box::new(self.expr(self.required_field(node, "left")?)?),
+                operator: self.migrate(self.required_field(node, "operator")?)?,
+                value: Box::new(self.expr(self.required_field(node, "right")?)?),
+            })),
             "if_statement" => self.if_statement(node),
             "for_loop" => self.for_loop(node),
             "while_loop" => self.while_loop(node),
             "try_statement" => self.try_statement(node),
             "quote_expression" => self.quote_expression(node),
             "new_statement" => self.new_statement(node),
-            "break_statement" => Ok(BreakExpr::new(
-                self.migrate(self.required_kind(node, "break")?)?,
-                self.first_expression_child(node)
-                    .map(|child| self.expr(child))
+            "break_statement" => Ok(Expr!(Control::Break {
+                break_token: self.migrate(self.required_kind(node, "break")?)?,
+                value: self
+                    .first_expression_child(node)
+                    .map(|child| self.expr(child).map(Box::new))
                     .transpose()?,
-            )
-            .into()),
-            "continue_statement" => Ok(ContinueExpr::new(
-                self.migrate(self.required_kind(node, "continue")?)?,
-                self.first_expression_child(node)
-                    .map(|child| self.expr(child))
+            })),
+            "continue_statement" => Ok(Expr!(Control::Continue {
+                continue_token: self.migrate(self.required_kind(node, "continue")?)?,
+                value: self
+                    .first_expression_child(node)
+                    .map(|child| self.expr(child).map(Box::new))
                     .transpose()?,
-            )
-            .into()),
-            "return_statement" => Ok(ReturnExpr::new(
-                self.migrate(self.required_kind(node, "return")?)?,
-                self.first_expression_child(node)
-                    .map(|child| self.expr(child))
+            })),
+            "return_statement" => Ok(Expr!(Control::Return {
+                return_token: self.migrate(self.required_kind(node, "return")?)?,
+                value: self
+                    .first_expression_child(node)
+                    .map(|child| self.expr(child).map(Box::new))
                     .transpose()?,
-            )
-            .into()),
-            "catch_statement" => Ok(Catch::new(
-                self.migrate(self.required_kind(node, "catch")?)?,
-                self.expr(self.required_expression_child(node)?)?,
-            )
-            .into()),
-            "throw_statement" => Ok(Throw::new(
-                self.migrate(self.required_kind(node, "throw")?)?,
-                self.expr(self.required_expression_child(node)?)?,
-            )
-            .into()),
-            "trap_statement" => Ok(Trap::new(
-                self.migrate(self.required_kind(node, "trap")?)?,
-                self.expr(self.required_expression_child(node)?)?,
-            )
-            .into()),
+            })),
+            "catch_statement" => Ok(Expr!(Catch {
+                catch_token: self.migrate(self.required_kind(node, "catch")?)?,
+                value: Box::new(self.expr(self.required_expression_child(node)?)?),
+            })),
+            "throw_statement" => Ok(Expr!(Throw {
+                throw_token: self.migrate(self.required_kind(node, "throw")?)?,
+                value: Box::new(self.expr(self.required_expression_child(node)?)?),
+            })),
+            "trap_statement" => Ok(Expr!(Trap {
+                trap_token: self.migrate(self.required_kind(node, "trap")?)?,
+                value: Box::new(self.expr(self.required_expression_child(node)?)?),
+            })),
             "debug_clause" => self.debug_clause(node),
             kind => Err(self.unsupported(kind, node)),
         }
     }
 
+    /// Handles collection.
     fn collection(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let spans = self.delimiter_spans(node)?;
         let statements = self
@@ -654,7 +712,7 @@ impl<'source> Lowerer<'source> {
                 .find(|child| child.kind() != "muted")
                 .map(|child| self.expr(child))
                 .transpose()?;
-            let mut holder = Holder::new(statements, value);
+            let mut holder = Holder::new(statements, value.map(Box::new));
             holder.delimiter = <Delimiter![()] as DelimiterToken>::new(spans);
             return Ok(holder.into());
         }
@@ -666,7 +724,7 @@ impl<'source> Lowerer<'source> {
                     || (child.is_named() && child.kind() != "muted"))
         });
         let elements = has_elements
-            .then(|| self.expr_pack(self.children(node)))
+            .then(|| self.packed_content(self.children(node)))
             .transpose()?;
         Ok(match node.kind() {
             "array" => {
@@ -693,13 +751,15 @@ impl<'source> Lowerer<'source> {
         })
     }
 
+    /// Handles statement.
     fn statement(&self, node: tree_sitter::Node<'_>) -> Result<Statement, ParseError> {
         Ok(Statement::new(
-            self.expr_pack(self.children(node))?,
+            self.packed_content(self.children(node))?,
             self.migrate(self.required_kind(node, ";")?)?,
         ))
     }
 
+    /// Handles string literal.
     fn string_literal(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let elements = self
             .children(node)
@@ -707,9 +767,9 @@ impl<'source> Lowerer<'source> {
             .filter(|child| child.kind() != "\"")
             .filter(|child| !child.is_extra())
             .map(|child| match child.kind() {
-                "escape_sequence" => self.migrate(child).map(StringElement::EscapeSequence),
-                "string_content" => self.migrate(child).map(StringElement::StringContent),
-                _ => Ok(StringElement::StringContent(StringContent::new(
+                "escape_sequence" => self.migrate(child).map(StringElement::Escape),
+                "string_content" => self.migrate(child).map(StringElement::Content),
+                _ => Ok(StringElement::Content(StringContent::new(
                     self.text(child),
                     self.span(child),
                 ))),
@@ -718,6 +778,7 @@ impl<'source> Lowerer<'source> {
         Ok(StringLiteral::new(elements, self.span(node)).into())
     }
 
+    /// Handles raw string literal.
     fn raw_string_literal(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let elements = self
             .children(node)
@@ -725,161 +786,200 @@ impl<'source> Lowerer<'source> {
             .filter(|child| child.kind() != "///")
             .filter(|child| !child.is_extra())
             .map(|child| match child.kind() {
-                "escape_sequence" => self.migrate(child).map(RawStringElement::EscapeSequence),
-                "raw_string_content" => self.migrate(child).map(RawStringElement::RawStringContent),
+                "escape_sequence" => self.migrate(child).map(RawStringElement::Escape),
+                "raw_string_content" => self.migrate(child).map(RawStringElement::Content),
                 kind => Err(self.unsupported(kind, child)),
             })
             .collect::<Result<Vec<_>, ParseError>>()?;
         Ok(RawStringLiteral::new(elements, self.span(node)).into())
     }
 
+    /// Handles binary expr.
     fn binary_expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let left = self.expr(self.required_field(node, "left")?)?;
         let operator = self.required_field(node, "operator")?;
         let right = self.expr(self.required_field(node, "right")?)?;
         if operator.kind() == "SPACE" {
-            Ok(AdjacentExpr::new(left, Adj::new("", self.span(operator)), right).into())
+            Ok(Expr!(Op::Bin::Adj {
+                left_operand: Box::new(left),
+                operator: Adj::new("", self.span(operator)),
+                right_operand: Box::new(right),
+            }))
         } else {
-            Ok(BinaryExpr::new(left, self.migrate(operator)?, right).into())
+            match self.text(operator).as_ref() {
+                spelling if GENERATED_AUGMENTED_OPERATOR_SPELLINGS.contains(&spelling) => {
+                    Ok(Expr!(Assign::Augmented {
+                        target: Box::new(left),
+                        operator: self.migrate(operator)?,
+                        value: Box::new(right),
+                    }))
+                }
+                "." => Ok(Expr!(Op::Bin::Member::Dot {
+                    receiver: Box::new(left),
+                    operator: self.migrate(operator)?,
+                    member: Box::new(right),
+                })),
+                ".?" => Ok(Expr!(Op::Bin::Member::Optional {
+                    receiver: Box::new(left),
+                    operator: self.migrate(operator)?,
+                    member: Box::new(right),
+                })),
+                "#" => Ok(Expr!(Op::Bin::Index {
+                    receiver: Box::new(left),
+                    operator: self.migrate(operator)?,
+                    index: Box::new(right),
+                })),
+                _ => Ok(Expr!(Op::Bin::Regular {
+                    left_operand: Box::new(left),
+                    operator: self.migrate(operator)?,
+                    right_operand: Box::new(right),
+                })),
+            }
         }
     }
 
+    /// Handles prefix expr.
     fn prefix_expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        Ok(PrefixExpr::new(
-            self.migrate(self.required_field(node, "operator")?)?,
-            self.expr(self.required_field(node, "operand")?)?,
-        )
-        .into())
+        Ok(Expr!(Op::Prefix {
+            operator: self.migrate(self.required_field(node, "operator")?)?,
+            operand: Box::new(self.expr(self.required_field(node, "operand")?)?),
+        }))
     }
 
+    /// Handles postfix expr.
     fn postfix_expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        Ok(PostfixExpr::new(
-            self.expr(self.required_field(node, "operand")?)?,
-            self.migrate(self.required_field(node, "operator")?)?,
-        )
-        .into())
+        Ok(Expr!(Op::Postfix {
+            operand: Box::new(self.expr(self.required_field(node, "operand")?)?),
+            operator: self.migrate(self.required_field(node, "operator")?)?,
+        }))
     }
 
+    /// Handles lambda expression.
     fn lambda_expression(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        let parameter_expr = self.expr(self.required_field(node, "parameters")?)?;
-        let parameters = lambda_parameters(parameter_expr)
-            .ok_or_else(|| self.unsupported("lambda parameters", node))?;
-        Ok(LambdaExpression::new(
-            parameters,
-            self.migrate(self.required_field(node, "operator")?)?,
-            self.expr(self.required_field(node, "body")?)?,
-        )
-        .into())
+        let argument_expr = self.expr(self.required_field(node, "parameters")?)?;
+        let arguments = lambda_arguments(argument_expr)
+            .ok_or_else(|| self.unsupported("lambda arguments", node))?;
+        let operator = self.migrate(self.required_field(node, "operator")?)?;
+        let body = Box::new(self.expr(self.required_field(node, "body")?)?);
+        Ok(match arguments {
+            LambdaArguments::Variadic(argument) => Expr!(Lambda::Variadic {
+                argument,
+                operator,
+                body,
+            }),
+            LambdaArguments::List(arguments) => Expr!(Lambda::List {
+                arguments: *arguments,
+                operator,
+                body,
+            }),
+        })
     }
 
+    /// Handles assignment.
     fn assignment(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let right = self.expr(self.required_field(node, "right")?)?;
         Ok(match node.kind() {
-            "assignment" => GlobalBinding::new(
-                self.migrate(self.required_field(node, "left")?)?,
-                self.migrate(self.required_field(node, "operator")?)?,
-                right,
-            )
-            .into(),
-            "local_assignment" => LocalBinding::new(
-                self.migrate(self.required_field(node, "left")?)?,
-                self.migrate(self.required_field(node, "operator")?)?,
-                right,
-            )
-            .into(),
+            "assignment" => Expr!(Assign::Simple::Global {
+                variable: self.migrate(self.required_field(node, "left")?)?,
+                operator: self.migrate(self.required_field(node, "operator")?)?,
+                value: Box::new(right),
+            }),
+            "local_assignment" => Expr!(Assign::Simple::Local {
+                variable: self.migrate(self.required_field(node, "left")?)?,
+                operator: self.migrate(self.required_field(node, "operator")?)?,
+                value: Box::new(right),
+            }),
             "binary_assignment" | "prefix_assignment" | "postfix_assignment" => {
-                let Expr::OperatorExpr(left) = self.expr(self.required_field(node, "left")?)?
-                else {
+                let Expr::Op(left) = self.expr(self.required_field(node, "left")?)? else {
                     return Err(self.unsupported("operator assignment target", node));
                 };
-                OperatorAssignment::new(
-                    left,
-                    self.migrate(self.required_field(node, "operator")?)?,
-                    right,
-                )
-                .into()
+                Expr!(Assign::Op {
+                    argument_expr: left,
+                    operator: self.migrate(self.required_field(node, "operator")?)?,
+                    value_expr: Box::new(right),
+                })
             }
             "binary_installation" | "prefix_installation" | "postfix_installation" => {
-                let Expr::OperatorExpr(left) = self.expr(self.required_field(node, "left")?)?
-                else {
+                let Expr::Op(left) = self.expr(self.required_field(node, "left")?)? else {
                     return Err(self.unsupported("operator installation target", node));
                 };
                 let (typical_value, function) = installation_value(right);
                 match left {
-                    OperatorExpr::AdjacentExpr(application) => MethodInstallation::new(
-                        *application.left_operand,
-                        *application.right_operand,
-                        self.migrate(self.required_field(node, "operator")?)?,
+                    ExprOp::Bin(ExprOpBin::Adj(application)) => Expr!(Assign::Install::Method {
+                        method: application.left_operand,
+                        operator: application.operator,
+                        signature: application.right_operand,
+                        assign_op: self.migrate(self.required_field(node, "operator")?)?,
                         typical_value,
-                        function,
-                    )
-                    .into(),
-                    domain => OperatorInstallation::new(
-                        domain,
-                        self.migrate(self.required_field(node, "operator")?)?,
+                        function: Box::new(function),
+                    }),
+                    domain_expr => Expr!(Assign::Install::Op {
+                        domain_expr,
+                        assign_op: self.migrate(self.required_field(node, "operator")?)?,
                         typical_value,
-                        function,
-                    )
-                    .into(),
+                        function: Box::new(function),
+                    }),
                 }
             }
             "structured_binding" | "local_structured_binding" => {
-                let pack_expr = self.expr(self.required_field(node, "binding_pack")?)?;
-                let pack = assignment_pack(pack_expr)
-                    .ok_or_else(|| self.unsupported("assignment pack", node))?;
+                let list_expr = self.expr(self.required_field(node, "binding_pack")?)?;
+                let argument_list = assignment_list(list_expr)
+                    .ok_or_else(|| self.unsupported("assignment argument list", node))?;
                 if node.kind() == "local_structured_binding" {
-                    LocalParallelAssignment::new(
-                        pack,
-                        self.migrate(self.required_field(node, "operator")?)?,
-                        right,
-                    )
-                    .into()
+                    Expr!(Assign::Parallel::Local {
+                        argument_list: Box::new(argument_list),
+                        operator: self.migrate(self.required_field(node, "operator")?)?,
+                        value: Box::new(right),
+                    })
                 } else {
-                    GlobalParallelAssignment::new(
-                        pack,
-                        self.migrate(self.required_field(node, "operator")?)?,
-                        right,
-                    )
-                    .into()
+                    Expr!(Assign::Parallel::Global {
+                        argument_list: Box::new(argument_list),
+                        operator: self.migrate(self.required_field(node, "operator")?)?,
+                        value: Box::new(right),
+                    })
                 }
             }
             kind => return Err(self.unsupported(kind, node)),
         })
     }
 
+    /// Handles then clause.
     fn then_clause(&self, node: tree_sitter::Node<'_>) -> Result<ThenClause, ParseError> {
         Ok(ThenClause::new(
             self.migrate(self.required_kind(node, "then")?)?,
-            self.expr(self.required_expression_child(node)?)?,
+            Box::new(self.expr(self.required_expression_child(node)?)?),
         ))
     }
 
+    /// Handles else clause.
     fn else_clause(&self, node: tree_sitter::Node<'_>) -> Result<ElseClause, ParseError> {
         Ok(ElseClause::new(
             self.migrate(self.required_kind(node, "else")?)?,
-            self.expr(self.required_expression_child(node)?)?,
+            Box::new(self.expr(self.required_expression_child(node)?)?),
         ))
     }
 
+    /// Handles if statement.
     fn if_statement(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        Ok(IfStatement::new(
-            self.migrate(self.required_kind(node, "if")?)?,
-            self.expr(self.required_field(node, "condition")?)?,
-            self.then_clause(self.required_kind(node, "then_clause")?)?,
-            self.optional_kind(node, "else_clause")
+        Ok(Expr!(If {
+            if_token: self.migrate(self.required_kind(node, "if")?)?,
+            condition: Box::new(self.expr(self.required_field(node, "condition")?)?),
+            then_clause: self.then_clause(self.required_kind(node, "then_clause")?)?,
+            else_clause: self
+                .optional_kind(node, "else_clause")
                 .map(|child| self.else_clause(child))
                 .transpose()?,
-        )
-        .into())
+        }))
     }
 
+    /// Handles loop body.
     fn loop_body(&self, node: tree_sitter::Node<'_>) -> Result<LoopBody, ParseError> {
         let list_step = self
             .optional_kind(node, "list")
             .map(|token| {
                 Ok::<_, ParseError>(ListStep::new(
                     self.migrate(token)?,
-                    self.expr(self.required_field(node, "listed_value")?)?,
+                    Box::new(self.expr(self.required_field(node, "listed_value")?)?),
                 ))
             })
             .transpose()?;
@@ -888,13 +988,14 @@ impl<'source> Lowerer<'source> {
             .map(|token| {
                 Ok::<_, ParseError>(DoStep::new(
                     self.migrate(token)?,
-                    self.expr(self.required_field(node, "ignored_value")?)?,
+                    Box::new(self.expr(self.required_field(node, "ignored_value")?)?),
                 ))
             })
             .transpose()?;
         Ok(LoopBody::new(list_step, do_step))
     }
 
+    /// Handles for loop.
     fn for_loop(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let iteration_domain = self
             .optional_kind(node, "iteration_range")
@@ -905,34 +1006,53 @@ impl<'source> Lowerer<'source> {
             .map(|token| {
                 Ok::<_, ParseError>(WhenCondition::new(
                     self.migrate(token)?,
-                    self.expr(self.required_field(node, "filter")?)?,
+                    Box::new(self.expr(self.required_field(node, "filter")?)?),
                 ))
             })
             .transpose()?;
-        Ok(ForLoop::new(
-            self.migrate(self.required_kind(node, "for")?)?,
-            self.migrate(self.required_field(node, "variable")?)?,
-            iteration_domain,
-            when_condition,
-            self.loop_body(self.required_kind(node, "loop_body")?)?,
-        )
-        .into())
+        let for_token = self.migrate(self.required_kind(node, "for")?)?;
+        let variable = self.migrate(self.required_field(node, "variable")?)?;
+        let body = self.loop_body(self.required_kind(node, "loop_body")?)?;
+        Ok(match iteration_domain {
+            None => Expr!(For::Bare {
+                for_token,
+                variable,
+                condition: when_condition,
+                body,
+            }),
+            Some(IterationDomain::Range(lower_bound, upper_bound)) => Expr!(For::Range {
+                for_token,
+                variable,
+                lower_bound,
+                upper_bound,
+                condition: when_condition,
+                body,
+            }),
+            Some(IterationDomain::In(in_token, collection)) => Expr!(For::In {
+                for_token,
+                variable,
+                in_token,
+                collection,
+                condition: when_condition,
+                body,
+            }),
+        })
     }
 
+    /// Handles iteration domain.
     fn iteration_domain(&self, node: tree_sitter::Node<'_>) -> Result<IterationDomain, ParseError> {
         if let Some(token) = self.optional_kind(node, "in") {
-            return Ok(IterIn::new(
+            return Ok(IterationDomain::In(
                 self.migrate(token)?,
-                self.expr(self.required_field(node, "iterated_collection")?)?,
-            )
-            .into());
+                Box::new(self.expr(self.required_field(node, "iterated_collection")?)?),
+            ));
         }
         let lower_bound = self
             .optional_kind(node, "from")
             .map(|token| {
                 Ok::<_, ParseError>(RangeBoundFrom::new(
                     self.migrate(token)?,
-                    self.expr(self.required_field(node, "range_start")?)?,
+                    Box::new(self.expr(self.required_field(node, "range_start")?)?),
                 ))
             })
             .transpose()?;
@@ -941,22 +1061,23 @@ impl<'source> Lowerer<'source> {
             .map(|token| {
                 Ok::<_, ParseError>(RangeBoundTo::new(
                     self.migrate(token)?,
-                    self.expr(self.required_field(node, "range_end")?)?,
+                    Box::new(self.expr(self.required_field(node, "range_end")?)?),
                 ))
             })
             .transpose()?;
-        Ok(IterRange::new(lower_bound, upper_bound).into())
+        Ok(IterationDomain::Range(lower_bound, upper_bound))
     }
 
+    /// Handles while loop.
     fn while_loop(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        Ok(WhileLoop::new(
-            self.migrate(self.required_kind(node, "while")?)?,
-            self.expr(self.required_field(node, "condition")?)?,
-            self.loop_body(self.required_kind(node, "loop_body")?)?,
-        )
-        .into())
+        Ok(Expr!(While {
+            while_token: self.migrate(self.required_kind(node, "while")?)?,
+            condition: Box::new(self.expr(self.required_field(node, "condition")?)?),
+            body: self.loop_body(self.required_kind(node, "loop_body")?)?,
+        }))
     }
 
+    /// Handles new statement.
     fn new_statement(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let mut installation = None;
         let class =
@@ -966,10 +1087,10 @@ impl<'source> Lowerer<'source> {
             .map(|token| {
                 Ok::<_, ParseError>(OfClass::new(
                     self.migrate(token)?,
-                    self.new_statement_element(
+                    Box::new(self.new_statement_element(
                         self.required_field(node, "parent")?,
                         &mut installation,
-                    )?,
+                    )?),
                 ))
             })
             .transpose()?;
@@ -978,27 +1099,35 @@ impl<'source> Lowerer<'source> {
             .map(|token| {
                 Ok::<_, ParseError>(FromInstance::new(
                     self.migrate(token)?,
-                    self.new_statement_element(
+                    Box::new(self.new_statement_element(
                         self.required_field(node, "instance")?,
                         &mut installation,
-                    )?,
+                    )?),
                 ))
             })
             .transpose()?;
-        let statement = NewStatement::new(
-            self.migrate(self.required_kind(node, "new")?)?,
-            class,
+        let statement = Expr!(New {
+            new_token: self.migrate(self.required_kind(node, "new")?)?,
+            class: Box::new(class),
             parent_class,
             instance,
-        );
+        });
         Ok(match installation {
             Some((operator, function)) => {
-                NewInstallation::new(statement, operator, function).into()
+                let Expr::New(new_statement) = statement else {
+                    unreachable!("the constructor selected the new-statement specialization")
+                };
+                Expr!(Assign::Install::New {
+                    new_statement,
+                    operator,
+                    function: Box::new(function),
+                })
             }
-            None => statement.into(),
+            None => statement,
         })
     }
 
+    /// Handles new statement element.
     fn new_statement_element(
         &self,
         node: tree_sitter::Node<'_>,
@@ -1016,6 +1145,7 @@ impl<'source> Lowerer<'source> {
         self.expr(self.required_field(node, "left")?)
     }
 
+    /// Attempts to statement.
     fn try_statement(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let value = self
             .semantic_children(node)
@@ -1033,29 +1163,30 @@ impl<'source> Lowerer<'source> {
         let fallback = self
             .child_by_field(node, "fallback")
             .map(|child| match child.kind() {
-                "else_clause" => self.else_clause(child).map(TryFallback::ElseClause),
-                "except_clause" => self.except_do(child).map(TryFallback::ExceptDo),
+                "else_clause" => self.else_clause(child).map(TryFallback::Else),
+                "except_clause" => self.except_do(child),
                 kind => Err(self.unsupported(kind, child)),
             })
             .transpose()?;
-        Ok(TryStatement::new(
-            self.migrate(self.required_kind(node, "try")?)?,
-            self.expr(value)?,
+        Ok(Expr!(Try {
+            try_token: self.migrate(self.required_kind(node, "try")?)?,
+            value: Box::new(self.expr(value)?),
             on_success,
             fallback,
-        )
-        .into())
+        }))
     }
 
-    fn except_do(&self, node: tree_sitter::Node<'_>) -> Result<ExceptDo, ParseError> {
-        Ok(ExceptDo::new(
-            self.migrate(self.required_kind(node, "except")?)?,
-            self.migrate(self.required_field(node, "exception")?)?,
-            self.migrate(self.required_kind(node, "do")?)?,
-            self.expr(self.required_expression_child(node)?)?,
-        ))
+    /// Handles except do.
+    fn except_do(&self, node: tree_sitter::Node<'_>) -> Result<TryFallback, ParseError> {
+        Ok(TryFallback!(Except {
+            except_token: self.migrate(self.required_kind(node, "except")?)?,
+            exception: self.migrate(self.required_field(node, "exception")?)?,
+            do_token: self.migrate(self.required_kind(node, "do")?)?,
+            value: Box::new(self.expr(self.required_expression_child(node)?)?),
+        }))
     }
 
+    /// Handles quote expression.
     fn quote_expression(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let token = self
             .children(node)
@@ -1067,21 +1198,34 @@ impl<'source> Lowerer<'source> {
                 ) && self.child_by_field(node, "token") != Some(*child)
             })
             .ok_or_else(|| self.unsupported("quote specifier", node))?;
-        let specifier = match token.kind() {
-            "symbol" => QuoteSpecifier::Symbol(self.migrate(token)?),
-            "local" => QuoteSpecifier::Local(self.migrate(token)?),
-            "global" => QuoteSpecifier::Global(self.migrate(token)?),
-            "threadVariable" => QuoteSpecifier::ThreadVariable(self.migrate(token)?),
-            "threadLocal" => QuoteSpecifier::ThreadLocal(self.migrate(token)?),
-            kind => return Err(self.unsupported(kind, token)),
-        };
         let quoted = self.required_field(node, "token")?;
-        Ok(
-            QuoteExpression::new(specifier, Symbol::new(self.text(quoted), self.span(quoted)))
-                .into(),
-        )
+        let symbol = Symbol::new(self.text(quoted), self.span(quoted));
+        Ok(match token.kind() {
+            "symbol" => Expr!(Quote::Symbol {
+                specifier: self.migrate(token)?,
+                symbol,
+            }),
+            "local" => Expr!(Quote::Local {
+                specifier: self.migrate(token)?,
+                symbol,
+            }),
+            "global" => Expr!(Quote::Global {
+                specifier: self.migrate(token)?,
+                symbol,
+            }),
+            "threadVariable" => Expr!(Quote::ThreadVariable {
+                specifier: self.migrate(token)?,
+                symbol,
+            }),
+            "threadLocal" => Expr!(Quote::ThreadLocal {
+                specifier: self.migrate(token)?,
+                symbol,
+            }),
+            kind => return Err(self.unsupported(kind, token)),
+        })
     }
 
+    /// Handles debug clause.
     fn debug_clause(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         let keyword = self.required_field(node, "keyword")?;
         let value = self
@@ -1089,42 +1233,51 @@ impl<'source> Lowerer<'source> {
             .map(|child| self.expr(child))
             .transpose()?;
         Ok(match keyword.kind() {
-            "elapsedTime" => ProfilingExpr::new(
-                ProfilingModifier::ElapsedTime(self.migrate(keyword)?),
-                value.ok_or_else(|| self.unsupported("profiling operand", node))?,
-            )
-            .into(),
-            "elapsedTiming" => ProfilingExpr::new(
-                ProfilingModifier::ElapsedTiming(self.migrate(keyword)?),
-                value.ok_or_else(|| self.unsupported("profiling operand", node))?,
-            )
-            .into(),
-            "profile" => ProfilingExpr::new(
-                ProfilingModifier::Profile(self.migrate(keyword)?),
-                value.ok_or_else(|| self.unsupported("profiling operand", node))?,
-            )
-            .into(),
-            "time" => ProfilingExpr::new(
-                ProfilingModifier::Time(self.migrate(keyword)?),
-                value.ok_or_else(|| self.unsupported("profiling operand", node))?,
-            )
-            .into(),
-            "timing" => ProfilingExpr::new(
-                ProfilingModifier::Timing(self.migrate(keyword)?),
-                value.ok_or_else(|| self.unsupported("profiling operand", node))?,
-            )
-            .into(),
-            "TEST" => DebugExpr::new(DebugKeyword::Test(self.migrate(keyword)?), value).into(),
-            "step" => DebugExpr::new(DebugKeyword::Step(self.migrate(keyword)?), value).into(),
-            "finish" => DebugExpr::new(DebugKeyword::Finish(self.migrate(keyword)?), value).into(),
-            "shield" => DebugExpr::new(DebugKeyword::Shield(self.migrate(keyword)?), value).into(),
-            "breakpoint" => {
-                DebugExpr::new(DebugKeyword::Breakpoint(self.migrate(keyword)?), value).into()
-            }
+            "elapsedTime" => Expr!(Profile::ElapsedTime {
+                modifier: self.migrate(keyword)?,
+                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
+            }),
+            "elapsedTiming" => Expr!(Profile::ElapsedTiming {
+                modifier: self.migrate(keyword)?,
+                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
+            }),
+            "profile" => Expr!(Profile::Profile {
+                modifier: self.migrate(keyword)?,
+                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
+            }),
+            "time" => Expr!(Profile::Time {
+                modifier: self.migrate(keyword)?,
+                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
+            }),
+            "timing" => Expr!(Profile::Timing {
+                modifier: self.migrate(keyword)?,
+                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
+            }),
+            "TEST" => Expr!(Debug::Test {
+                keyword: self.migrate(keyword)?,
+                value: value.map(Box::new),
+            }),
+            "step" => Expr!(Debug::Step {
+                keyword: self.migrate(keyword)?,
+                value: value.map(Box::new),
+            }),
+            "finish" => Expr!(Debug::Finish {
+                keyword: self.migrate(keyword)?,
+                value: value.map(Box::new),
+            }),
+            "shield" => Expr!(Debug::Shield {
+                keyword: self.migrate(keyword)?,
+                value: value.map(Box::new),
+            }),
+            "breakpoint" => Expr!(Debug::Breakpoint {
+                keyword: self.migrate(keyword)?,
+                value: value.map(Box::new),
+            }),
             kind => return Err(self.unsupported(kind, keyword)),
         })
     }
 
+    /// Handles migrate.
     fn migrate<T>(&self, node: tree_sitter::Node<'_>) -> Result<T, ParseError>
     where
         for<'tree> T: Migrate<TreeSitterNode<'tree, 'source>>,
@@ -1137,6 +1290,7 @@ impl<'source> Lowerer<'source> {
         .map_err(Into::into)
     }
 
+    /// Handles delimiter spans.
     fn delimiter_spans(&self, node: tree_sitter::Node<'_>) -> Result<DoubleSpan, ParseError> {
         let kind = match node.kind() {
             "parenthesized_expression" | "sequence" => DelimiterKind::Parenthesis,
@@ -1154,12 +1308,14 @@ impl<'source> Lowerer<'source> {
         }
     }
 
+    /// Handles children.
     fn children<'tree>(&self, node: tree_sitter::Node<'tree>) -> Vec<tree_sitter::Node<'tree>> {
         (0..node.child_count())
             .filter_map(|index| node.child(u32::try_from(index).expect("child count fits u32")))
             .collect()
     }
 
+    /// Handles semantic children.
     fn semantic_children<'tree>(
         &self,
         node: tree_sitter::Node<'tree>,
@@ -1170,6 +1326,7 @@ impl<'source> Lowerer<'source> {
             .collect()
     }
 
+    /// Handles only semantic child.
     fn only_semantic_child<'tree>(
         &self,
         node: tree_sitter::Node<'tree>,
@@ -1181,6 +1338,7 @@ impl<'source> Lowerer<'source> {
         }
     }
 
+    /// Handles first expression child.
     fn first_expression_child<'tree>(
         &self,
         node: tree_sitter::Node<'tree>,
@@ -1193,6 +1351,7 @@ impl<'source> Lowerer<'source> {
         })
     }
 
+    /// Handles required expression child.
     fn required_expression_child<'tree>(
         &self,
         node: tree_sitter::Node<'tree>,
@@ -1201,6 +1360,7 @@ impl<'source> Lowerer<'source> {
             .ok_or_else(|| self.unsupported("expression child", node))
     }
 
+    /// Handles child by field.
     fn child_by_field<'tree>(
         &self,
         node: tree_sitter::Node<'tree>,
@@ -1209,6 +1369,7 @@ impl<'source> Lowerer<'source> {
         node.child_by_field_name(field)
     }
 
+    /// Handles required field.
     fn required_field<'tree>(
         &self,
         node: tree_sitter::Node<'tree>,
@@ -1218,6 +1379,7 @@ impl<'source> Lowerer<'source> {
             .ok_or_else(|| self.unsupported(field, node))
     }
 
+    /// Handles optional kind.
     fn optional_kind<'tree>(
         &self,
         node: tree_sitter::Node<'tree>,
@@ -1228,6 +1390,7 @@ impl<'source> Lowerer<'source> {
             .find(|child| !child.is_extra() && child.kind() == kind)
     }
 
+    /// Handles required kind.
     fn required_kind<'tree>(
         &self,
         node: tree_sitter::Node<'tree>,
@@ -1237,6 +1400,7 @@ impl<'source> Lowerer<'source> {
             .ok_or_else(|| self.unsupported(kind, node))
     }
 
+    /// Returns the source text.
     fn text(&self, node: tree_sitter::Node<'_>) -> Cow<'_, str> {
         let range = self
             .span(node)
@@ -1245,6 +1409,7 @@ impl<'source> Lowerer<'source> {
         String::from_utf8_lossy(&self.source[range])
     }
 
+    /// Returns the source span.
     fn span(&self, node: tree_sitter::Node<'_>) -> Span {
         let range = node.byte_range();
         self.aliases
@@ -1261,10 +1426,12 @@ impl<'source> Lowerer<'source> {
             )
     }
 
+    /// Handles unsupported.
     fn unsupported(&self, kind: impl Into<String>, node: tree_sitter::Node<'_>) -> ParseError {
         self.unsupported_span(kind, self.span(node))
     }
 
+    /// Handles unsupported span.
     fn unsupported_span(&self, kind: impl Into<String>, span: Span) -> ParseError {
         ParseError::UnsupportedNode {
             kind: kind.into(),
@@ -1274,11 +1441,15 @@ impl<'source> Lowerer<'source> {
 }
 
 #[derive(Clone)]
+/// Internal state for CoreAlias.
 struct CoreAlias {
+    /// The full.
     full: Range<usize>,
+    /// The bare.
     bare: Range<usize>,
 }
 
+/// Handles renamed source.
 fn renamed_source(source: &str) -> Result<(Cow<'_, str>, Vec<CoreAlias>), LexError> {
     let tokens = lex_str(source)?;
     let mut aliases = Vec::new();
@@ -1297,8 +1468,10 @@ fn renamed_source(source: &str) -> Result<(Cow<'_, str>, Vec<CoreAlias>), LexErr
     ))
 }
 
+/// Internal alias for RecoveredSource.
 type RecoveredSource<'source> = (Cow<'source, str>, Vec<CoreAlias>, Vec<LexError>);
 
+/// Handles renamed source recovering.
 fn renamed_source_recovering(source: &str) -> Result<RecoveredSource<'_>, LexError> {
     let recovered = lex_str_recovering(source)?;
     let (tokens, diagnostics) = recovered.into_parts();
@@ -1325,6 +1498,7 @@ fn renamed_source_recovering(source: &str) -> Result<RecoveredSource<'_>, LexErr
     ))
 }
 
+/// Collects missing closers.
 fn collect_missing_closers(tokens: &TokenStream, missing: &mut Vec<DelimiterKind>) {
     for token in tokens.iter() {
         let TokenTree::Group(group) = token else {
@@ -1337,6 +1511,7 @@ fn collect_missing_closers(tokens: &TokenStream, missing: &mut Vec<DelimiterKind
     }
 }
 
+/// Collects core aliases.
 fn collect_core_aliases(tokens: &TokenStream, aliases: &mut Vec<CoreAlias>) {
     for token in tokens.iter() {
         match token {
@@ -1363,8 +1538,11 @@ fn collect_core_aliases(tokens: &TokenStream, aliases: &mut Vec<CoreAlias>) {
 #[derive(Clone)]
 /// A borrowed Tree-sitter node paired with the source bytes it spans.
 pub struct TreeSitterNode<'tree, 'source> {
+    /// The node.
     node: tree_sitter::Node<'tree>,
+    /// The source.
     source: &'source [u8],
+    /// The span.
     span: Option<Span>,
 }
 
@@ -1378,6 +1556,7 @@ impl<'tree, 'source> TreeSitterNode<'tree, 'source> {
         }
     }
 
+    /// Handles with span.
     fn with_span(node: tree_sitter::Node<'tree>, source: &'source [u8], span: Span) -> Self {
         Self {
             node,

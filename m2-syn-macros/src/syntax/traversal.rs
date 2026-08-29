@@ -90,7 +90,7 @@ impl Traversal {
             }
             (Shape::Boxed(inner), Ambient::Rebuild) => {
                 let element = self.lift(inner, quote!(*#value));
-                quote!(::std::boxed::Box::new(#element))
+                quote!(<qf!(Box<_>)>::new(#element))
             }
 
             (Shape::Delimited(inner), Ambient::Sequence { access }) => {
@@ -135,16 +135,9 @@ impl Traversal {
                 quote!(#value.map(|value| #element))
             }
             (Shape::Punctuated(inner), Ambient::Rebuild) => {
-                let first = self.lift(inner, quote!(first));
-                let rest = self.lift(inner, quote!(value));
+                let element = self.lift(inner, quote!(value));
                 quote!({
-                    let (first, values) = #value.into_parts();
-                    ::m2_syn::Punctuated::new(
-                        #first,
-                        values.into_iter()
-                            .map(|(punctuation, value)| (punctuation, #rest))
-                            .collect(),
-                    )
+                    #value.map_values(|value| #element)
                 })
             }
             (Shape::Repeated(inner, _), Ambient::Rebuild) => {

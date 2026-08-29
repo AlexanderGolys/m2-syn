@@ -1,3 +1,5 @@
+//! Integration tests for tuple products.
+
 use std::borrow::Cow;
 
 use m2_syn::{
@@ -5,7 +7,6 @@ use m2_syn::{
 };
 
 syntax! {
-    precedence: {}
     tokens {}
 
     struct Left;

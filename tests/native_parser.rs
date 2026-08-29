@@ -1,4 +1,9 @@
-use m2_syn::nodes::{BinaryOperator, Collection, Component, ControlFlow, Expr, OperatorExpr};
+//! Integration tests for native parser.
+
+use m2_syn::nodes::{
+    BinaryOperator, Expr, ExprCollection, ExprControl, ExprDebug, ExprFor, ExprOp, ExprOpBin,
+    ExprQuote, PackedContent, Symbol,
+};
 use m2_syn::{
     DelimiterToken, Lex, LexErrorKind, LiteralKind, NativeParseError, Span, Spanned, Terminal,
     TokenTree, Tokenize, lex_str, parse_native, parse_native_recovering, parse_with,
@@ -8,23 +13,21 @@ fn expression(source: &str) -> Expr {
     let mut file = parse_native(source).unwrap();
     assert_eq!(file.cells.len(), 1);
     let cell = file.cells.pop().unwrap();
-    let mut components = cell.content.pack.into_iter();
-    let Some(Component::Expr(value)) = components.next() else {
-        panic!("expected one expression component");
+    let PackedContent::Expr(value) = cell.content else {
+        panic!("expected one expression");
     };
-    assert!(components.next().is_none());
     *value
 }
 
 fn adjacent(expression: &Expr) -> (&Expr, &Expr) {
-    let Expr::OperatorExpr(OperatorExpr::AdjacentExpr(expression)) = expression else {
+    let Expr::Op(ExprOp::Bin(ExprOpBin::Adj(expression))) = expression else {
         panic!("expected implicit application, found {expression:?}");
     };
     (&expression.left_operand, &expression.right_operand)
 }
 
 fn binary(expression: &Expr) -> (&Expr, &BinaryOperator, &Expr) {
-    let Expr::OperatorExpr(OperatorExpr::BinaryExpr(expression)) = expression else {
+    let Expr::Op(ExprOp::Bin(ExprOpBin::Regular(expression))) = expression else {
         panic!("expected a binary expression, found {expression:?}");
     };
     (
@@ -32,6 +35,26 @@ fn binary(expression: &Expr) -> (&Expr, &BinaryOperator, &Expr) {
         &expression.operator,
         &expression.right_operand,
     )
+}
+
+fn quoted_symbol(quote: &ExprQuote) -> &Symbol {
+    match quote {
+        ExprQuote::Symbol(quote) => &quote.symbol,
+        ExprQuote::Local(quote) => &quote.symbol,
+        ExprQuote::Global(quote) => &quote.symbol,
+        ExprQuote::ThreadVariable(quote) => &quote.symbol,
+        ExprQuote::ThreadLocal(quote) => &quote.symbol,
+    }
+}
+
+fn debug_value(debug: &ExprDebug) -> Option<&Expr> {
+    match debug {
+        ExprDebug::Test(debug) => debug.value.as_deref(),
+        ExprDebug::Step(debug) => debug.value.as_deref(),
+        ExprDebug::Finish(debug) => debug.value.as_deref(),
+        ExprDebug::Shield(debug) => debug.value.as_deref(),
+        ExprDebug::Breakpoint(debug) => debug.value.as_deref(),
+    }
 }
 
 #[test]
@@ -54,7 +77,7 @@ fn implicit_application_uses_the_consumed_tokens_unary_handler_at_level_61() {
     adjacent(right);
 
     let prefixed = expression("# f x");
-    let Expr::OperatorExpr(OperatorExpr::PrefixExpr(prefix)) = prefixed else {
+    let Expr::Op(ExprOp::Prefix(prefix)) = prefixed else {
         panic!("expected prefix expression");
     };
     assert_eq!(prefix.operator.spelling(), "#");
@@ -66,12 +89,12 @@ fn bracket_precedence_differs_from_parenthesis_precedence() {
     let indexed_quotient = expression("R / I [x]");
     let (left, right) = adjacent(&indexed_quotient);
     assert_eq!(binary(left).1.spelling(), "/");
-    assert!(matches!(right, Expr::Collection(Collection::Array(_))));
+    assert!(matches!(right, Expr::Collection(ExprCollection::Array(_))));
 
     let bracket = expression("a x []");
     let (left, right) = adjacent(&bracket);
     adjacent(left);
-    assert!(matches!(right, Expr::Collection(Collection::Array(_))));
+    assert!(matches!(right, Expr::Collection(ExprCollection::Array(_))));
 
     let parenthesis = expression("a x ()");
     let (_, right) = adjacent(&parenthesis);
@@ -84,14 +107,14 @@ fn chained_delimiters_inherit_the_application_floor() {
     let low_then_high = expression("a [] ()");
     let (_, right) = adjacent(&low_then_high);
     let (array, parenthesis) = adjacent(right);
-    assert!(matches!(array, Expr::Collection(Collection::Array(_))));
+    assert!(matches!(array, Expr::Collection(ExprCollection::Array(_))));
     assert!(matches!(parenthesis, Expr::Holder(_)));
 
     let high_then_low = expression("a () []");
     let (left, array) = adjacent(&high_then_low);
     let (_, parenthesis) = adjacent(left);
     assert!(matches!(parenthesis, Expr::Holder(_)));
-    assert!(matches!(array, Expr::Collection(Collection::Array(_))));
+    assert!(matches!(array, Expr::Collection(ExprCollection::Array(_))));
 }
 
 #[test]
@@ -207,17 +230,17 @@ fn typed_strings_emit_literal_tokens_instead_of_delimiter_groups() {
 
 #[test]
 fn prefix_control_statements_respect_optional_values_and_cell_boundaries() {
-    let Expr::ControlFlow(ControlFlow::BreakExpr(statement)) = expression("break") else {
+    let Expr::Control(ExprControl::Break(statement)) = expression("break") else {
         panic!("expected a break statement");
     };
     assert!(statement.value.is_none());
 
-    let Expr::ControlFlow(ControlFlow::ContinueExpr(statement)) = expression("continue x") else {
+    let Expr::Control(ExprControl::Continue(statement)) = expression("continue x") else {
         panic!("expected a continue statement");
     };
     assert!(matches!(statement.value.as_deref(), Some(Expr::Symbol(_))));
 
-    let Expr::ControlFlow(ControlFlow::ReturnExpr(statement)) = expression("return 1 + 2") else {
+    let Expr::Control(ExprControl::Return(statement)) = expression("return 1 + 2") else {
         panic!("expected a return statement");
     };
     assert_eq!(
@@ -247,38 +270,36 @@ fn prefix_control_statements_respect_optional_values_and_cell_boundaries() {
 
 #[test]
 fn clause_control_forms_build_the_existing_typed_nodes() {
-    let Expr::IfStatement(statement) = expression("if a > 0 then b else c") else {
+    let Expr::If(statement) = expression("if a > 0 then b else c") else {
         panic!("expected an if statement");
     };
     assert_eq!(binary(&statement.condition).1.spelling(), ">");
     assert!(statement.else_clause.is_some());
 
-    let Expr::ForLoop(statement) = expression("for i from 0 to 4 when i > 1 list i do print i")
+    let Expr::For(ExprFor::Range(statement)) =
+        expression("for i from 0 to 4 when i > 1 list i do print i")
     else {
         panic!("expected a for loop");
     };
-    let Some(m2_syn::nodes::IterationDomain::IterRange(range)) = &statement.iteration_domain else {
-        panic!("expected a range");
-    };
-    assert!(range.lower_bound.is_some());
-    assert!(range.upper_bound.is_some());
-    assert!(statement.when_condition.is_some());
+    assert!(statement.lower_bound.is_some());
+    assert!(statement.upper_bound.is_some());
+    assert!(statement.condition.is_some());
     assert!(statement.body.list_step.is_some());
     assert!(statement.body.do_step.is_some());
 
-    let Expr::WhileLoop(statement) = expression("while x < 10 do x = x + 1") else {
+    let Expr::While(statement) = expression("while x < 10 do x = x + 1") else {
         panic!("expected a while loop");
     };
     assert_eq!(binary(&statement.condition).1.spelling(), "<");
     assert!(statement.body.do_step.is_some());
 
-    let Expr::TryStatement(statement) = expression("try x then y except err do err") else {
+    let Expr::Try(statement) = expression("try x then y except err do err") else {
         panic!("expected a try statement");
     };
     assert!(statement.on_success.is_some());
     assert!(matches!(
         statement.fallback.as_ref(),
-        Some(m2_syn::nodes::TryFallback::ExceptDo(_))
+        Some(m2_syn::nodes::TryFallback::Except(_))
     ));
 }
 
@@ -329,8 +350,7 @@ fn incomplete_operators_report_expected_and_found_state() {
 
 #[test]
 fn new_statement_parses_its_ordered_optional_clauses() {
-    let Expr::NewStatement(statement) = expression("new HashTable of MutableHashTable from pairs")
-    else {
+    let Expr::New(statement) = expression("new HashTable of MutableHashTable from pairs") else {
         panic!("expected a new statement");
     };
     assert!(matches!(statement.class.as_ref(), Expr::Symbol(_)));
@@ -372,17 +392,17 @@ fn new_statement_parses_its_ordered_optional_clauses() {
 #[test]
 fn debug_clauses_distinguish_nullable_and_required_operands() {
     for source in ["step", "finish"] {
-        let Expr::DebugExpr(clause) = expression(source) else {
+        let Expr::Debug(clause) = expression(source) else {
             panic!("`{source}` should be a debug clause");
         };
-        assert!(clause.value.is_none());
+        assert!(debug_value(&clause).is_none());
     }
 
     for source in ["step x", "finish x", "shield x", "TEST x", "breakpoint x"] {
-        let Expr::DebugExpr(clause) = expression(source) else {
+        let Expr::Debug(clause) = expression(source) else {
             panic!("`{source}` should be a debug clause");
         };
-        assert!(clause.value.is_some());
+        assert!(debug_value(&clause).is_some());
     }
 
     for source in [
@@ -392,7 +412,7 @@ fn debug_clauses_distinguish_nullable_and_required_operands() {
         "elapsedTiming x",
         "profile x",
     ] {
-        assert!(matches!(expression(source), Expr::ProfilingExpr(_)));
+        assert!(matches!(expression(source), Expr::Profile(_)));
     }
 
     for keyword in [
@@ -421,10 +441,10 @@ fn debug_clauses_distinguish_nullable_and_required_operands() {
 
 #[test]
 fn quote_specifiers_turn_keyword_spellings_into_symbols() {
-    let Expr::QuoteExpression(quote) = expression("symbol if") else {
+    let Expr::Quote(quote) = expression("symbol if") else {
         panic!("expected a quote expression");
     };
-    let symbol = quote.symbol;
+    let symbol = quoted_symbol(&quote);
     assert_eq!(symbol.text(), "if");
 }
 
@@ -440,10 +460,10 @@ fn quote_specifiers_take_brackets_and_semicolons_as_plain_symbols() {
         ("local {", "{"),
         ("symbol ;", ";"),
     ] {
-        let Expr::QuoteExpression(quote) = expression(source) else {
+        let Expr::Quote(quote) = expression(source) else {
             panic!("`{source}` should quote its bracket");
         };
-        assert_eq!(quote.symbol.text(), quoted);
+        assert_eq!(quoted_symbol(&quote).text(), quoted);
     }
 }
 
@@ -453,14 +473,14 @@ fn each_quote_specifier_quotes_only_the_token_after_it() {
     // other. M2 accepts this as syntax and only fails when evaluating it.
     let application = expression("symbol ( symbol )");
     let (left, right) = adjacent(&application);
-    let Expr::QuoteExpression(left) = left else {
+    let Expr::Quote(left) = left else {
         panic!("expected a quoted left operand");
     };
-    let Expr::QuoteExpression(right) = right else {
+    let Expr::Quote(right) = right else {
         panic!("expected a quoted right operand");
     };
-    assert_eq!(left.symbol.text(), "(");
-    assert_eq!(right.symbol.text(), ")");
+    assert_eq!(quoted_symbol(left).text(), "(");
+    assert_eq!(quoted_symbol(right).text(), ")");
 
     // A specifier that is itself quoted is data, not another instruction to
     // quote. The following parentheses therefore retain their normal grouping
@@ -472,25 +492,25 @@ fn each_quote_specifier_quotes_only_the_token_after_it() {
 
 #[test]
 fn core_keyword_aliases_share_their_unqualified_parse_behavior() {
-    let Expr::IfStatement(statement) = expression("Core$if x Core$then y Core$else z") else {
+    let Expr::If(statement) = expression("Core$if x Core$then y Core$else z") else {
         panic!("Core$if should parse as an if statement");
     };
     assert!(statement.else_clause.is_some());
 
-    let Expr::ForLoop(_) = expression("Core$for i Core$in L Core$list i") else {
+    let Expr::For(_) = expression("Core$for i Core$in L Core$list i") else {
         panic!("qualified loop keywords should retain their parser behavior");
     };
 
-    let Expr::NewStatement(statement) = expression("Core$new A Core$of B Core$from C") else {
+    let Expr::New(statement) = expression("Core$new A Core$of B Core$from C") else {
         panic!("Core$new should parse as a new statement");
     };
     assert!(statement.parent_class.is_some());
     assert!(statement.instance.is_some());
 
-    let Expr::QuoteExpression(quote) = expression("Core$symbol if") else {
+    let Expr::Quote(quote) = expression("Core$symbol if") else {
         panic!("Core$symbol should parse as a quote specifier");
     };
-    assert_eq!(quote.symbol.text(), "if");
+    assert_eq!(quoted_symbol(&quote).text(), "if");
 }
 
 #[test]
@@ -498,8 +518,7 @@ fn core_word_aliases_apply_exactly_once() {
     let file = parse_native("Core$if x\nCore$then y").unwrap();
     assert_eq!(file.cells.len(), 1);
 
-    let Expr::OperatorExpr(OperatorExpr::PrefixExpr(qualified_not)) = expression("Core$not x")
-    else {
+    let Expr::Op(ExprOp::Prefix(qualified_not)) = expression("Core$not x") else {
         panic!("one Core qualifier must retain the hardcoded `not` alias");
     };
     assert_eq!(qualified_not.operator.spelling(), "not");
@@ -515,16 +534,13 @@ fn core_word_aliases_apply_exactly_once() {
     let (left, _) = adjacent(&recursive_not);
     assert!(matches!(left, Expr::Symbol(symbol) if symbol.text() == "Core$Core$not"));
 
-    let Expr::QuoteExpression(quoted) = expression("symbol Core$not") else {
+    let Expr::Quote(quoted) = expression("symbol Core$not") else {
         panic!("quotation must suppress the hardcoded alias");
     };
-    assert_eq!(quoted.symbol.text(), "Core$not");
+    let quoted = quoted_symbol(&quoted);
+    assert_eq!(quoted.text(), "Core$not");
     assert_eq!(
-        quoted
-            .symbol
-            .package_qualifier
-            .as_ref()
-            .and_then(Span::bounds),
+        quoted.package_qualifier.as_ref().and_then(Span::bounds),
         Some((7, 11))
     );
 }
@@ -570,14 +586,16 @@ fn recovering_native_parser_keeps_unclosed_collection_contents() {
     assert_eq!(recovered.value.to_m2(), "[x, y");
 
     let mut cells = recovered.value.cells;
-    let mut components = cells.pop().unwrap().content.pack.into_iter();
-    let Some(Component::Expr(expression)) = components.next() else {
+    let PackedContent::Expr(expression) = cells.pop().unwrap().content else {
         panic!("the recovered cell must contain the array expression");
     };
-    let Expr::Collection(Collection::Array(array)) = *expression else {
+    let Expr::Collection(ExprCollection::Array(array)) = *expression else {
         panic!("the recovered expression must retain its array node");
     };
-    assert_eq!(array.elements.unwrap().pack.len(), 2);
+    let PackedContent::Pack(elements) = array.elements.unwrap() else {
+        panic!("the recovered array must retain its comma pack");
+    };
+    assert_eq!(elements.pack.len(), 2);
     assert!(array.delimiter.spans().close().is_none());
 }
 
@@ -607,7 +625,7 @@ fn documentation_line_blocks_belong_to_the_following_cell() {
 #[test]
 fn cell_owned_documentation_does_not_leak_onto_its_first_leaf() {
     let file = parse_native("-- documentation\nvalue").unwrap();
-    let Some(Component::Expr(expression)) = file.cells[0].content.pack.iter().next() else {
+    let PackedContent::Expr(expression) = &file.cells[0].content else {
         panic!("the cell must contain its documented expression");
     };
     let Expr::Symbol(symbol) = expression.as_ref() else {

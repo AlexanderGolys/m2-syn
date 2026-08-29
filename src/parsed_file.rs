@@ -34,7 +34,9 @@ use crate::{ParseError, parse_file};
 /// source-backed layout is recovered from spans during emission.
 #[derive(Debug)]
 pub struct ParsedFile {
+    /// The original source.
     original_source: String,
+    /// The CST.
     cst: SourceFile,
 }
 

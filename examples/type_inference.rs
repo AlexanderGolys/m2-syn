@@ -1,65 +1,102 @@
+//! Demonstrates type inference.
+
 use std::collections::HashMap;
 
 use m2_syn::nodes::{
-    Array, BinaryExpr, BinaryOperator, Component, Expr, ExprPack, ForLoop, Holder, IfStatement,
-    IntegerLiteral, IterationDomain, List, LoopBody, ReturnExpr, Sequence, StringLiteral, Symbol,
-    WhileLoop,
+    Array, BinaryOperator, Component, Expr, ExprControlReturn, ExprForBare, ExprForIn,
+    ExprForRange, ExprIf, ExprOpBinRegular, ExprWhile, Holder, IntegerLiteral, List, LoopBody,
+    PackedContent, Sequence, StringLiteral, Symbol,
 };
 use m2_syn::visit::Visit;
 use m2_syn::{ParseError, parse_file};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Alternatives used by the TypeRange example.
 enum TypeRange<T, Q> {
+    /// The Known alternative.
     Known(Vec<T>),
+    /// The Deferred alternative.
     Deferred(Q),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// State used by the Fact example.
 struct Fact<T, V, Q> {
+    /// The types.
     types: TypeRange<T, Q>,
+    /// The inferred value, when evaluation produced one.
     value: Option<V>,
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Alternatives used by the CollectionKind example.
 enum CollectionKind {
+    /// The Array alternative.
     Array,
+    /// The List alternative.
     List,
+    /// The Sequence alternative.
     Sequence,
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Alternatives used by the ControlKind example.
 enum ControlKind {
+    /// The If alternative.
     If,
+    /// The For alternative.
     For,
+    /// The While alternative.
     While,
+    /// The Return alternative.
     Return,
 }
 
+/// Behavior demonstrated by InferenceContext.
 trait InferenceContext {
+    /// The representation of an inferred M2 type.
     type Type: Clone;
+    /// The representation of a known compile-time value.
     type Value: Clone;
+    /// The representation of deferred type information.
     type Query: Clone;
 
+    /// Infers an integer literal.
     fn integer(&self, literal: &IntegerLiteral) -> FactOf<Self>;
+    /// Infers a string literal.
     fn string(&self, literal: &StringLiteral) -> FactOf<Self>;
+    /// Looks up a symbol's inferred fact.
     fn symbol(&self, symbol: &Symbol) -> FactOf<Self>;
-    fn binary(&self, node: &BinaryExpr, left: FactOf<Self>, right: FactOf<Self>) -> FactOf<Self>;
+    /// Combines the facts inferred for a binary expression's operands.
+    fn binary(
+        &self,
+        node: &ExprOpBinRegular,
+        left: FactOf<Self>,
+        right: FactOf<Self>,
+    ) -> FactOf<Self>;
+    /// Infers a collection from its element facts.
     fn collection(&self, kind: CollectionKind, elements: Vec<FactOf<Self>>) -> FactOf<Self>;
+    /// Infers a control form from the facts of its neighboring expressions.
     fn control(&self, kind: ControlKind, neighbours: Vec<FactOf<Self>>) -> FactOf<Self>;
 }
 
+/// Convenient alias for FactOf.
 type FactOf<C> = Fact<
     <C as InferenceContext>::Type,
     <C as InferenceContext>::Value,
     <C as InferenceContext>::Query,
 >;
 
+/// State used by the TypeChecker example.
 struct TypeChecker<'context, C: InferenceContext> {
+    /// The context.
     context: &'context C,
+    /// The results.
     results: Vec<FactOf<C>>,
 }
 
 impl<C: InferenceContext> TypeChecker<'_, C> {
+    /// Infers one expression and removes its completed fact from the visit stack.
     fn infer(&mut self, expression: &Expr) -> FactOf<C> {
         let old_len = self.results.len();
         self.visit_expr(expression);
@@ -67,17 +104,23 @@ impl<C: InferenceContext> TypeChecker<'_, C> {
         self.results.pop().expect("expression produced one fact")
     }
 
-    fn components(&mut self, components: &Option<ExprPack>) -> Vec<FactOf<C>> {
-        components
-            .iter()
-            .flat_map(|pack| pack.pack.iter())
-            .filter_map(|component| match component {
-                Component::Expr(expression) => Some(self.infer(expression)),
-                Component::Empty(_) => None,
-            })
-            .collect()
+    /// Infers every nonempty component of optional packed content.
+    fn components(&mut self, content: &Option<PackedContent>) -> Vec<FactOf<C>> {
+        match content {
+            None => Vec::new(),
+            Some(PackedContent::Expr(expression)) => vec![self.infer(expression)],
+            Some(PackedContent::Pack(pack)) => pack
+                .pack
+                .iter()
+                .filter_map(|component| match component {
+                    Component::Expr(expression) => Some(self.infer(expression)),
+                    Component::Empty(_) => None,
+                })
+                .collect(),
+        }
     }
 
+    /// Infers the expressions contributed by a loop body.
     fn loop_body(&mut self, body: &LoopBody) -> Vec<FactOf<C>> {
         let mut neighbours = Vec::new();
         if let Some(step) = &body.list_step {
@@ -103,7 +146,7 @@ impl<'ast, C: InferenceContext> Visit<'ast> for TypeChecker<'_, C> {
         self.results.push(self.context.symbol(symbol));
     }
 
-    fn visit_binary_expr(&mut self, expression: &'ast BinaryExpr) {
+    fn visit_expr_op_bin_regular(&mut self, expression: &'ast ExprOpBinRegular) {
         let left = self.infer(&expression.left_operand);
         let right = self.infer(&expression.right_operand);
         self.results
@@ -136,7 +179,7 @@ impl<'ast, C: InferenceContext> Visit<'ast> for TypeChecker<'_, C> {
             .push(self.context.collection(CollectionKind::Sequence, elements));
     }
 
-    fn visit_if_statement(&mut self, statement: &'ast IfStatement) {
+    fn visit_expr_if(&mut self, statement: &'ast ExprIf) {
         let mut neighbours = vec![
             self.infer(&statement.condition),
             self.infer(&statement.then_clause.expr),
@@ -148,26 +191,11 @@ impl<'ast, C: InferenceContext> Visit<'ast> for TypeChecker<'_, C> {
             .push(self.context.control(ControlKind::If, neighbours));
     }
 
-    fn visit_for_loop(&mut self, statement: &'ast ForLoop) {
+    fn visit_expr_for_bare(&mut self, statement: &'ast ExprForBare) {
         let mut neighbours = Vec::new();
-        if let Some(domain) = &statement.iteration_domain {
-            match domain {
-                IterationDomain::IterRange(range) => {
-                    if let Some(bound) = &range.lower_bound {
-                        neighbours.push(self.infer(&bound.value));
-                    }
-                    if let Some(bound) = &range.upper_bound {
-                        neighbours.push(self.infer(&bound.value));
-                    }
-                }
-                IterationDomain::IterIn(domain) => {
-                    neighbours.push(self.infer(&domain.collection));
-                }
-            }
-        }
         neighbours.extend(
             statement
-                .when_condition
+                .condition
                 .iter()
                 .map(|condition| self.infer(&condition.condition)),
         );
@@ -176,14 +204,46 @@ impl<'ast, C: InferenceContext> Visit<'ast> for TypeChecker<'_, C> {
             .push(self.context.control(ControlKind::For, neighbours));
     }
 
-    fn visit_while_loop(&mut self, statement: &'ast WhileLoop) {
+    fn visit_expr_for_range(&mut self, statement: &'ast ExprForRange) {
+        let mut neighbours = Vec::new();
+        if let Some(bound) = &statement.lower_bound {
+            neighbours.push(self.infer(&bound.value));
+        }
+        if let Some(bound) = &statement.upper_bound {
+            neighbours.push(self.infer(&bound.value));
+        }
+        neighbours.extend(
+            statement
+                .condition
+                .iter()
+                .map(|condition| self.infer(&condition.condition)),
+        );
+        neighbours.extend(self.loop_body(&statement.body));
+        self.results
+            .push(self.context.control(ControlKind::For, neighbours));
+    }
+
+    fn visit_expr_for_in(&mut self, statement: &'ast ExprForIn) {
+        let mut neighbours = vec![self.infer(&statement.collection)];
+        neighbours.extend(
+            statement
+                .condition
+                .iter()
+                .map(|condition| self.infer(&condition.condition)),
+        );
+        neighbours.extend(self.loop_body(&statement.body));
+        self.results
+            .push(self.context.control(ControlKind::For, neighbours));
+    }
+
+    fn visit_expr_while(&mut self, statement: &'ast ExprWhile) {
         let mut neighbours = vec![self.infer(&statement.condition)];
         neighbours.extend(self.loop_body(&statement.body));
         self.results
             .push(self.context.control(ControlKind::While, neighbours));
     }
 
-    fn visit_return_expr(&mut self, statement: &'ast ReturnExpr) {
+    fn visit_expr_control_return(&mut self, statement: &'ast ExprControlReturn) {
         let neighbours = statement
             .value
             .iter()
@@ -195,28 +255,42 @@ impl<'ast, C: InferenceContext> Visit<'ast> for TypeChecker<'_, C> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Alternatives used by the DemoType example.
 enum DemoType {
+    /// The Integer alternative.
     Integer,
+    /// The Number alternative.
     Number,
+    /// The String alternative.
     String,
+    /// The Array alternative.
     Array,
+    /// The List alternative.
     List,
+    /// The Sequence alternative.
     Sequence,
+    /// The Thing alternative.
     Thing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Alternatives used by the DemoValue example.
 enum DemoValue {
+    /// The Integer alternative.
     Integer(i64),
 }
 
+/// Convenient alias for DemoFact.
 type DemoFact = Fact<DemoType, DemoValue, String>;
 
+/// State used by the DemoRegistry example.
 struct DemoRegistry {
+    /// The symbols.
     symbols: HashMap<String, DemoFact>,
 }
 
 impl DemoRegistry {
+    /// Handles known.
     fn known(types: Vec<DemoType>, value: Option<DemoValue>) -> DemoFact {
         Fact {
             types: TypeRange::Known(types),
@@ -224,6 +298,7 @@ impl DemoRegistry {
         }
     }
 
+    /// Handles deferred.
     fn deferred(query: impl Into<String>) -> DemoFact {
         Fact {
             types: TypeRange::Deferred(query.into()),
@@ -255,7 +330,7 @@ impl InferenceContext for DemoRegistry {
             .unwrap_or_else(|| Self::deferred(format!("symbol `{}`", symbol.text())))
     }
 
-    fn binary(&self, node: &BinaryExpr, left: DemoFact, right: DemoFact) -> DemoFact {
+    fn binary(&self, node: &ExprOpBinRegular, left: DemoFact, right: DemoFact) -> DemoFact {
         match (&node.operator, left.value, right.value) {
             (
                 BinaryOperator::Add(_),
@@ -283,11 +358,12 @@ impl InferenceContext for DemoRegistry {
     }
 }
 
+/// Handles infer.
 fn infer(source: &str, context: &DemoRegistry) -> Result<DemoFact, ParseError> {
     let file = parse_file(source)?;
-    let expression = match file.cells[0].content.pack.first() {
-        Component::Expr(expression) => expression.as_ref(),
-        Component::Empty(_) => panic!("expected an expression component"),
+    let expression = match &file.cells[0].content {
+        PackedContent::Expr(expression) => expression.as_ref(),
+        PackedContent::Pack(_) => panic!("expected one expression"),
     };
     Ok(TypeChecker {
         context,

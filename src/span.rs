@@ -21,13 +21,13 @@ pub type Offset = usize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 /// A human-facing position in a source snapshot.
 ///
-/// Lines and columns are one-based. Columns count Unicode scalar values rather
+/// Columns count Unicode scalar values rather
 /// than bytes or terminal cells, so the first character on every line is at
 /// column one regardless of its UTF-8 width.
 pub struct LineColumn {
-    /// The one-based line number.
+    /// line number
     pub line: usize,
-    /// The one-based character column.
+    /// column number
     pub column: usize,
 }
 
@@ -155,6 +155,7 @@ impl TextEdit {
     }
 }
 
+/// The NEXT FILE ID static value.
 static NEXT_FILE_ID: AtomicU16 = AtomicU16::new(1);
 
 /// The source site containing syntax.
@@ -199,9 +200,12 @@ pub type SourceId = File;
 
 /// One immutable source snapshot shared by every span into it.
 pub struct Source {
+    /// The file.
     file: File,
+    /// The text.
     text: Arc<str>,
-    line_starts: OnceLock<Arc<[Offset]>>,
+    /// The line starts.
+    line_starts: OnceLock<Box<[Offset]>>,
 }
 
 impl Source {
@@ -251,7 +255,7 @@ impl Source {
                         .filter_map(|(offset, byte)| (byte == b'\n').then_some(offset + 1)),
                 )
                 .collect::<Vec<_>>()
-                .into()
+                .into_boxed_slice()
         });
         let line_index = line_starts
             .partition_point(|line_start| *line_start <= offset)
@@ -278,7 +282,9 @@ impl Debug for Source {
 /// A shared source snapshot and optional byte range within it.
 #[derive(Clone)]
 pub struct Span {
+    /// The source.
     source: Arc<Source>,
+    /// The range.
     range: Option<Range<Offset>>,
 }
 

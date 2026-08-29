@@ -1,3 +1,5 @@
+//! Integration tests for parser api.
+
 use std::borrow::Cow;
 use std::convert::Infallible;
 use std::vec::IntoIter;

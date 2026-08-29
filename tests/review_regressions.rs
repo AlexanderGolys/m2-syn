@@ -1,22 +1,48 @@
+//! Integration tests for review regressions.
+
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use m2_syn::nodes::{
-    Assignment, Collection, Component, Expr, Installation, Literal, StringElement,
+    Component, Expr, ExprAssign, ExprAssignInstall, ExprCollection, ExprLiteral, PackedContent,
+    StringElement,
 };
 use m2_syn::{
-    NativeParser, Parse, ParseStream, Parser, Spanned, Tokenize, TreeSitterParser, lex_str,
+    Lex, NativeParser, Parse, ParseStream, Parser, Spanned, Tokenize, TreeSitterParser, lex_str,
     parse_file, parse_fragment_str, parse_native, parse_with, quote_m2,
 };
 
 fn expression_with(parser: &mut impl Parser<Error = impl std::fmt::Debug>, source: &str) -> Expr {
     let cells = lex_str(source).unwrap().to_cell_stream().unwrap();
     let mut file = parse_with(parser, cells).unwrap();
-    let mut components = file.cells.pop().unwrap().content.pack.into_iter();
-    let Some(Component::Expr(expression)) = components.next() else {
-        panic!("expected one expression component");
+    let PackedContent::Expr(expression) = file.cells.pop().unwrap().content else {
+        panic!("expected one expression");
     };
-    assert!(components.next().is_none());
     *expression
+}
+
+#[test]
+fn packed_content_and_method_adjacency_preserve_only_present_syntax() {
+    let source = "ZZ ZZ := ZZ => (x, y) -> x y";
+    for file in [parse_native(source).unwrap(), parse_file(source).unwrap()] {
+        assert_eq!(file.to_m2(), source);
+        let PackedContent::Expr(expression) = &file.cells[0].content else {
+            panic!("a cell without a comma must contain its expression directly");
+        };
+        let Expr::Assign(ExprAssign::Install(ExprAssignInstall::Method(installation))) =
+            expression.as_ref()
+        else {
+            panic!("expected a method installation, found {expression:?}");
+        };
+        assert_eq!(installation.operator.span().text(), Some(""));
+        assert_eq!(installation.operator.span().bounds(), Some((3, 3)));
+    }
+
+    for file in [parse_native("x,y").unwrap(), parse_file("x,y").unwrap()] {
+        let PackedContent::Pack(pack) = &file.cells[0].content else {
+            panic!("comma syntax must retain an expression pack");
+        };
+        assert_eq!(pack.pack.len(), 2);
+    }
 }
 
 #[test]
@@ -31,9 +57,8 @@ fn tree_sitter_reassociates_new_installations_like_the_native_parser() {
             expression_with(&mut NativeParser, source),
             expression_with(&mut TreeSitterParser::new().unwrap(), source),
         ] {
-            let Expr::Assignment(Assignment::Installation(Installation::NewInstallation(
-                installation,
-            ))) = expression
+            let Expr::Assign(ExprAssign::Install(ExprAssignInstall::New(installation))) =
+                expression
             else {
                 panic!("expected a new installation for `{source}`, found {expression:?}");
             };
@@ -69,14 +94,13 @@ fn tree_sitter_reassociates_new_installations_like_the_native_parser() {
         expression_with(&mut NativeParser, "new x := T => f"),
         expression_with(&mut TreeSitterParser::new().unwrap(), "new x := T => f"),
     ] {
-        let Expr::Assignment(Assignment::Installation(Installation::NewInstallation(installation))) =
-            expression
+        let Expr::Assign(ExprAssign::Install(ExprAssignInstall::New(installation))) = expression
         else {
             panic!("expected a new installation, found {expression:?}");
         };
         assert!(matches!(
             installation.function.as_ref(),
-            Expr::OptionExpression(annotation)
+            Expr::Option(annotation)
                 if matches!(annotation.key.as_ref(), Expr::Symbol(symbol) if symbol.text() == "T")
         ));
     }
@@ -121,17 +145,15 @@ fn source_identities_participate_in_span_equality_and_hashing() {
 
 #[test]
 fn native_empty_components_are_zero_width_at_the_missing_value() {
-    let Expr::Collection(Collection::Sequence(sequence)) =
+    let Expr::Collection(ExprCollection::Sequence(sequence)) =
         expression_with(&mut NativeParser, "(x,,y)")
     else {
         panic!("expected a sequence");
     };
-    let components = sequence
-        .elements
-        .unwrap()
-        .pack
-        .into_iter()
-        .collect::<Vec<_>>();
+    let PackedContent::Pack(elements) = sequence.elements.unwrap() else {
+        panic!("expected a comma pack");
+    };
+    let components = elements.pack.into_iter().collect::<Vec<_>>();
     let Component::Empty(empty) = &components[1] else {
         panic!("expected the middle component to be empty");
     };
@@ -146,13 +168,13 @@ fn literal_nodes_include_quotes_and_split_escapes_with_exact_spans() {
         expression_with(&mut NativeParser, r#""a\n""#),
         expression_with(&mut TreeSitterParser::new().unwrap(), r#""a\n""#),
     ] {
-        let Expr::Literal(Literal::StringLiteral(literal)) = expression else {
+        let Expr::Literal(ExprLiteral::String(literal)) = expression else {
             panic!("expected a string literal");
         };
         assert_eq!(literal.span().bounds(), Some((0, 5)));
         assert_eq!(literal.span().text(), Some(r#""a\n""#));
         assert!(matches!(&literal.elements[..],
-            [StringElement::StringContent(content), StringElement::EscapeSequence(escape)]
+            [StringElement::Content(content), StringElement::Escape(escape)]
                 if content.text() == "a"
                     && content.span().bounds() == Some((1, 2))
                     && escape.text() == r"\n"
@@ -166,11 +188,11 @@ fn literal_nodes_include_quotes_and_split_escapes_with_exact_spans() {
             expression_with(&mut TreeSitterParser::new().unwrap(), source),
         ] {
             match expression {
-                Expr::Literal(Literal::StringLiteral(literal)) => {
+                Expr::Literal(ExprLiteral::String(literal)) => {
                     assert!(literal.elements.is_empty());
                     assert_eq!(literal.span().text(), Some(source));
                 }
-                Expr::Literal(Literal::RawStringLiteral(literal)) => {
+                Expr::Literal(ExprLiteral::RawString(literal)) => {
                     assert!(literal.elements.is_empty());
                     assert_eq!(literal.span().text(), Some(source));
                 }

@@ -3,9 +3,9 @@ use super::{
     OperatorKind, ProductStyle, Shape, StructDefinition, StructFields, TokenDefinitions,
     VariantDefinition, Wrapper, to_snake_case,
 };
-use proc_macro2::{Ident, TokenStream};
-use quote::format_ident;
-use syn::parse::ParseStream;
+use proc_macro2::{Group, Ident, TokenStream, TokenTree};
+use quote::{format_ident, quote};
+use syn::parse::{ParseStream, Parser};
 use syn::{Attribute, Error, Result, Token, Visibility, braced, bracketed, parenthesized};
 
 struct Declaration {
@@ -14,6 +14,21 @@ struct Declaration {
     boxed: bool,
     cell_stream: bool,
     comments: bool,
+    explicit: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ExplicitDeclarationKind {
+    leaf: Option<LeafKind>,
+    operator: Option<OperatorKind>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DefinitionFlags {
+    boxed: bool,
+    cell_stream: bool,
+    comments: bool,
+    explicit: bool,
 }
 
 struct GrammarField {
@@ -40,8 +55,9 @@ enum GrammarExpr {
 pub(super) fn parse(
     input: ParseStream<'_>,
     tokens: &TokenDefinitions,
-) -> Result<(Vec<StructDefinition>, Vec<EnumDefinition>)> {
+) -> Result<(Vec<StructDefinition>, Vec<EnumDefinition>, Vec<TokenStream>)> {
     let mut declarations = Vec::new();
+    let mut explicit_declarations = Vec::new();
     while !input.is_empty() {
         let fork = input.fork();
         let _ = fork.call(Attribute::parse_outer);
@@ -51,11 +67,422 @@ pub(super) fn parse(
         } else if fork.peek(Token![enum]) {
             let declaration = parse_enum_declaration(input, tokens, &mut declarations)?;
             declarations.push(declaration);
+        } else if begins_strutuct(&fork) {
+            parse_strutuct(input, tokens, &mut declarations, &mut explicit_declarations)?;
         } else {
-            return Err(input.error("expected a syntax `struct` or `enum`"));
+            return Err(input.error("expected a syntax `struct`, `enum`, or `strutuct!`"));
         }
     }
-    Lowerer::new(tokens).lower(declarations)
+    let (structs, enums) = Lowerer::new(tokens).lower(declarations)?;
+    Ok((structs, enums, explicit_declarations))
+}
+
+fn begins_strutuct(input: ParseStream<'_>) -> bool {
+    input
+        .parse::<Ident>()
+        .is_ok_and(|name| name == "strutuct" && input.peek(Token![!]))
+}
+
+fn parse_strutuct(
+    input: ParseStream<'_>,
+    tokens: &TokenDefinitions,
+    declarations: &mut Vec<Declaration>,
+    output: &mut Vec<TokenStream>,
+) -> Result<()> {
+    let attrs = input.call(Attribute::parse_outer)?;
+    let name: Ident = input.parse()?;
+    if name != "strutuct" {
+        return Err(Error::new(name.span(), "expected `strutuct!`"));
+    }
+    input.parse::<Token![!]>()?;
+    let content;
+    braced!(content in input);
+    let body: TokenStream = content.parse()?;
+    let parser =
+        |input: ParseStream<'_>| parse_explicit_declaration(input, tokens, declarations, &attrs);
+    let kind = parser.parse2(body.clone()).map_err(|error| {
+        Error::new(
+            error.span(),
+            format!(
+                "invalid explicit declaration `{}`: {error}",
+                explicit_root_name(&body)
+            ),
+        )
+    })?;
+    let generated_members = explicit_generated_members(tokens, kind.operator);
+    let storage = explicit_storage_fields(&attrs, kind.leaf)?;
+    let body = explicit_storage_types(body);
+    let default_derives = if explicit_has_derive(&body)? {
+        TokenStream::new()
+    } else if matches!(
+        kind.leaf,
+        Some(LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof)
+    ) {
+        quote!(#[derive(Debug, Clone, PartialEq, Eq, Hash)])
+    } else {
+        quote!(#[derive(Debug, ::m2_syn::Spanned)])
+    };
+    output.push(quote! {
+        ::these_macros_should_be_illegal::strutuct! {
+            #default_derives
+            #body
+            #generated_members
+            #storage
+        }
+    });
+    Ok(())
+}
+
+fn explicit_root_name(tokens: &TokenStream) -> String {
+    tokens
+        .clone()
+        .into_iter()
+        .find_map(|token| match token {
+            TokenTree::Ident(name) => Some(name.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "<unknown>".to_owned())
+}
+
+fn explicit_has_derive(tokens: &TokenStream) -> Result<bool> {
+    let parser = |input: ParseStream<'_>| {
+        let has_derive = input
+            .call(Attribute::parse_outer)?
+            .iter()
+            .any(|attribute| attribute.path().is_ident("derive"));
+        let _: TokenStream = input.parse()?;
+        Ok(has_derive)
+    };
+    parser.parse2(tokens.clone())
+}
+
+fn explicit_generated_members(
+    tokens: &TokenDefinitions,
+    operator: Option<OperatorKind>,
+) -> TokenStream {
+    operator
+        .into_iter()
+        .flat_map(|kind| tokens.operator_variants(kind))
+        .map(|token| {
+            let variant = tokens.variant_name(&token.name);
+            let pattern = &token.pattern;
+            quote!(#variant(::m2_syn::Token![#pattern]))
+        })
+        .collect()
+}
+
+fn explicit_storage_types(tokens: TokenStream) -> TokenStream {
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            TokenTree::Ident(name) if name == "Lines" => {
+                TokenTree::Ident(Ident::new("Vec", name.span()))
+            }
+            TokenTree::Group(group) => {
+                let mut rewritten =
+                    Group::new(group.delimiter(), explicit_storage_types(group.stream()));
+                rewritten.set_span(group.span());
+                TokenTree::Group(rewritten)
+            }
+            token => token,
+        })
+        .collect()
+}
+
+fn explicit_storage_fields(attrs: &[Attribute], leaf: Option<LeafKind>) -> Result<TokenStream> {
+    let mut fields = TokenStream::new();
+    if leaf == Some(LeafKind::QualifiedIdent) {
+        fields.extend(quote! {
+            package_qualifier: qf!(Option<::m2_syn::Span>),
+            index_qualifier: qf!(Option<::m2_syn::Span>),
+        });
+    }
+    if leaf.is_some() {
+        fields.extend(quote! {
+            span: ::m2_syn::Span,
+            leading_trivia: ::m2_syn::LeadingTrivia,
+            trailing_trivia: ::m2_syn::TrailingTrivia,
+        });
+    }
+    for attr in attrs {
+        if attr.path().is_ident("comments") {
+            fields.extend(quote!(comments: ::m2_syn::CommentTrivia,));
+        } else if attr.path().is_ident("literal") {
+            fields.extend(quote! {
+                span: ::m2_syn::Span,
+                leading_trivia: ::m2_syn::LeadingTrivia,
+                trailing_trivia: ::m2_syn::TrailingTrivia,
+            });
+        } else if attr.path().is_ident("delimiter") {
+            let delimiter: Ident = attr.parse_args()?;
+            fields.extend(match delimiter.to_string().as_str() {
+                "parenthesis" => quote!(delimiter: ::m2_syn::Delimiter![()],),
+                "bracket" => quote!(delimiter: ::m2_syn::Delimiter![[]],),
+                "brace" => quote!(delimiter: ::m2_syn::Delimiter![{}],),
+                "angle_bar" => quote!(delimiter: ::m2_syn::Delimiter![<| |>],),
+                _ => return Err(Error::new(delimiter.span(), "unknown delimiter family")),
+            });
+        }
+    }
+    Ok(fields)
+}
+
+fn parse_explicit_declaration(
+    input: ParseStream<'_>,
+    tokens: &TokenDefinitions,
+    declarations: &mut Vec<Declaration>,
+    syntax_attrs: &[Attribute],
+) -> Result<ExplicitDeclarationKind> {
+    let _attrs = input.call(Attribute::parse_outer)?;
+    let name: Ident = input.parse()?;
+    let boxed = syntax_attrs
+        .iter()
+        .any(|attribute| attribute.path().is_ident("boxed"));
+
+    if input.is_empty() {
+        let operator = operator_kind(syntax_attrs)?;
+        let declared_leaf = leaf_kind(syntax_attrs)?;
+        if operator.is_some() && declared_leaf.is_some() {
+            return Err(Error::new(
+                name.span(),
+                "an explicit declaration cannot be both a leaf and an operator category",
+            ));
+        }
+        let leaf = declared_leaf.or_else(|| operator.is_none().then(|| inferred_leaf_kind(&name)));
+        let expression = match (operator, leaf) {
+            (Some(operator), None) => GrammarExpr::Sum(Vec::new(), Some(operator)),
+            (None, Some(leaf)) => GrammarExpr::Leaf(leaf),
+            _ => {
+                return Err(Error::new(
+                    name.span(),
+                    "an empty explicit declaration must be exactly one leaf or operator category",
+                ));
+            }
+        };
+        declarations.push(Declaration {
+            name,
+            expression,
+            boxed,
+            cell_stream: false,
+            comments: false,
+            explicit: true,
+        });
+        return Ok(ExplicitDeclarationKind { leaf, operator });
+    }
+
+    let fields = input.fork();
+    let _field_attrs = fields.call(Attribute::parse_outer)?;
+    if fields.peek(syn::Ident) {
+        let _: Ident = fields.parse()?;
+        if fields.peek(Token![:]) {
+            let fields = parse_explicit_fields(input, tokens, declarations)?;
+            let expression = wrap_struct_attributes(
+                GrammarExpr::Product(fields, ProductStyle::Named),
+                syntax_attrs,
+            )?;
+            declarations.push(Declaration {
+                name,
+                expression,
+                boxed,
+                cell_stream: syntax_attrs
+                    .iter()
+                    .any(|attribute| attribute.path().is_ident("cell_stream")),
+                comments: syntax_attrs
+                    .iter()
+                    .any(|attribute| attribute.path().is_ident("comments")),
+                explicit: true,
+            });
+            return Ok(ExplicitDeclarationKind::default());
+        }
+    }
+
+    let variants = parse_explicit_variants(&name, input, tokens, declarations)?;
+
+    declarations.push(Declaration {
+        name,
+        expression: GrammarExpr::Sum(variants, None),
+        boxed,
+        cell_stream: syntax_attrs
+            .iter()
+            .any(|attribute| attribute.path().is_ident("cell_stream")),
+        comments: syntax_attrs
+            .iter()
+            .any(|attribute| attribute.path().is_ident("comments")),
+        explicit: true,
+    });
+    Ok(ExplicitDeclarationKind::default())
+}
+
+fn parse_explicit_nested_body(
+    name: &Ident,
+    input: ParseStream<'_>,
+    tokens: &TokenDefinitions,
+    declarations: &mut Vec<Declaration>,
+) -> Result<GrammarExpr> {
+    if input.is_empty() {
+        return Ok(GrammarExpr::Product(Vec::new(), ProductStyle::Named));
+    }
+
+    let fields = input.fork();
+    let _attrs = fields.call(Attribute::parse_outer)?;
+    let _name: Ident = fields.parse()?;
+    if fields.peek(Token![:]) {
+        return Ok(GrammarExpr::Product(
+            parse_explicit_fields(input, tokens, declarations)?,
+            ProductStyle::Named,
+        ));
+    }
+
+    Ok(GrammarExpr::Sum(
+        parse_explicit_variants(name, input, tokens, declarations)?,
+        None,
+    ))
+}
+
+fn parse_explicit_variants(
+    parent: &Ident,
+    input: ParseStream<'_>,
+    tokens: &TokenDefinitions,
+    declarations: &mut Vec<Declaration>,
+) -> Result<Vec<GrammarField>> {
+    let mut variants = Vec::new();
+    while !input.is_empty() {
+        let _attrs = input.call(Attribute::parse_outer)?;
+        let variant: Ident = input.parse()?;
+        let expression = if input.peek(Token![|]) {
+            parse_explicit_type(input, tokens, declarations)?
+        } else if input.peek(syn::token::Brace) {
+            let content;
+            braced!(content in input);
+            let payload = format_ident!("{parent}{variant}");
+            let expression = parse_explicit_nested_body(&payload, &content, tokens, declarations)?;
+            declarations.push(explicit_declaration(payload.clone(), expression));
+            GrammarExpr::Named(payload)
+        } else if input.peek(syn::token::Paren) {
+            let payload;
+            parenthesized!(payload in input);
+            let expression = parse_explicit_type(&payload, tokens, declarations)?;
+            if !payload.is_empty() {
+                return Err(payload.error("a syntax variant accepts exactly one payload"));
+            }
+            expression
+        } else {
+            return Err(input
+                .error("a syntax variant needs `(Type)`, `{ nested declaration }`, or `|Type|`"));
+        };
+        variants.push(GrammarField {
+            name: Some(variant),
+            expression,
+        });
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        }
+    }
+    Ok(variants)
+}
+
+fn explicit_declaration(name: Ident, expression: GrammarExpr) -> Declaration {
+    Declaration {
+        name,
+        expression,
+        boxed: false,
+        cell_stream: false,
+        comments: false,
+        explicit: true,
+    }
+}
+
+fn parse_explicit_fields(
+    input: ParseStream<'_>,
+    tokens: &TokenDefinitions,
+    declarations: &mut Vec<Declaration>,
+) -> Result<Vec<GrammarField>> {
+    let mut fields = Vec::new();
+    while !input.is_empty() {
+        let _attrs = input.call(Attribute::parse_outer)?;
+        let name: Ident = input.parse()?;
+        input.parse::<Token![:]>()?;
+        fields.push(GrammarField {
+            name: Some(name),
+            expression: parse_explicit_type(input, tokens, declarations)?,
+        });
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        } else if !input.is_empty() {
+            return Err(input.error("expected `,` between explicit syntax fields"));
+        }
+    }
+    Ok(fields)
+}
+
+fn parse_explicit_type(
+    input: ParseStream<'_>,
+    tokens: &TokenDefinitions,
+    declarations: &mut Vec<Declaration>,
+) -> Result<GrammarExpr> {
+    let mut expression = if input.peek(Token![|]) {
+        input.parse::<Token![|]>()?;
+        let name: Ident = input.parse()?;
+        input.parse::<Token![|]>()?;
+        let body = if input.peek(syn::token::Brace) {
+            let content;
+            braced!(content in input);
+            parse_explicit_nested_body(&name, &content, tokens, declarations)?
+        } else {
+            GrammarExpr::Product(Vec::new(), ProductStyle::Named)
+        };
+        declarations.push(explicit_declaration(name.clone(), body));
+        GrammarExpr::Named(name)
+    } else {
+        let name: Ident = input.parse()?;
+        if name == "Token" && input.peek(Token![!]) {
+            input.parse::<Token![!]>()?;
+            let pattern;
+            bracketed!(pattern in input);
+            let pattern: TokenStream = pattern.parse()?;
+            GrammarExpr::Token {
+                name: tokens.resolve(&pattern)?,
+                pattern,
+            }
+        } else if input.peek(Token![<]) {
+            input.parse::<Token![<]>()?;
+            let inner = parse_explicit_type(input, tokens, declarations)?;
+            input.parse::<Token![>]>()?;
+            match name.to_string().as_str() {
+                "Vec" => GrammarExpr::Repeated(Box::new(inner), " "),
+                "Lines" => GrammarExpr::Repeated(Box::new(inner), "\n"),
+                "Punctuated" => GrammarExpr::Punctuated(Box::new(inner)),
+                "Delimited" => GrammarExpr::Delimited(Box::new(inner)),
+                "Option" => GrammarExpr::Optional(Box::new(inner)),
+                "Box" => GrammarExpr::Boxed(Box::new(inner)),
+                _ => {
+                    return Err(Error::new(
+                        name.span(),
+                        "unsupported explicit syntax wrapper",
+                    ));
+                }
+            }
+        } else if input.peek(syn::token::Brace) {
+            let content;
+            braced!(content in input);
+            let body = parse_explicit_nested_body(&name, &content, tokens, declarations)?;
+            declarations.push(explicit_declaration(name.clone(), body));
+            GrammarExpr::Named(name)
+        } else {
+            GrammarExpr::Named(name)
+        }
+    };
+
+    while input.peek(Token![?]) || input.peek(Token![*]) {
+        if input.peek(Token![?]) {
+            input.parse::<Token![?]>()?;
+            expression = GrammarExpr::Optional(Box::new(expression));
+        } else {
+            input.parse::<Token![*]>()?;
+            expression = GrammarExpr::Boxed(Box::new(expression));
+        }
+    }
+    Ok(expression)
 }
 
 /// Struct bodies are *not* parsed as `syn::Fields` — `(_)` and `X?` are not
@@ -83,30 +510,14 @@ fn parse_struct_declaration(
 
     if input.peek(Token![;]) {
         input.parse::<Token![;]>()?;
-        let leaf = attrs
-            .iter()
-            .find(|attribute| attribute.path().is_ident("leaf"))
-            .map(|attribute| {
-                let kind: Ident = attribute.parse_args()?;
-                match kind.to_string().as_str() {
-                    "empty" => Ok(LeafKind::Empty),
-                    "adj" => Ok(LeafKind::Adj),
-                    "eoc" => Ok(LeafKind::Eoc),
-                    "eof" => Ok(LeafKind::Eof),
-                    "float" => Ok(LeafKind::Float),
-                    "integer" => Ok(LeafKind::Integer),
-                    "qualified" => Ok(LeafKind::QualifiedIdent),
-                    _ => Err(Error::new(kind.span(), "unknown leaf kind")),
-                }
-            })
-            .transpose()?
-            .unwrap_or(LeafKind::Ident);
+        let leaf = leaf_kind(&attrs)?.unwrap_or_else(|| inferred_leaf_kind(&name));
         return Ok(Declaration {
             name,
             expression: GrammarExpr::Leaf(leaf),
             boxed,
             cell_stream,
             comments,
+            explicit: false,
         });
     }
 
@@ -135,6 +546,7 @@ fn parse_struct_declaration(
         boxed,
         cell_stream,
         comments,
+        explicit: false,
     })
 }
 
@@ -253,7 +665,52 @@ fn parse_enum_declaration(
             return Err(content.error("expected `,` between variants"));
         }
     }
-    let operator = attrs
+    let operator = operator_kind(&attrs)?;
+    Ok(Declaration {
+        name,
+        expression: GrammarExpr::Sum(variants, operator),
+        boxed,
+        cell_stream: false,
+        comments: false,
+        explicit: false,
+    })
+}
+
+fn leaf_kind(attrs: &[Attribute]) -> Result<Option<LeafKind>> {
+    attrs
+        .iter()
+        .find(|attribute| attribute.path().is_ident("leaf"))
+        .map(|attribute| {
+            let kind: Ident = attribute.parse_args()?;
+            match kind.to_string().as_str() {
+                "empty" => Ok(LeafKind::Empty),
+                "adj" => Ok(LeafKind::Adj),
+                "eoc" => Ok(LeafKind::Eoc),
+                "eof" => Ok(LeafKind::Eof),
+                "float" => Ok(LeafKind::Float),
+                "integer" => Ok(LeafKind::Integer),
+                "qualified" => Ok(LeafKind::QualifiedIdent),
+                _ => Err(Error::new(kind.span(), "unknown leaf kind")),
+            }
+        })
+        .transpose()
+}
+
+fn inferred_leaf_kind(name: &Ident) -> LeafKind {
+    match name.to_string().as_str() {
+        "Symbol" => LeafKind::QualifiedIdent,
+        "Empty" => LeafKind::Empty,
+        "Adj" => LeafKind::Adj,
+        "EOC" => LeafKind::Eoc,
+        "EOF" => LeafKind::Eof,
+        "FloatLiteral" => LeafKind::Float,
+        "IntegerLiteral" => LeafKind::Integer,
+        _ => LeafKind::Ident,
+    }
+}
+
+fn operator_kind(attrs: &[Attribute]) -> Result<Option<OperatorKind>> {
+    attrs
         .iter()
         .find(|attribute| attribute.path().is_ident("operator"))
         .map(|attribute| {
@@ -262,17 +719,11 @@ fn parse_enum_declaration(
                 "prefix" => Ok(OperatorKind::Prefix),
                 "binary" => Ok(OperatorKind::Binary),
                 "postfix" => Ok(OperatorKind::Postfix),
+                "augmented" => Ok(OperatorKind::Augmented),
                 _ => Err(Error::new(role.span(), "unknown operator role")),
             }
         })
-        .transpose()?;
-    Ok(Declaration {
-        name,
-        expression: GrammarExpr::Sum(variants, operator),
-        boxed,
-        cell_stream: false,
-        comments: false,
-    })
+        .transpose()
 }
 
 fn parse_type_expression(
@@ -347,6 +798,7 @@ fn parse_type_expression(
             boxed,
             cell_stream: false,
             comments: false,
+            explicit: false,
         });
         Ok(GrammarExpr::Named(name))
     } else if attrs.is_empty() && !boxed {
@@ -434,13 +886,13 @@ impl<'tokens> Lowerer<'tokens> {
         declarations: Vec<Declaration>,
     ) -> Result<(Vec<StructDefinition>, Vec<EnumDefinition>)> {
         for declaration in declarations {
-            self.lower_declaration(
-                declaration.name,
-                declaration.expression,
-                declaration.boxed,
-                declaration.cell_stream,
-                declaration.comments,
-            )?;
+            let flags = DefinitionFlags {
+                boxed: declaration.boxed,
+                cell_stream: declaration.cell_stream,
+                comments: declaration.comments,
+                explicit: declaration.explicit,
+            };
+            self.lower_declaration(declaration.name, declaration.expression, flags)?;
         }
         Ok((self.structs, self.enums))
     }
@@ -449,29 +901,15 @@ impl<'tokens> Lowerer<'tokens> {
         &mut self,
         name: Ident,
         expression: GrammarExpr,
-        boxed: bool,
-        cell_stream: bool,
-        comments: bool,
+        flags: DefinitionFlags,
     ) -> Result<()> {
         match expression {
-            GrammarExpr::Leaf(leaf) => self.push_struct(
-                name,
-                StructFields::Leaf(leaf),
-                None,
-                boxed,
-                cell_stream,
-                comments,
-            ),
+            GrammarExpr::Leaf(leaf) => {
+                self.push_struct(name, StructFields::Leaf(leaf), None, flags)
+            }
             GrammarExpr::Product(fields, style) => {
                 let fields = lower_fields(&name, fields, style)?;
-                self.push_struct(
-                    name,
-                    StructFields::Product { fields, style },
-                    None,
-                    boxed,
-                    cell_stream,
-                    comments,
-                );
+                self.push_struct(name, StructFields::Product { fields, style }, None, flags);
             }
             GrammarExpr::Wrapped(delimiter, fields) => {
                 let fields = lower_fields(&name, fields, ProductStyle::Named)?;
@@ -482,14 +920,12 @@ impl<'tokens> Lowerer<'tokens> {
                         style: ProductStyle::Named,
                     },
                     Some(delimiter),
-                    boxed,
-                    cell_stream,
-                    comments,
+                    flags,
                 );
             }
             GrammarExpr::Node(kind, fields) => {
                 let fields = lower_fields(&name, fields, ProductStyle::Named)?;
-                self.push_node(name, kind.to_string(), fields, boxed, cell_stream, comments);
+                self.push_node(name, kind.to_string(), fields, flags);
             }
             GrammarExpr::Punctuated(inner) => {
                 let fields = lower_fields(
@@ -507,13 +943,11 @@ impl<'tokens> Lowerer<'tokens> {
                         style: ProductStyle::Tuple,
                     },
                     None,
-                    boxed,
-                    cell_stream,
-                    comments,
+                    flags,
                 );
             }
             GrammarExpr::Sum(variants, operator) => {
-                self.lower_sum(name, variants, operator, boxed)?
+                self.lower_sum(name, variants, operator, flags)?
             }
             expression => {
                 return Err(Error::new(
@@ -533,7 +967,7 @@ impl<'tokens> Lowerer<'tokens> {
         name: Ident,
         variants: Vec<GrammarField>,
         operator: Option<OperatorKind>,
-        boxed: bool,
+        flags: DefinitionFlags,
     ) -> Result<()> {
         if let Some(kind) = operator {
             if !variants.is_empty() {
@@ -542,8 +976,9 @@ impl<'tokens> Lowerer<'tokens> {
                     "operator enums derive their variants",
                 ));
             }
-            self.enums
-                .push(EnumDefinition::operator(name, kind, self.tokens));
+            let mut definition = EnumDefinition::operator(name, kind, self.tokens);
+            definition.explicit = flags.explicit;
+            self.enums.push(definition);
             return Ok(());
         }
         let mut lowered = Vec::new();
@@ -570,9 +1005,10 @@ impl<'tokens> Lowerer<'tokens> {
                         variant_name.clone(),
                         StructFields::Product { fields, style },
                         None,
-                        false,
-                        false,
-                        false,
+                        DefinitionFlags {
+                            explicit: flags.explicit,
+                            ..DefinitionFlags::default()
+                        },
                     );
                     (variant_name.clone(), variant_name)
                 }
@@ -586,9 +1022,10 @@ impl<'tokens> Lowerer<'tokens> {
                             style: ProductStyle::Named,
                         },
                         Some(delimiter),
-                        false,
-                        false,
-                        false,
+                        DefinitionFlags {
+                            explicit: flags.explicit,
+                            ..DefinitionFlags::default()
+                        },
                     );
                     (variant_name.clone(), variant_name)
                 }
@@ -609,20 +1046,20 @@ impl<'tokens> Lowerer<'tokens> {
                             style: ProductStyle::Tuple,
                         },
                         None,
-                        false,
-                        false,
-                        false,
+                        DefinitionFlags {
+                            explicit: flags.explicit,
+                            ..DefinitionFlags::default()
+                        },
                     );
                     (variant_name.clone(), variant_name)
                 }
                 expression => {
-                    return Err(Error::new(
-                        name.span(),
-                        format!(
-                            "sum variants must refer to a type or define an inline product; found {}",
-                            expression.description(),
-                        ),
-                    ));
+                    let variant_name = required_variant_name(variant.name, &name)?;
+                    lowered.push(VariantDefinition {
+                        name: variant_name,
+                        shape: lower_field_shape(expression)?,
+                    });
+                    continue;
                 }
             };
             lowered.push(VariantDefinition {
@@ -634,7 +1071,8 @@ impl<'tokens> Lowerer<'tokens> {
             name,
             variants: lowered,
             operator: None,
-            boxed,
+            boxed: flags.boxed,
+            explicit: flags.explicit,
         });
         Ok(())
     }
@@ -758,18 +1196,17 @@ impl Lowerer<'_> {
         name: Ident,
         fields: StructFields,
         wrapper: Option<Wrapper>,
-        boxed: bool,
-        cell_stream: bool,
-        comments: bool,
+        flags: DefinitionFlags,
     ) {
         self.structs.push(StructDefinition {
             name,
             fields,
             wrapper,
             cst_kind: None,
-            boxed,
-            cell_stream,
-            comments,
+            boxed: flags.boxed,
+            cell_stream: flags.cell_stream,
+            comments: flags.comments,
+            explicit: flags.explicit,
         });
     }
 
@@ -778,9 +1215,7 @@ impl Lowerer<'_> {
         name: Ident,
         cst_kind: String,
         fields: Vec<FieldDefinition>,
-        boxed: bool,
-        cell_stream: bool,
-        comments: bool,
+        flags: DefinitionFlags,
     ) {
         self.structs.push(StructDefinition {
             name,
@@ -790,9 +1225,10 @@ impl Lowerer<'_> {
             },
             wrapper: None,
             cst_kind: Some(cst_kind),
-            boxed,
-            cell_stream,
-            comments,
+            boxed: flags.boxed,
+            cell_stream: flags.cell_stream,
+            comments: flags.comments,
+            explicit: flags.explicit,
         });
     }
 }
@@ -856,14 +1292,13 @@ fn ensure_plain_element(shape: &Shape) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::syntax::{Syntax, SyntaxFeatures};
+    use crate::syntax::{LeafKind, Shape, StructFields, Syntax, SyntaxFeatures};
     use quote::quote;
     use syn::parse2;
 
     #[test]
     fn parses_and_lowers_structs_enums_and_attributes() {
         let syntax: Syntax = parse2(quote! {
-            precedence: {}
             tokens {
                 [=] { infix } (14, R)
                 [if] (62, 12)
@@ -893,7 +1328,6 @@ mod tests {
     #[test]
     fn hoists_inline_products_and_boxes_marked_inline_references() {
         let syntax: Syntax = parse2(quote::quote! {
-            precedence: {}
             tokens { [,] }
 
             struct Leaf;
@@ -922,6 +1356,68 @@ mod tests {
         let rendered = expansion.to_string();
         assert!(rendered.contains("Box < Expr >"));
         assert!(rendered.contains("Delimited <"));
+        syn::parse2::<syn::File>(expansion).unwrap();
+    }
+
+    #[test]
+    fn explicit_declarations_supply_atoms_and_nested_type_families() {
+        let syntax: Syntax = parse2(quote! {
+            tokens {
+                [=] { infix } (14, R)
+                [+] { pref, bin, aug } (50, L)
+                [.] [.?]
+            }
+
+            #[operator(prefix)]
+            strutuct! {
+                #[derive(Debug, ::m2_syn::Spanned)]
+                PrefixOperator
+            }
+
+            strutuct! {
+                #[derive(Debug, ::m2_syn::Spanned)]
+                Symbol
+            }
+
+            strutuct! {
+                #[derive(Debug, ::m2_syn::Spanned)]
+                MemberOwner
+                operator: |MemberOperator| {
+                    Dot(Token![.])
+                    OptionalDot(Token![.?])
+                },
+            }
+
+            strutuct! {
+                #[derive(Debug, ::m2_syn::Spanned)]
+                Recursive
+                child: Recursive*,
+            }
+        })
+        .unwrap();
+
+        assert!(syntax.structs.iter().any(|node| node.name == "Symbol"
+            && node.explicit
+            && matches!(node.fields, StructFields::Leaf(LeafKind::QualifiedIdent))));
+        assert!(syntax.enums.iter().any(|node| node.name == "PrefixOperator"
+            && node.explicit
+            && node.variants.len() == 1));
+        assert!(syntax.enums.iter().any(|node| node.name == "MemberOperator"
+            && node.explicit
+            && node.variants.len() == 2));
+        assert!(syntax.structs.iter().any(|node| {
+            node.name == "Recursive"
+                && matches!(
+                    &node.fields,
+                    StructFields::Product { fields, .. }
+                        if matches!(fields[0].shape, Shape::Boxed(_))
+                )
+        }));
+
+        let expansion = syntax.expand(SyntaxFeatures::PRETTY_WALK).unwrap();
+        let rendered = expansion.to_string();
+        assert!(rendered.contains("PrefixOperator Add (:: m2_syn :: Token ! [+])"));
+        assert!(rendered.contains("package_qualifier"));
         syn::parse2::<syn::File>(expansion).unwrap();
     }
 }

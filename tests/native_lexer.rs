@@ -1,3 +1,5 @@
+//! Integration tests for native lexer.
+
 use std::ops::Bound;
 
 use m2_syn::{

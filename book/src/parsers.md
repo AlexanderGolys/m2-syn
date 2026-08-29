@@ -1,6 +1,6 @@
 # Parser adapters
 
-Generated reconstruction depends only on `ExternalCstNode`.
+Generated migration depends only on `ExternalCstNode`.
 `TreeSitterNode` adapts Tree-sitter identity, field names, source text, extras,
 and ranges to that interface for schema-compatible leaves, operators, and
 tokens. Complete-file `TreeSitterParser` lowers Tree-sitter's `muted`, pack,
@@ -8,11 +8,11 @@ delimiter, operator, assignment, and control nodes directly into the cleaned
 typed graph; it does not re-lex the source or call the native parser. The
 external node view ends at the adapter and is never stored in a typed node.
 
-`Parser<T>` is the parser-backend boundary. It receives a `TokenStream` and
+`Parser<T>` is the parser-backend boundary. It receives a `CellStream` and
 returns a generated syntax target. `T` defaults to
 `SourceFile`, while parsers may implement the trait again for more specific
-targets such as `Expr`. Both built-in backends implement this same token-stream
-API. A parser with its own CST can implement `ExternalCstNode` and call `reconstruct`;
+targets such as `Expr`. Both built-in backends implement this same cell-stream
+API. A parser with its own CST can implement `ExternalCstNode` and call `migrate`;
 a parser whose native model already matches the generated graph can construct
 the target directly.
 
@@ -20,38 +20,43 @@ The target-owned `Parse` trait is the dual of `Lex`: `parse2::<T>` consumes
 one complete `TokenStream` as `T`. Generated `Token![..]` atoms, raw token
 categories, token streams, boxes, delimiters, comma-punctuated collections, and
 terminated bodies implement it. `ParseStream` shares immutable token storage
-through `Rc<TokenStream>`; end-of-input is cursor state rather
+through the persistent `TokenStream` handle; end-of-input is cursor state rather
 than a synthetic token. A `fork` has an independent index and `advance_to`
 explicitly commits successful speculation.
 `parse_quote_m2!` composes quoting with type-inferred parsing.
 
-`Lex::to_token_stream` is the inverse boundary. The native parser supports the
-normalized round trip `TokenStream -> SourceFile -> TokenStream -> SourceFile`. Generated
-concrete token structs are deliberately underscore-prefixed; use `Token![..]`
+`Lex::to_token_stream` is the lexical projection, while `Tokenize` produces
+framed cells. The native parser supports the normalized round trip
+`CellStream -> SourceFile -> CellStream -> SourceFile`. Generated concrete token
+structs are deliberately underscore-prefixed; use `Token![..]`
 to name their types and inspect the underlying `TokenTree` after `Lex`
 when working with a heterogeneous stream. Delimiter structs follow the same
 rule through `Delimiter![..]`.
 
-Cell splitting belongs to the native parser because semicolons and line breaks
-are grammatical at global scope. Delimited groups remain opaque while cells
-are split, so nested separators never become top-level boundaries.
+Cell framing is shared infrastructure rather than a parser side effect.
+Semicolons and complete physical lines confirm top-level boundaries; delimiter
+groups are framed recursively but their separators never become top-level
+boundaries. The result uses `CellTokenTree::Adj` instead of manufacturing empty
+punctuation inside the lexical stream.
 
 ```rust
 # use std::convert::Infallible;
-use m2_syn::{Eof, Parser, SourceFile, Span, TokenStream, lex_str, parse_with};
+use m2_syn::nodes::{EOF, SourceFile};
+use m2_syn::{CellStream, Parser, Span, Tokenize, lex_str, parse_with};
 
 struct EmptyParser;
 
 impl Parser for EmptyParser {
     type Error = Infallible;
 
-    fn parse_stream(&mut self, _tokens: TokenStream) -> Result<SourceFile, Self::Error> {
-        Ok(SourceFile::new(Vec::new(), Eof::new("", Span::detached())))
+    fn parse_cells(&mut self, _cells: CellStream) -> Result<SourceFile, Self::Error> {
+        Ok(SourceFile::new(Vec::new(), EOF::new("", Span::for_text(""))))
     }
 }
 
 let tokens = lex_str("").unwrap();
-let file = parse_with(&mut EmptyParser, tokens).unwrap();
+let cells = tokens.to_cell_stream().unwrap();
+let file = parse_with(&mut EmptyParser, cells).unwrap();
 assert!(file.cells.is_empty());
 ```
 

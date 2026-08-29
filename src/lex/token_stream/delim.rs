@@ -11,7 +11,7 @@ use crate::{
     Lex, Parse, ParseStream, Span, Spanned, TokenGroup, TokenParseError, TokenStream, TokenTree,
     TrailingTrivia,
 };
-
+use these_macros_should_be_illegal::discriminated_str;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// The delimiter families recognized by raw syntax containers.
 ///
@@ -19,27 +19,16 @@ use crate::{
 /// closing one, so a group is opaque and its extent is read rather than
 /// inferred. Cell boundaries are deliberately absent: they are a parse
 /// result, not a delimiter.
+#[discriminated_str(expression_name)]
 pub enum DelimiterKind {
     /// `( ... )`.
-    Parenthesis,
+    Parenthesis = "parenthesized expression",
     /// `[ ... ]`.
-    Bracket,
+    Bracket = "array expression",
     /// `{ ... }`.
-    Brace,
+    Brace = "list expression",
     /// `<| ... |>`.
-    AngleBar,
-}
-
-impl DelimiterKind {
-    /// Returns the expression family introduced by this delimiter.
-    pub const fn expression_name(self) -> &'static str {
-        match self {
-            Self::Parenthesis => "parenthesized expression",
-            Self::Bracket => "array expression",
-            Self::Brace => "list expression",
-            Self::AngleBar => "angle-bar list expression",
-        }
-    }
+    AngleBar = "angle-bar list expression",
 }
 
 /// Delimiter data that can surround typed syntax.
@@ -174,7 +163,9 @@ pub struct Delimiter {
     pub kind: DelimiterKind,
     /// The opening and closing source spans.
     pub spans: DoubleSpan,
+    /// The opening trivia.
     opening_trivia: TrailingTrivia,
+    /// The closing trivia.
     closing_trivia: TrailingTrivia,
 }
 
@@ -276,6 +267,7 @@ pub fn parse_delimiter<D: DelimiterToken>(input: &mut ParseStream) -> Result<D, 
     Ok(D::new(group.delimiter().spans.clone()))
 }
 
+/// Parses group.
 pub(crate) fn parse_group(
     input: &mut ParseStream,
     kind: DelimiterKind,
@@ -291,6 +283,7 @@ pub(crate) fn parse_group(
     Ok(group)
 }
 
+/// Parses any group.
 pub(crate) fn parse_any_group(
     input: &mut ParseStream,
     expected: &'static str,

@@ -18,6 +18,7 @@ use crate::{
     Recovered, Source, Span, Spanned, TokenGroup, TokenStream, TokenTree, Trivia, TriviaKind,
 };
 
+/// The MAX GROUP DEPTH constant.
 const MAX_GROUP_DEPTH: usize = 256;
 
 /// Collapses an explicitly `Core$`-qualified identifier back to its bare
@@ -70,6 +71,7 @@ pub fn __qualified_identifier_spans(spelling: &str, span: &Span) -> (Option<Span
     }
 }
 
+/// Returns whether the value is bare symbol name.
 fn is_bare_symbol_name(spelling: &str) -> bool {
     let Some(first) = spelling.as_bytes().first().copied() else {
         return false;
@@ -82,6 +84,7 @@ fn is_bare_symbol_name(spelling: &str) -> bool {
             .all(|byte| byte != b'$' && is_identifier_continue(byte))
 }
 
+/// Returns whether the value is decimal index.
 fn is_decimal_index(spelling: &str) -> bool {
     !spelling.is_empty() && spelling.bytes().all(|byte| byte.is_ascii_digit())
 }
@@ -114,8 +117,11 @@ pub enum LexErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Spanned)]
 /// A tokenization failure and the source span that caused it.
 pub struct LexError {
+    /// The kind.
     kind: LexErrorKind,
+    /// The delimiter.
     delimiter: Option<DelimiterKind>,
+    /// The span.
     span: Span,
 }
 
@@ -127,7 +133,7 @@ impl LexError {
 
     /// Returns the unclosed expression family for a missing group closer.
     pub fn unclosed_expression(&self) -> Option<&'static str> {
-        self.delimiter.map(DelimiterKind::expression_name)
+        self.delimiter.as_ref().map(DelimiterKind::expression_name)
     }
 
     /// Returns the token spelling required to complete this error.
@@ -244,6 +250,7 @@ pub fn __quote_fragment(source: &str) -> TokenStream {
         .unwrap_or_else(|error| panic!("invalid static M2 quote fragment: {error}"))
 }
 
+/// Handles lexer from bytes.
 fn lexer_from_bytes<I>(bytes: I) -> Result<NativeLexer, LexError>
 where
     I: IntoIterator<Item = u8>,
@@ -258,13 +265,18 @@ where
     Ok(NativeLexer::new(Arc::<str>::from(source)))
 }
 
+/// Internal state for NativeLexer.
 struct NativeLexer {
+    /// The source.
     source: Arc<str>,
+    /// The source span.
     source_span: Span,
+    /// The offset.
     offset: Offset,
 }
 
 impl NativeLexer {
+    /// Creates a new value.
     fn new(source: Arc<str>) -> Self {
         let source_span = Span::ranged(Source::new(Arc::clone(&source)), 0..source.len());
         Self {
@@ -274,6 +286,7 @@ impl NativeLexer {
         }
     }
 
+    /// Handles lex.
     fn lex(self) -> Result<TokenStream, LexError> {
         let recovered = self.lex_recovering()?;
         match recovered.diagnostics.into_iter().next() {
@@ -282,6 +295,7 @@ impl NativeLexer {
         }
     }
 
+    /// Lexes recovering.
     fn lex_recovering(mut self) -> Result<Recovered<TokenStream, LexError>, LexError> {
         let mut output = TokenStream::new();
         let mut groups = Vec::<OpenGroup>::new();
@@ -292,7 +306,7 @@ impl NativeLexer {
         let mut quote_next = false;
         loop {
             let Some(first) = self.peek(0) else {
-                output.set_physical_eof(self.source_span.at(self.source.len()));
+                output.set_source(Arc::clone(self.source_span.source()));
                 let mut diagnostics = Vec::with_capacity(groups.len());
                 while let Some(group) = groups.pop() {
                     diagnostics.push(LexError {
@@ -396,6 +410,7 @@ impl NativeLexer {
         }
     }
 
+    /// Lexes line break.
     fn lex_line_break(&mut self, _output: &mut TokenStream) -> Result<(), LexError> {
         let start = self.offset;
         let first = self.next_or_error(LexErrorKind::InvalidCharacter, start)?;
@@ -407,6 +422,7 @@ impl NativeLexer {
         Ok(())
     }
 
+    /// Lexes carriage return.
     fn lex_carriage_return(&mut self, _output: &mut TokenStream) -> Result<(), LexError> {
         let start = self.offset;
         let byte = self.next_or_error(LexErrorKind::InvalidCharacter, start)?;
@@ -414,12 +430,14 @@ impl NativeLexer {
         Ok(())
     }
 
+    /// Lexes whitespace.
     fn lex_whitespace(&mut self, _output: &mut TokenStream) -> Result<(), LexError> {
         let bytes = self.take_while(|byte| matches!(byte, b' ' | b'\t'));
         let _ = bytes;
         Ok(())
     }
 
+    /// Lexes identifier.
     fn lex_identifier(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
         let start = self.offset;
         let mut bytes = vec![self.next_or_error(LexErrorKind::InvalidUtf8, start)?];
@@ -439,6 +457,7 @@ impl NativeLexer {
         Ok(())
     }
 
+    /// Lexes number.
     fn lex_number(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
         let start = self.offset;
         let mut bytes = Vec::new();
@@ -496,6 +515,7 @@ impl NativeLexer {
         Ok(())
     }
 
+    /// Handles number radix.
     fn number_radix(&mut self) -> Option<NumberRadix> {
         let marker = self.peek(0)?;
         let digit = self.peek(1);
@@ -513,6 +533,7 @@ impl NativeLexer {
         }
     }
 
+    /// Lexes string.
     fn lex_string(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
         let start = self.offset;
         let mut bytes = vec![self.next_or_error(LexErrorKind::UnterminatedString, start)?];
@@ -559,6 +580,7 @@ impl NativeLexer {
         }
     }
 
+    /// Takes hex escape.
     fn take_hex_escape(
         &mut self,
         bytes: &mut Vec<u8>,
@@ -574,6 +596,7 @@ impl NativeLexer {
         Ok(())
     }
 
+    /// Lexes raw string.
     fn lex_raw_string(
         &mut self,
         opener_len: usize,
@@ -609,6 +632,7 @@ impl NativeLexer {
         }
     }
 
+    /// Lexes line comment.
     fn lex_line_comment(
         &mut self,
         opener_len: usize,
@@ -631,6 +655,7 @@ impl NativeLexer {
         Ok(())
     }
 
+    /// Lexes block comment.
     fn lex_block_comment(
         &mut self,
         opener_len: usize,
@@ -655,6 +680,7 @@ impl NativeLexer {
         }
     }
 
+    /// Handles match fixed.
     fn match_fixed(&mut self) -> Option<FixedMatch> {
         fixed_spellings()
             .filter(|(spelling, _)| {
@@ -670,6 +696,7 @@ impl NativeLexer {
             })
     }
 
+    /// Handles math operator width.
     fn math_operator_width(&mut self) -> Option<usize> {
         let first = self.peek(0)?;
         if !matches!(first, 0xc2 | 0xc3 | 0xe2) {
@@ -680,6 +707,7 @@ impl NativeLexer {
             .and_then(|_| utf8_char_width(first))
     }
 
+    /// Lexes math operator.
     fn lex_math_operator(
         &mut self,
         width: usize,
@@ -693,12 +721,14 @@ impl NativeLexer {
         self.emit_punctuation(bytes, start, output)
     }
 
+    /// Lexes punctuation.
     fn lex_punctuation(&mut self, len: usize, output: &mut TokenStream) -> Result<(), LexError> {
         let start = self.offset;
         let bytes = self.take_exact(len, start)?;
         self.emit_punctuation(bytes, start, output)
     }
 
+    /// Emits punctuation.
     fn emit_punctuation(
         &self,
         bytes: Vec<u8>,
@@ -710,10 +740,12 @@ impl NativeLexer {
         Ok(())
     }
 
+    /// Handles byte after current.
     fn byte_after_current(&mut self) -> Option<u8> {
         self.peek(1)
     }
 
+    /// Handles slash run len.
     fn slash_run_len(&mut self) -> usize {
         let mut len = 0;
         while len < 4 && self.peek(len) == Some(b'/') {
@@ -722,6 +754,7 @@ impl NativeLexer {
         len
     }
 
+    /// Takes while.
     fn take_while(&mut self, predicate: impl Fn(u8) -> bool) -> Vec<u8> {
         let mut bytes = Vec::new();
         while self.peek(0).is_some_and(&predicate) {
@@ -733,6 +766,7 @@ impl NativeLexer {
         bytes
     }
 
+    /// Takes exact.
     fn take_exact(&mut self, len: usize, start: Offset) -> Result<Vec<u8>, LexError> {
         let mut bytes = Vec::with_capacity(len);
         for _ in 0..len {
@@ -744,12 +778,14 @@ impl NativeLexer {
         Ok(bytes)
     }
 
+    /// Handles next.
     fn next(&mut self) -> Option<u8> {
         let byte = self.peek(0)?;
         self.offset += 1;
         Some(byte)
     }
 
+    /// Handles peek.
     fn peek(&self, distance: usize) -> Option<u8> {
         self.offset
             .checked_add(distance)
@@ -757,6 +793,7 @@ impl NativeLexer {
             .copied()
     }
 
+    /// Handles next or error.
     fn next_or_error(&mut self, kind: LexErrorKind, start: Offset) -> Result<u8, LexError> {
         match self.next() {
             Some(byte) => Ok(byte),
@@ -764,6 +801,7 @@ impl NativeLexer {
         }
     }
 
+    /// Handles error.
     fn error(&self, kind: LexErrorKind, start: Offset) -> LexError {
         LexError {
             kind,
@@ -779,12 +817,17 @@ impl NativeLexer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Internal alternatives for RequiredClause.
 enum RequiredClause {
+    /// The Then alternative.
     Then,
+    /// The LoopBody alternative.
     LoopBody,
+    /// The ExceptBody alternative.
     ExceptBody,
 }
 
+/// Handles newline ends cell.
 pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
     let mut required_clauses = Vec::new();
     let mut last_text = None;
@@ -848,6 +891,7 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
         || GENERATED_POSTFIX_OPERATOR_SPELLINGS.contains(&last)
 }
 
+/// Removes last clause.
 fn remove_last_clause(clauses: &mut Vec<RequiredClause>, clause: RequiredClause) -> bool {
     let Some(position) = clauses.iter().rposition(|candidate| *candidate == clause) else {
         return false;
@@ -856,6 +900,7 @@ fn remove_last_clause(clauses: &mut Vec<RequiredClause>, clause: RequiredClause)
     true
 }
 
+/// Handles keyword requires value.
 fn keyword_requires_value(keyword: &str) -> bool {
     matches!(
         keyword,
@@ -898,6 +943,7 @@ fn last_token_quotes_next(stream: &TokenStream) -> bool {
         if is_quote_specifier(canonical_word_spelling(token.text())))
 }
 
+/// Returns whether the value is quote specifier.
 pub(crate) fn is_quote_specifier(keyword: &str) -> bool {
     matches!(
         keyword,
@@ -905,6 +951,7 @@ pub(crate) fn is_quote_specifier(keyword: &str) -> bool {
     )
 }
 
+/// Handles punctuation would merge.
 pub(crate) fn punctuation_would_merge(left: &str, right: &str) -> bool {
     let mut combined = String::with_capacity(left.len() + right.len());
     combined.push_str(left);
@@ -915,21 +962,32 @@ pub(crate) fn punctuation_would_merge(left: &str, right: &str) -> bool {
 }
 
 #[derive(Debug)]
+/// Internal state for OpenGroup.
 struct OpenGroup {
+    /// The kind.
     kind: DelimiterKind,
+    /// The opening start.
     opening_start: Offset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Internal alternatives for FixedKind.
 enum FixedKind {
+    /// The Punctuation alternative.
     Punctuation,
+    /// The LineComment alternative.
     LineComment,
+    /// The BlockComment alternative.
     BlockComment,
+    /// The RawString alternative.
     RawString,
+    /// The Open alternative.
     Open(DelimiterKind),
+    /// The Close alternative.
     Close(DelimiterKind),
 }
 
+/// The FIXED SPELLINGS constant.
 const FIXED_SPELLINGS: &[(&str, FixedKind)] = &[
     ("///", FixedKind::RawString),
     ("--", FixedKind::LineComment),
@@ -944,6 +1002,7 @@ const FIXED_SPELLINGS: &[(&str, FixedKind)] = &[
     ("|>", FixedKind::Close(DelimiterKind::AngleBar)),
 ];
 
+/// Handles fixed spellings.
 fn fixed_spellings() -> impl Iterator<Item = (&'static str, FixedKind)> {
     FIXED_SPELLINGS.iter().copied().chain(
         GENERATED_PUNCTUATION_SPELLINGS
@@ -953,19 +1012,27 @@ fn fixed_spellings() -> impl Iterator<Item = (&'static str, FixedKind)> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Internal state for FixedMatch.
 struct FixedMatch {
+    /// The len.
     len: usize,
+    /// The kind.
     kind: FixedKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Internal alternatives for NumberRadix.
 enum NumberRadix {
+    /// The Binary alternative.
     Binary,
+    /// The Octal alternative.
     Octal,
+    /// The Hexadecimal alternative.
     Hexadecimal,
 }
 
 impl NumberRadix {
+    /// Returns whether the value is digit.
     fn is_digit(self, byte: u8) -> bool {
         match self {
             Self::Binary => matches!(byte, b'0' | b'1'),
@@ -975,14 +1042,17 @@ impl NumberRadix {
     }
 }
 
+/// Returns whether the value is identifier start.
 fn is_identifier_start(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || byte >= 128
 }
 
+/// Returns whether the value is identifier continue.
 fn is_identifier_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'$' | b'\'') || byte >= 128
 }
 
+/// Returns whether the value is math operator pair.
 fn is_math_operator_pair(first: u8, second: u8) -> bool {
     matches!(
         (first, second),
@@ -992,6 +1062,7 @@ fn is_math_operator_pair(first: u8, second: u8) -> bool {
     )
 }
 
+/// Returns whether the value is math operator.
 fn is_math_operator(spelling: &str) -> bool {
     let bytes = spelling.as_bytes();
     bytes
@@ -1002,6 +1073,7 @@ fn is_math_operator(spelling: &str) -> bool {
         })
 }
 
+/// Handles UTF-8 char width.
 fn utf8_char_width(first: u8) -> Option<usize> {
     match first {
         0x00..=0x7f => Some(1),

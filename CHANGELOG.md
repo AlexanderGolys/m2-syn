@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.4.0 — 2026-08-29
+
+- Replace the flat generated CST schema with explicit, arbitrarily nested
+  `strutuct!` declarations whose product and sum layers define semantic visitor
+  specializations such as operator, assignment, lambda, member-access, and
+  indexing families.
+- Make syntax containers transparent in semantic presentation and dispatch:
+  delimiter boundaries are presented as `Delimiter` leaves, while `Delimited`,
+  `Punctuated`, and ordinary vectors remain storage rather than CST node kinds.
+- Represent adjacency as a binary operator and add explicit prefix, binary,
+  postfix, augmented, member-access, and index-expression specializations.
+- Introduce `CellTokenStream`, `CellTokenTree`, and `CellTokenGroup` as the
+  parser-facing framed-token layer while retaining the same lexical atoms and
+  recursively removing inferred adjacency when projecting back to tokens.
+- Require every `Punctuated` value to contain a real separator, keep singleton
+  values outside the wrapper, and replace `PunctPair` with the symmetric
+  `SeparatedPair` projection.
+- Distinguish variadic lambda arguments from delimited argument lists and use an
+  argument pack only when a comma is present.
+- Canonicalize `Token!` spellings across quoted and unquoted fragments, allowing
+  equivalent punctuation to be written with arbitrary Rust token spacing.
+- Replace named precedence declarations with the compact numeric operator table
+  and generate operator categories directly from each token's roles.
+- Add the `ProcMacro` expansion interface and the `LiteralReturnTypes` typed-tree
+  transformation example.
+- Improve native parsing, Tree-sitter migration, source reconstruction, and
+  pretty-tree output for the expanded semantic hierarchy.
+
+### Migration
+
+- Update imports and constructors from `PunctPair<L, P, R>` to
+  `SeparatedPair<T, P>`; the two values now deliberately have one shared type.
+- Do not construct `Punctuated` for a singleton value. Use its surrounding
+  direct-value variant and construct `Punctuated` only after the first
+  punctuation/value pair exists.
+- Update matches, visitors, folds, and constructors for generated syntax nodes
+  to the new nested semantic categories. Generated node names and enum paths
+  from 0.3 are not source compatible with 0.4.
+- Code consuming framed cells should use `CellTokenStream` and `CellTokenTree`;
+  use `to_token_stream` or `into_token_stream` when a lexical projection is
+  required.
+
 ## 0.3.0 — 2026-08-27
 
 - Split native processing into lexical `TokenStream` construction and

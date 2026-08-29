@@ -15,7 +15,8 @@ use crate::native::{
     NativeCellState, NativeParseError, incomplete_lex_error, incomplete_parse_error, parse_raw_cell,
 };
 use crate::{
-    Cell, CellStream, LexError, Source, Span, Spanned, TextEdit, TokenStream, lex_str_recovering,
+    Cell, CellStream, CellTokenStream, LexError, Source, Span, Spanned, TextEdit,
+    lex_str_recovering,
 };
 
 /// The structural boundary following one retained native cell.
@@ -49,13 +50,21 @@ impl Error for NativeRealtimeEditError {}
 /// unchanged cell to survive edits above it without rewriting every leaf span.
 #[derive(Debug)]
 pub struct NativeRealtimeCell {
+    /// The document range.
     document_range: Range<usize>,
+    /// The source.
     source: Span,
-    tokens: TokenStream,
+    /// The tokens.
+    tokens: CellTokenStream,
+    /// The syntax.
     syntax: Option<Cell>,
+    /// The lexer diagnostics.
     lexer_diagnostics: Vec<LexError>,
+    /// The parse error.
     parse_error: Option<NativeParseError>,
+    /// The state.
     state: NativeCellState,
+    /// The boundary.
     boundary: NativeCellBoundary,
 }
 
@@ -77,7 +86,7 @@ impl NativeRealtimeCell {
     }
 
     /// Returns the tokenized cell, including inferred adjacency punctuation.
-    pub fn tokens(&self) -> &TokenStream {
+    pub fn tokens(&self) -> &CellTokenStream {
         &self.tokens
     }
 
@@ -122,8 +131,11 @@ impl Spanned for NativeRealtimeCell {
 /// cell boundaries are regenerated together for every reparsed region.
 #[derive(Debug)]
 pub struct NativeRealtimeParser {
+    /// The source.
     source: String,
+    /// The cells.
     cells: Vec<NativeRealtimeCell>,
+    /// The reparsed cells.
     reparsed_cells: Range<usize>,
 }
 
@@ -248,6 +260,7 @@ impl NativeRealtimeParser {
         CellStream::from_cells(self.cells.iter().map(|cell| cell.tokens.clone()))
     }
 
+    /// Handles first affected cell.
     fn first_affected_cell(&self, edit: &TextEdit) -> usize {
         let start = match edit {
             TextEdit::Insertion { at, .. } => *at,
@@ -263,6 +276,7 @@ impl NativeRealtimeParser {
             .unwrap_or(self.cells.len())
     }
 
+    /// Handles reusable suffix.
     fn reusable_suffix(
         &self,
         edit: &TextEdit,
@@ -285,10 +299,12 @@ impl NativeRealtimeParser {
     }
 }
 
+/// Handles shifted range.
 fn shifted_range(edit: &TextEdit, range: Range<usize>) -> Range<usize> {
     shifted_offset(edit, range.start)..shifted_offset(edit, range.end)
 }
 
+/// Handles shifted offset.
 fn shifted_offset(edit: &TextEdit, offset: usize) -> usize {
     match edit {
         TextEdit::Insertion { at, text } if offset >= *at => offset + text.len(),
@@ -299,6 +315,7 @@ fn shifted_offset(edit: &TextEdit, offset: usize) -> usize {
     }
 }
 
+/// Returns whether the value ends at confirmed boundary.
 fn ends_at_confirmed_boundary(source: &str) -> bool {
     if source.trim().is_empty() {
         return true;
@@ -316,6 +333,7 @@ fn ends_at_confirmed_boundary(source: &str) -> bool {
     ends_with_cell_semicolon(last) || source.ends_with('\n')
 }
 
+/// Handles analyze region.
 fn analyze_region(source: &str, document_start: usize) -> Vec<NativeRealtimeCell> {
     let recovered = match lex_str_recovering(source) {
         Ok(recovered) => recovered,
@@ -371,6 +389,7 @@ fn analyze_region(source: &str, document_start: usize) -> Vec<NativeRealtimeCell
     cells
 }
 
+/// Handles analyze cell.
 fn analyze_cell(
     source: &str,
     document_range: Range<usize>,
@@ -385,9 +404,9 @@ fn analyze_cell(
     let mut streams = framed.cells;
     streams.extend(framed.incomplete);
     let tokens = match streams.len() {
-        0 => TokenStream::new(),
+        0 => CellTokenStream::default(),
         1 => streams.pop().expect("one framed stream is present"),
-        _ => CellStream::from_cells(streams).into_token_stream(),
+        _ => CellTokenStream::from_framed_cells(streams),
     };
     let source_owner = tokens.source().unwrap_or_else(|| Source::new(source));
     let source_span = Span::ranged(source_owner, 0..source.len());
@@ -423,6 +442,7 @@ fn analyze_cell(
     }
 }
 
+/// Handles cell from lex error.
 fn cell_from_lex_error(
     source: &str,
     document_range: Range<usize>,
@@ -437,7 +457,7 @@ fn cell_from_lex_error(
     NativeRealtimeCell {
         document_range,
         source: Span::ranged(source_owner, 0..source.len()),
-        tokens: TokenStream::new(),
+        tokens: CellTokenStream::default(),
         syntax: None,
         lexer_diagnostics: vec![error],
         parse_error: None,

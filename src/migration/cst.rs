@@ -11,9 +11,12 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use crate::{Delimiter, DelimiterKind, DoubleSpan, Spanned, Terminal, TokenTree, TrailingTrivia};
+use crate::{
+    Delimiter, DelimiterKind, DoubleSpan, Punctuated, Spanned, Terminal, TokenTree, TrailingTrivia,
+};
 
-type PunctuatedNodes<N> = (N, Vec<(N, N)>);
+/// Internal alias for PunctuatedNodes.
+type PunctuatedNodes<N> = Punctuated<N, N>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Backend-local node identity used only during external CST migration.
@@ -109,7 +112,9 @@ pub trait Migrate<N: ExternalCstNode>: Sized {
 
 /// Single-pass field selection used only by generated migration code.
 pub struct ChildCursor<N> {
+    /// The children.
     children: Vec<Option<ExternalCstChild<N>>>,
+    /// The parent.
     parent: String,
 }
 
@@ -232,14 +237,14 @@ impl<N: ExternalCstNode> ChildCursor<N> {
         })
     }
 
-    /// Pairs a nonempty list of migrated value nodes with the anonymous
+    /// Pairs two or more value nodes with the anonymous
     /// punctuation nodes separating them.
     ///
     /// # Errors
     ///
-    /// Returns [`MigrateError::InvalidPunctuated`] when there is no first
-    /// value or the parent does not contain exactly one separator between each
-    /// adjacent value.
+    /// Returns [`MigrateError::InvalidPunctuated`] when there are fewer than
+    /// two values or the parent does not contain exactly one separator between
+    /// each adjacent value.
     pub fn punctuated(
         &mut self,
         values: Vec<N>,
@@ -258,14 +263,26 @@ impl<N: ExternalCstNode> ChildCursor<N> {
                 punctuation: punctuation_count,
             });
         };
-        if punctuation_count + 1 != value_count {
+        if punctuation_count == 0 || punctuation_count + 1 != value_count {
             return Err(MigrateError::InvalidPunctuated {
                 node: self.parent.clone(),
                 values: value_count,
                 punctuation: punctuation_count,
             });
         }
-        Ok((first, punctuation.into_iter().zip(values).collect()))
+        let mut rest = punctuation.into_iter().zip(values);
+        let Some((first_punctuation, second)) = rest.next() else {
+            return Err(MigrateError::InvalidPunctuated {
+                node: self.parent.clone(),
+                values: value_count,
+                punctuation: punctuation_count,
+            });
+        };
+        let mut punctuated = Punctuated::new(first, first_punctuation, second);
+        for (punctuation, value) in rest {
+            punctuated.push(punctuation, value);
+        }
+        Ok(punctuated)
     }
 
     /// Pairs an optional punctuated field without inventing a value or a
@@ -297,6 +314,7 @@ impl<N: ExternalCstNode> ChildCursor<N> {
         self.punctuated(values, spelling).map(Some)
     }
 
+    /// Takes first.
     fn take_first(&mut self, predicate: impl Fn(&ExternalCstChild<N>) -> bool) -> Option<N> {
         self.children
             .iter_mut()
@@ -304,6 +322,7 @@ impl<N: ExternalCstNode> ChildCursor<N> {
             .map(|child| child.node)
     }
 
+    /// Takes all.
     fn take_all(&mut self, predicate: impl Fn(&ExternalCstChild<N>) -> bool) -> Vec<N> {
         self.children
             .iter_mut()
@@ -353,8 +372,8 @@ pub enum MigrateError {
         /// The expected child type or spelling.
         expected: &'static str,
     },
-    /// A punctuated field was empty or did not contain one separator between
-    /// every adjacent pair of values.
+    /// A punctuated field had fewer than two values or did not contain one
+    /// separator between every adjacent pair of values.
     InvalidPunctuated {
         /// The parent node kind.
         node: String,
@@ -433,6 +452,7 @@ impl Display for MigrateError {
 
 impl Error for MigrateError {}
 
+/// Handles visibility.
 fn visibility(named: bool) -> &'static str {
     if named { "named" } else { "anonymous" }
 }

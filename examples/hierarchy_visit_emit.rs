@@ -1,9 +1,13 @@
+//! Demonstrates hierarchy visit emit.
+
 use m2_syn::nodes::Symbol;
 use m2_syn::visit::Visit;
 use m2_syn::{Lex, ParseError, parse_tokens, quote_m2};
 
 #[derive(Default)]
+/// State used by the SymbolCollector example.
 struct SymbolCollector {
+    /// The symbols.
     symbols: Vec<String>,
 }
 
@@ -23,7 +27,7 @@ fn main() -> Result<(), ParseError> {
     let mut collector = SymbolCollector::default();
     collector.visit_source_file(&source_file);
 
-    println!("hierarchy: Component -> ExprPack -> Cell -> SourceFile");
+    println!("hierarchy: Component -> ExprPack -> PackedContent -> Cell -> SourceFile");
     println!("visited: {}", collector.symbols.join(", "));
     print!("generated: {}", source_file.to_m2());
     Ok(())

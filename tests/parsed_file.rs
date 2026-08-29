@@ -1,3 +1,5 @@
+//! Integration tests for parsed file.
+
 use m2_syn::{Lex, ParsedFile, Spanned};
 
 #[test]
@@ -48,11 +50,10 @@ fn combined_report_labels_source_tokens_and_the_complete_tree() {
     assert!(report.contains("DELIM->"));
     assert!(report.contains("<-DELIM"));
     assert!(report.contains("╭─ TYPED CST"));
-    assert!(report.contains("Punctuated · 2 items"));
-    assert!(report.contains("(  opening → Token"));
-    assert!(report.contains(")  closing → Token"));
-    assert!(report.contains("delimiter → (…) · 2 tokens"));
-    assert!(!report.contains("delimiter → Delimiter"));
+    assert!(!report.contains("Punctuated"));
+    assert!(!report.contains("Delimited"));
+    assert!(report.contains("(  opening → Delimiter![()]"));
+    assert!(report.contains(")  closing → Delimiter![()]"));
     assert!(!report.contains("@detached"));
     assert!(!report.contains("TRIVIA"));
     assert!(!report.contains('\u{1b}'));

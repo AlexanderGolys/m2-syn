@@ -8,7 +8,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::iter::FusedIterator;
-use std::rc::Rc;
 
 use crate::cell_stream::frame_recovering;
 use crate::{
@@ -69,6 +68,7 @@ impl Parse for TokenTree {
     }
 }
 
+/// Implements raw-token parsing for one [`TokenTree`] variant.
 macro_rules! parse_raw_variant {
     ($ty:ty, $variant:ident, $expected:literal) => {
         impl Parse for $ty {
@@ -147,7 +147,7 @@ pub fn parse_fragment_str<T: Parse>(source: &str) -> Result<T, FragmentParseErro
         return Err(FragmentParseError::MultipleCells { count: cells.len() });
     }
     let tokens = cells.pop().unwrap_or_default();
-    parse2(tokens).map_err(Into::into)
+    parse2(tokens.into_parser_token_stream()).map_err(Into::into)
 }
 
 /// An error produced while lexing or parsing one typed syntax fragment.
@@ -204,15 +204,21 @@ impl From<TokenParseError> for FragmentParseError {
 /// token vectors, cursor positions, and newline scanners.
 #[derive(Debug, Clone)]
 pub(crate) struct SignificantToken {
+    /// The token.
     pub(crate) token: TokenTree,
+    /// The crossed newline.
     pub(crate) crossed_newline: bool,
+    /// The trailing trivia.
     pub(crate) trailing_trivia: TrailingTrivia,
 }
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
+/// Internal alternatives for Lookahead.
 pub(crate) enum Lookahead {
+    /// The Token alternative.
     Token(SignificantToken),
+    /// The End alternative.
     End(Span),
 }
 
@@ -227,11 +233,14 @@ impl Spanned for Lookahead {
 
 /// An owned, cheaply forkable cursor over one immutable token stream.
 ///
-/// Forks share the token storage through [`Rc`] and copy only their current
-/// position. Advancing a fork never changes the cursor from which it came.
+/// Forks share the [`TokenStream`] backing allocation and copy only their
+/// current position. Advancing a fork never changes the cursor from which it
+/// came.
 #[derive(Clone)]
 pub struct ParseStream {
-    tokens: Rc<TokenStream>,
+    /// The tokens.
+    tokens: TokenStream,
+    /// The position.
     position: usize,
     /// The zero-width position just past the last token.
     ///
@@ -252,7 +261,7 @@ impl ParseStream {
             })
             .unwrap_or_else(|| Span::for_text(""));
         Self {
-            tokens: Rc::new(tokens),
+            tokens,
             position: 0,
             eof_span,
         }
@@ -270,7 +279,7 @@ impl ParseStream {
     /// Panics if `fork` belongs to another token stream.
     pub fn advance_to(&mut self, fork: &Self) {
         assert!(
-            Rc::ptr_eq(&self.tokens, &fork.tokens),
+            self.tokens.shares_storage(&fork.tokens),
             "cannot advance to a cursor from another token stream"
         );
         self.position = fork.position;
@@ -281,6 +290,7 @@ impl ParseStream {
         self.tokens().get(self.position)
     }
 
+    /// Handles lookahead.
     pub(crate) fn lookahead(&self) -> Lookahead {
         let Some(mut token) = self.tokens().get(self.position).cloned() else {
             return Lookahead::End(self.eof_span.clone());
@@ -298,6 +308,7 @@ impl ParseStream {
         })
     }
 
+    /// Consumes lookahead.
     pub(crate) fn consume_lookahead(&mut self) -> Lookahead {
         let lookahead = self.lookahead();
         if matches!(lookahead, Lookahead::Token(_)) {
@@ -306,6 +317,7 @@ impl ParseStream {
         lookahead
     }
 
+    /// Handles next significant.
     pub(crate) fn next_significant(&mut self) -> Option<SignificantToken> {
         match self.consume_lookahead() {
             Lookahead::Token(token) => Some(token),
@@ -313,10 +325,12 @@ impl ParseStream {
         }
     }
 
+    /// Skips trivia.
     pub(crate) fn skip_trivia(&mut self) {
         // Comments are owned by tokens, so every stream element is significant.
     }
 
+    /// Handles end-of-file span.
     pub(crate) fn eof_span(&self) -> Span {
         self.eof_span.clone()
     }
@@ -353,10 +367,12 @@ impl ParseStream {
         self.peek().is_none()
     }
 
+    /// Handles tokens.
     fn tokens(&self) -> &TokenStream {
         &self.tokens
     }
 
+    /// Handles finish.
     fn finish(&mut self) -> Result<(), TokenParseError> {
         if let Some(token) = self.next() {
             return Err(TokenParseError::TrailingToken {
@@ -368,6 +384,7 @@ impl ParseStream {
     }
 }
 
+/// Handles tokens cross line break.
 fn tokens_cross_line_break(left: &TokenTree, right: &TokenTree) -> bool {
     let left = left.expect_span();
     let right = right.expect_span();
@@ -434,10 +451,12 @@ pub enum TokenParseError {
 }
 
 impl TokenParseError {
+    /// Handles unexpected end.
     pub(crate) fn unexpected_end(expected: &'static str, span: Span) -> Self {
         Self::UnexpectedEnd { expected, span }
     }
 
+    /// Handles unexpected.
     pub(crate) fn unexpected(expected: &'static str, found: impl Into<String>, span: Span) -> Self {
         Self::UnexpectedToken {
             expected,
@@ -446,6 +465,7 @@ impl TokenParseError {
         }
     }
 
+    /// Handles unexpected token.
     pub(crate) fn unexpected_token(expected: &'static str, token: &TokenTree) -> Self {
         Self::unexpected(expected, token.description(), token.expect_span())
     }

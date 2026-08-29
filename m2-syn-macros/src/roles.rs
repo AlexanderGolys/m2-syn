@@ -43,6 +43,9 @@ impl ParseInfo {
     }
 
     pub(crate) fn is_operator(self, kind: OperatorKind) -> bool {
+        if kind == OperatorKind::Augmented {
+            return false;
+        }
         matches!(
             (self.role, kind),
             (Role::Postfix, OperatorKind::Postfix)
@@ -138,15 +141,11 @@ impl SynParse for ParseFlags {
 }
 
 impl ParseFlags {
-    pub(crate) fn resolve(
-        self,
-        input: ParseStream<'_>,
-        precedences: &Precedences,
-    ) -> Result<Option<ParseInfo>> {
+    pub(crate) fn resolve(self, input: ParseStream<'_>) -> Result<Option<ParseInfo>> {
         if self.roles == 0 && !input.peek(syn::token::Paren) {
             return Ok(None);
         }
-        let (precedence, binary, unary) = parse_precedence_slots(input, precedences)?;
+        let (precedence, binary, unary) = parse_precedence_slots(input)?;
         // A prefix operator binds its operand at its own precedence unless the
         // table says otherwise, so the third slot is normally left out.
         let unary_strength = unary.unwrap_or(precedence);
@@ -183,13 +182,10 @@ impl ParseFlags {
     }
 }
 
-fn parse_precedence_slots(
-    input: ParseStream<'_>,
-    precedences: &Precedences,
-) -> Result<(u8, Option<u8>, Option<u8>)> {
+fn parse_precedence_slots(input: ParseStream<'_>) -> Result<(u8, Option<u8>, Option<u8>)> {
     let content;
     parenthesized!(content in input);
-    let precedence = parse_precedence_slot(&content, precedences)?.ok_or_else(|| {
+    let precedence = parse_precedence_slot(&content)?.ok_or_else(|| {
         Error::new(
             content.span(),
             "the precedence slot is required and cannot be `_`",
@@ -212,17 +208,17 @@ fn parse_precedence_slots(
                 content.parse::<Ident>()?;
                 Some(precedence.saturating_sub(1))
             }
-            _ => parse_precedence_slot(&content, precedences)?,
+            _ => parse_precedence_slot(&content)?,
         }
     } else {
-        parse_precedence_slot(&content, precedences)?
+        parse_precedence_slot(&content)?
     };
 
     let unary = if content.is_empty() {
         None
     } else {
         content.parse::<Token![,]>()?;
-        parse_precedence_slot(&content, precedences)?
+        parse_precedence_slot(&content)?
     };
     if !content.is_empty() {
         return Err(content.error("expected at most three precedence slots"));
@@ -230,30 +226,18 @@ fn parse_precedence_slots(
     Ok((precedence, binary, unary))
 }
 
-pub(crate) fn parse_precedence_slot(
-    input: ParseStream<'_>,
-    precedences: &Precedences,
-) -> Result<Option<u8>> {
+pub(crate) fn parse_precedence_slot(input: ParseStream<'_>) -> Result<Option<u8>> {
     if input.peek(Token![_]) {
         input.parse::<Token![_]>()?;
         return Ok(None);
     }
     if input.peek(syn::Ident) {
         let name: Ident = input.parse()?;
-        return precedences
-            .iter()
-            .find(|(declared, _)| declared == &name)
-            .map(|(_, value)| *value)
-            .map(Some)
-            .ok_or_else(|| {
-                Error::new(
-                    name.span(),
-                    format!("`{name}` is not a declared precedence"),
-                )
-            });
+        return Err(Error::new(
+            name.span(),
+            "precedence slots must be integer literals",
+        ));
     }
     let literal: syn::LitInt = input.parse()?;
     Ok(Some(literal.base10_parse()?))
 }
-
-pub(crate) type Precedences = Vec<(Ident, u8)>;

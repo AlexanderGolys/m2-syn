@@ -143,11 +143,17 @@ where
     fn pretty_tree(&self) -> PrettyNode {
         let delimiter = self.delimiter.delimiter();
         let mut node = PrettyNode::collection("Delimited", self.try_span());
-        node.push("contents", &self.contents);
         node.push_node(
-            "delimiter",
-            PrettyNode::delimiter(delimiter.kind, delimiter.spans),
+            "opening",
+            PrettyNode::delimiter_boundary(delimiter.kind, true, delimiter.opening_span()),
         );
+        node.push("contents", &self.contents);
+        if let Some(closing) = delimiter.closing_span() {
+            node.push_node(
+                "closing",
+                PrettyNode::delimiter_boundary(delimiter.kind, false, closing),
+            );
+        }
         node
     }
 }

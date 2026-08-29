@@ -1,13 +1,18 @@
+//! Demonstrates live parser.
+
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::Command;
 
 use m2_syn::{
-    LexError, NativeRealtimeParser, Spanned, TextEdit, format_pretty_tokens, format_pretty_tree,
+    LexError, NativeRealtimeParser, Spanned, TextEdit, format_pretty_cell_tokens,
+    format_pretty_tree,
 };
 
+/// State used by the TerminalMode example.
 struct TerminalMode(Option<String>);
 
 impl TerminalMode {
+    /// Handles raw.
     fn raw() -> Self {
         if !io::stdin().is_terminal() {
             return Self(None);
@@ -35,11 +40,13 @@ impl Drop for TerminalMode {
     }
 }
 
+/// Handles write diagnostic.
 fn write_diagnostic(output: &mut String, diagnostic: &LexError) {
     let span = diagnostic.span();
     output.push_str(&format!("- {diagnostic} at {span}\n"));
 }
 
+/// Handles render.
 fn render(parser: &NativeRealtimeParser, clear: bool) -> String {
     let mut output = String::new();
     if clear {
@@ -78,7 +85,7 @@ fn render(parser: &NativeRealtimeParser, clear: bool) -> String {
             cell.boundary(),
             cell.state()
         ));
-        output.push_str(&format_pretty_tokens(cell.tokens()));
+        output.push_str(&format_pretty_cell_tokens(cell.tokens()));
     }
 
     output.push_str("\nSYNTAX\n");

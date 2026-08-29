@@ -7,8 +7,11 @@ use super::{LeadingTrivia, Lex, Terminal, TokenStream, TokenTree, TrailingTrivia
 /// One maximal-munch M2 punctuation token.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Spanned)]
 pub struct Punct {
+    /// The span.
     span: Span,
+    /// The leading trivia.
     leading_trivia: LeadingTrivia,
+    /// The trailing trivia.
     trailing_trivia: TrailingTrivia,
 }
 

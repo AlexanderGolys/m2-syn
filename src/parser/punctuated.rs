@@ -1,7 +1,9 @@
-//! Nonempty syntax sequences separated by typed punctuation tokens.
+//! Syntax sequences containing at least one typed punctuation token.
 
-use std::iter::{Chain, Once, once};
-use std::{slice, vec};
+use std::iter::{Chain, Map, Once, once};
+use std::slice;
+use std::slice::IterMut;
+use std::vec::IntoIter;
 
 use crate::{Lex, Parse, ParseStream, Spanned, Token, TokenParseError, TokenStream};
 
@@ -11,18 +13,18 @@ use crate::{Lex, Parse, ParseStream, Spanned, Token, TokenParseError, TokenStrea
 /// value, its separator, and a right value. It is useful when a grammar field
 /// requires exactly two operands rather than an arbitrarily long sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Spanned)]
-pub struct PunctPair<L, P = Token![,], R = L> {
+pub struct SeparatedPair<T, P = Token![,]> {
     /// The value before the punctuation.
-    pub left: L,
+    pub left: T,
     /// The punctuation pairing the two values.
     pub punctuation: P,
     /// The value after the punctuation.
-    pub right: R,
+    pub right: T,
 }
 
-impl<L, P, R> PunctPair<L, P, R> {
+impl<T, P> SeparatedPair<T, P> {
     /// Creates a pair from its two values and their punctuation.
-    pub fn new(left: L, punctuation: P, right: R) -> Self {
+    pub fn new(left: T, punctuation: P, right: T) -> Self {
         Self {
             left,
             punctuation,
@@ -31,22 +33,22 @@ impl<L, P, R> PunctPair<L, P, R> {
     }
 
     /// Separates the pair into its two values and punctuation.
-    pub fn into_parts(self) -> (L, P, R) {
+    pub fn into_parts(self) -> (T, P, T) {
         (self.left, self.punctuation, self.right)
     }
 }
 
-impl<L: Parse, P: Parse, R: Parse> Parse for PunctPair<L, P, R> {
+impl<T: Parse, P: Parse> Parse for SeparatedPair<T, P> {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
         Ok(Self::new(
-            L::parse(input)?,
+            T::parse(input)?,
             P::parse(input)?,
-            R::parse(input)?,
+            T::parse(input)?,
         ))
     }
 }
 
-impl<L: Lex, P: Lex, R: Lex> Lex for PunctPair<L, P, R> {
+impl<T: Lex, P: Lex> Lex for SeparatedPair<T, P> {
     fn to_tokens(&self, output: &mut TokenStream) {
         self.left.to_tokens(output);
         self.punctuation.to_tokens(output);
@@ -54,20 +56,21 @@ impl<L: Lex, P: Lex, R: Lex> Lex for PunctPair<L, P, R> {
     }
 }
 
-/// Names or constructs a nonempty comma-punctuated sequence.
+/// Names or constructs a comma-punctuated sequence.
 ///
 /// - `punc!(T)` names `Punctuated<T>`.
-/// - `punc!(value first)` constructs one value.
 /// - `punc!(pairs first; comma => second, ...)` constructs a sequence while
 ///   retaining every supplied typed comma and its span.
 #[macro_export]
 macro_rules! punc {
-    (value $value:expr) => {
-        $crate::Punctuated::from_single($value)
-    };
-    (pairs $first:expr; $($punctuation:expr => $next:expr),+ $(,)?) => {{
-        let mut values = $crate::Punctuated::from_single($first);
-        $(values.push($punctuation, $next);)+
+    (
+        pairs $first:expr;
+        $punctuation:expr => $second:expr
+        $(, $rest_punctuation:expr => $rest_value:expr)*
+        $(,)?
+    ) => {{
+        let mut values = $crate::Punctuated::new($first, $punctuation, $second);
+        $(values.push($rest_punctuation, $rest_value);)*
         values
     }};
     ($value:ty) => {
@@ -75,12 +78,12 @@ macro_rules! punc {
     };
 }
 
-/// A nonempty sequence of syntax values separated by typed punctuation.
+/// Two or more syntax values separated by typed punctuation.
 ///
 /// Every separator is stored as its actual token, including its source span.
-/// The first value is mandatory; optional or empty grammar positions belong in
-/// the element type, such as `Option<T>` or a syntax enum containing an empty
-/// variant, while an optional whole sequence is `Option<Punctuated<T, P>>`.
+/// At least one separator and the values on both sides are mandatory. A single
+/// value belongs directly in the surrounding syntax type, while an optional
+/// whole sequence is `Option<Punctuated<T, P>>`.
 ///
 /// ```
 /// use m2_syn::{Lex, Span};
@@ -95,26 +98,38 @@ macro_rules! punc {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Spanned)]
 pub struct Punctuated<S, P = Token![,]> {
+    /// The first.
     first: S,
+    /// The second.
+    second: (P, S),
+    /// The rest.
     rest: Vec<(P, S)>,
 }
 
 impl<S, P> Punctuated<S, P> {
-    /// Creates a sequence from its first value and remaining punctuation-value
-    /// pairs.
-    pub fn new(first: S, rest: Vec<(P, S)>) -> Self {
-        Self { first, rest }
-    }
-
-    /// Creates a sequence containing exactly one value.
-    pub fn from_single(value: S) -> Self {
-        Self::new(value, Vec::new())
+    /// Creates a sequence from the first two values and their punctuation.
+    pub fn new(first: S, punctuation: P, second: S) -> Self {
+        Self {
+            first,
+            second: (punctuation, second),
+            rest: Vec::new(),
+        }
     }
 
     /// Creates a two-value sequence from one punctuated pair.
-    pub fn from_pair(pair: PunctPair<S, P>) -> Self {
+    pub fn from_pair(pair: SeparatedPair<S, P>) -> Self {
+        Self::from_pair_and_rest(pair, Vec::new())
+    }
+
+    /// Creates a sequence from its first separated pair and any later
+    /// punctuation-value pairs.
+    pub fn from_pair_and_rest(pair: SeparatedPair<S, P>, rest: Vec<(P, S)>) -> Self {
         let (left, punctuation, right) = pair.into_parts();
-        Self::new(left, vec![(punctuation, right)])
+        Self {
+            first: left,
+            second: (punctuation, right),
+            rest,
+        }
     }
 
     /// Returns the first value.
@@ -127,41 +142,44 @@ impl<S, P> Punctuated<S, P> {
         &mut self.first
     }
 
-    /// Returns the punctuation-value pairs following the first value.
-    pub fn rest(&self) -> &[(P, S)] {
-        &self.rest
+    /// Borrows every punctuation-value pair following the first value.
+    pub fn pairs(&self) -> Pairs<'_, S, P> {
+        once(&self.second).chain(self.rest.iter())
     }
 
-    /// Returns the punctuation-value pairs following the first value mutably.
-    pub fn rest_mut(&mut self) -> &mut [(P, S)] {
-        &mut self.rest
+    /// Mutably borrows every punctuation-value pair following the first value.
+    pub fn pairs_mut(&mut self) -> PairsMut<'_, S, P> {
+        once(&mut self.second).chain(self.rest.iter_mut())
     }
 
-    /// Separates the sequence into its first value and remaining pairs.
-    pub fn into_parts(self) -> (S, Vec<(P, S)>) {
-        (self.first, self.rest)
+    /// Separates the sequence into its first pair and any later pairs.
+    pub fn into_parts(self) -> (SeparatedPair<S, P>, Vec<(P, S)>) {
+        let (punctuation, second) = self.second;
+        (
+            SeparatedPair::new(self.first, punctuation, second),
+            self.rest,
+        )
     }
 
     /// Returns the number of values, excluding punctuation.
     pub fn len(&self) -> usize {
-        self.rest.len() + 1
+        self.rest.len() + 2
     }
 
-    /// Returns `false`; a punctuated sequence always contains its first value.
+    /// Returns `false`; a punctuated sequence always contains at least two values.
     pub const fn is_empty(&self) -> bool {
         false
     }
 
     /// Returns the number of values and punctuation tokens together.
     pub fn token_len(&self) -> usize {
-        self.rest.len() * 2 + 1
+        self.rest.len() * 2 + 3
     }
 
     /// Borrows the values without discarding or synthesizing punctuation.
     pub fn iter(&self) -> Values<'_, S, P> {
         once(&self.first).chain(
-            self.rest
-                .iter()
+            self.pairs()
                 .map(rest_value_ref::<S, P> as fn(&(P, S)) -> &S),
         )
     }
@@ -170,8 +188,8 @@ impl<S, P> Punctuated<S, P> {
     /// punctuation.
     pub fn iter_mut(&mut self) -> ValuesMut<'_, S, P> {
         once(&mut self.first).chain(
-            self.rest
-                .iter_mut()
+            once(&mut self.second)
+                .chain(self.rest.iter_mut())
                 .map(rest_value_mut::<S, P> as fn(&mut (P, S)) -> &mut S),
         )
     }
@@ -180,12 +198,48 @@ impl<S, P> Punctuated<S, P> {
     pub fn push(&mut self, punctuation: P, value: S) {
         self.rest.push((punctuation, value));
     }
+
+    /// Maps the values while retaining every punctuation token unchanged.
+    pub fn map_values<T>(self, mut map: impl FnMut(S) -> T) -> Punctuated<T, P> {
+        let (pair, rest) = self.into_parts();
+        let (first, punctuation, second) = pair.into_parts();
+        Punctuated::from_pair_and_rest(
+            SeparatedPair::new(map(first), punctuation, map(second)),
+            rest.into_iter()
+                .map(|(punctuation, value)| (punctuation, map(value)))
+                .collect(),
+        )
+    }
+
+    /// Fallibly maps both values and punctuation while retaining their order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error produced by either mapping function.
+    pub fn try_map<T, Q, E>(
+        self,
+        mut map_value: impl FnMut(S) -> Result<T, E>,
+        mut map_punctuation: impl FnMut(P) -> Result<Q, E>,
+    ) -> Result<Punctuated<T, Q>, E> {
+        let (pair, rest) = self.into_parts();
+        let (first, punctuation, second) = pair.into_parts();
+        Ok(Punctuated::from_pair_and_rest(
+            SeparatedPair::new(
+                map_value(first)?,
+                map_punctuation(punctuation)?,
+                map_value(second)?,
+            ),
+            rest.into_iter()
+                .map(|(punctuation, value)| Ok((map_punctuation(punctuation)?, map_value(value)?)))
+                .collect::<Result<Vec<_>, E>>()?,
+        ))
+    }
 }
 
 impl<S: Lex, P: Lex> Lex for Punctuated<S, P> {
     fn to_tokens(&self, output: &mut TokenStream) {
         self.first.to_tokens(output);
-        for (punctuation, value) in &self.rest {
+        for (punctuation, value) in self.pairs() {
             punctuation.to_tokens(output);
             value.to_tokens(output);
         }
@@ -199,7 +253,9 @@ where
 {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
         let first = S::parse(input)?;
-        let mut values = Self::from_single(first);
+        let punctuation = P::parse(input)?;
+        let second = S::parse(input)?;
+        let mut values = Self::new(first, punctuation, second);
         while input.peek().is_some_and(P::matches_token_tree) {
             let punctuation = P::parse(input)?;
             values.push(punctuation, S::parse(input)?);
@@ -208,16 +264,24 @@ where
     }
 }
 
+/// An iterator borrowing punctuation-value pairs from a [`Punctuated`] sequence.
+pub type Pairs<'a, S, P> = Chain<Once<&'a (P, S)>, slice::Iter<'a, (P, S)>>;
+
+/// An iterator mutably borrowing punctuation-value pairs from a [`Punctuated`] sequence.
+pub type PairsMut<'a, S, P> = Chain<Once<&'a mut (P, S)>, IterMut<'a, (P, S)>>;
+
 /// An iterator borrowing only the values of a [`Punctuated`] sequence.
-pub type Values<'a, S, P> =
-    Chain<Once<&'a S>, std::iter::Map<slice::Iter<'a, (P, S)>, fn(&(P, S)) -> &S>>;
+pub type Values<'a, S, P> = Chain<Once<&'a S>, Map<Pairs<'a, S, P>, fn(&(P, S)) -> &S>>;
 
 /// An iterator mutably borrowing only the values of a [`Punctuated`] sequence.
 pub type ValuesMut<'a, S, P> =
-    Chain<Once<&'a mut S>, std::iter::Map<slice::IterMut<'a, (P, S)>, fn(&mut (P, S)) -> &mut S>>;
+    Chain<Once<&'a mut S>, Map<PairsMut<'a, S, P>, fn(&mut (P, S)) -> &mut S>>;
+
+/// An iterator owning punctuation-value pairs from a [`Punctuated`] sequence.
+pub type IntoPairs<S, P> = Chain<Once<(P, S)>, IntoIter<(P, S)>>;
 
 /// An iterator owning only the values of a [`Punctuated`] sequence.
-pub type IntoValues<S, P> = Chain<Once<S>, std::iter::Map<vec::IntoIter<(P, S)>, fn((P, S)) -> S>>;
+pub type IntoValues<S, P> = Chain<Once<S>, Map<IntoPairs<S, P>, fn((P, S)) -> S>>;
 
 impl<S, P> IntoIterator for Punctuated<S, P> {
     type Item = S;
@@ -225,8 +289,8 @@ impl<S, P> IntoIterator for Punctuated<S, P> {
 
     fn into_iter(self) -> Self::IntoIter {
         once(self.first).chain(
-            self.rest
-                .into_iter()
+            once(self.second)
+                .chain(self.rest)
                 .map(rest_value::<S, P> as fn((P, S)) -> S),
         )
     }
@@ -250,14 +314,17 @@ impl<'a, S, P> IntoIterator for &'a mut Punctuated<S, P> {
     }
 }
 
+/// Handles rest value.
 fn rest_value<S, P>((_, value): (P, S)) -> S {
     value
 }
 
+/// Handles rest value ref.
 fn rest_value_ref<S, P>((_, value): &(P, S)) -> &S {
     value
 }
 
+/// Handles rest value mut.
 fn rest_value_mut<S, P>((_, value): &mut (P, S)) -> &mut S {
     value
 }
@@ -270,12 +337,19 @@ mod tests {
     fn a_sequence_is_nonempty_and_retains_separator_spans() {
         let source = "+,+";
         let values: Punctuated<Token![+], Token![,]> = crate::parse_fragment_str(source).unwrap();
-        let comma_span = values.rest()[0].0.expect_span();
+        let comma_span = values.pairs().next().unwrap().0.expect_span();
 
         assert_eq!(values.len(), 2);
         assert_eq!(values.token_len(), 3);
         assert_eq!(comma_span.text(), Some(","));
         assert_eq!(comma_span.bounds(), Some((1, 2)));
         assert_eq!(values.to_m2(), "+,+");
+    }
+
+    #[test]
+    fn a_single_value_is_not_a_punctuated_sequence() {
+        let result = crate::parse_fragment_str::<Punctuated<Token![+]>>("+");
+
+        assert!(result.is_err());
     }
 }

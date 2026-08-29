@@ -4,15 +4,29 @@ use proc_macro2::{Delimiter, Ident, Punct, Spacing, Span, TokenStream, TokenTree
 use quote::{format_ident, quote};
 use syn::parse::{Parse as SynParse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{Error, LitStr, Result, Token, braced, bracketed, parse_str, token};
+use syn::{Error, LitStr, Result, braced, bracketed, parse_str, token};
 
-use crate::roles::{ParseFlags, ParseInfo, Precedences};
+use crate::roles::{ParseFlags, ParseInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum OperatorKind {
     Prefix,
     Binary,
     Postfix,
+    Augmented,
+}
+
+impl OperatorKind {
+    pub(crate) const ALL: [Self; 4] = [Self::Prefix, Self::Binary, Self::Postfix, Self::Augmented];
+
+    pub(crate) const fn category_name(self) -> &'static str {
+        match self {
+            Self::Prefix => "PrefixOperator",
+            Self::Binary => "BinaryOperator",
+            Self::Postfix => "PostfixOperator",
+            Self::Augmented => "AugmentedOperator",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -28,7 +42,7 @@ struct TokenDeclaration {
 }
 
 impl TokenDeclaration {
-    fn parse(input: ParseStream<'_>, precedences: &Precedences) -> Result<Vec<Self>> {
+    fn parse(input: ParseStream<'_>) -> Result<Vec<Self>> {
         let mut patterns = Vec::new();
         while input.peek(token::Bracket) {
             let content;
@@ -45,7 +59,7 @@ impl TokenDeclaration {
         } else {
             ParseFlags::default()
         };
-        let parse = flags.resolve(input, precedences)?;
+        let parse = flags.resolve(input)?;
         patterns
             .into_iter()
             .map(|pattern| {
@@ -75,10 +89,10 @@ pub(crate) struct TokenDefinition {
     pub(crate) spelling: String,
     parse: Option<ParseInfo>,
     raw_kind: RawTokenKind,
+    augmented: bool,
 }
 
 pub(crate) struct TokenDefinitions {
-    precedences: Precedences,
     definitions: Vec<TokenDefinition>,
 }
 
@@ -91,32 +105,33 @@ impl TokenDefinitions {
         &self,
         kind: OperatorKind,
     ) -> impl Iterator<Item = &TokenDefinition> {
-        self.definitions
-            .iter()
-            .filter(move |definition| definition.parse.is_some_and(|rule| rule.is_operator(kind)))
+        self.definitions.iter().filter(move |x| match kind {
+            OperatorKind::Augmented => x.augmented,
+            _ => x.parse.is_some_and(|rule| rule.is_operator(kind)),
+        })
     }
 
     pub(crate) fn resolve(&self, pattern: &TokenStream) -> Result<Ident> {
         let spelling = token_spelling(pattern)?;
         self.definitions
             .iter()
-            .find(|definition| definition.spelling == spelling)
-            .map(|definition| definition.name.clone())
+            .find(|x| x.spelling == spelling)
+            .map(|x| x.name.clone())
             .ok_or_else(|| Error::new_spanned(pattern, "token was not declared in a token stage"))
     }
 
     pub(crate) fn spelling(&self, name: &Ident) -> Option<&str> {
         self.definitions
             .iter()
-            .find(|definition| definition.name == *name)
-            .map(|definition| definition.spelling.as_str())
+            .find(|x| x.name == *name)
+            .map(|x| x.spelling.as_str())
     }
 
     pub(crate) fn pattern(&self, name: &Ident) -> Option<&TokenStream> {
         self.definitions
             .iter()
-            .find(|definition| definition.name == *name)
-            .map(|definition| &definition.pattern)
+            .find(|x| x.name == *name)
+            .map(|x| &x.pattern)
     }
 
     pub(crate) fn variant_name(&self, name: &Ident) -> Ident {
@@ -127,45 +142,42 @@ impl TokenDefinitions {
 
     pub(crate) fn expand(&self, pretty: bool) -> TokenStream {
         let delimiters = expand_delimiters(pretty);
-        let precedence_names = self.precedences.iter().map(|(name, _)| name);
-        let precedence_values = self.precedences.iter().map(|(_, value)| value);
         let operator_spellings = self
             .definitions
             .iter()
-            .filter(|definition| definition.parse.is_some_and(ParseInfo::is_any_operator))
-            .map(|definition| definition.spelling.as_str());
+            .filter(|x| x.parse.is_some_and(ParseInfo::is_any_operator))
+            .map(|x| x.spelling.as_str());
         let postfix_operator_spellings = self
             .definitions
             .iter()
-            .filter(|definition| {
-                definition
-                    .parse
+            .filter(|x| {
+                x.parse
                     .is_some_and(|rule| rule.is_operator(OperatorKind::Postfix))
             })
-            .map(|definition| definition.spelling.as_str());
+            .map(|x| x.spelling.as_str());
+        let augmented_operator_spellings = self
+            .definitions
+            .iter()
+            .filter(|x| x.augmented)
+            .map(|x| x.spelling.as_str());
         let keyword_spellings = self
             .definitions
             .iter()
-            .filter(|definition| {
-                definition.raw_kind == RawTokenKind::Ident
-                    && !definition.parse.is_some_and(ParseInfo::is_any_operator)
+            .filter(|x| {
+                x.raw_kind == RawTokenKind::Ident
+                    && !x.parse.is_some_and(ParseInfo::is_any_operator)
             })
-            .map(|definition| definition.spelling.as_str());
+            .map(|x| x.spelling.as_str());
         let word_token_spellings = self
             .definitions
             .iter()
-            .filter(|definition| definition.raw_kind == RawTokenKind::Ident)
-            .map(|definition| definition.spelling.as_str());
+            .filter(|x| x.raw_kind == RawTokenKind::Ident)
+            .map(|x| x.spelling.as_str());
         let punctuation_spellings = self
             .definitions
             .iter()
-            .map(|definition| definition.spelling.as_str())
-            .filter(|spelling| {
-                !spelling.is_empty()
-                    && spelling
-                        .chars()
-                        .all(|character| !character.is_ascii_alphanumeric() && character != ' ')
-            });
+            .map(|x| x.spelling.as_str())
+            .filter(|s| !s.is_empty() && s.chars().all(|c| !c.is_ascii_alphanumeric() && c != ' '));
         let definitions = self.definitions.iter().map(|definition| {
             let name = &definition.name;
             let type_name = name;
@@ -240,7 +252,7 @@ impl TokenDefinitions {
                 #[derive(Debug, Clone, PartialEq, Eq, ::m2_syn::Spanned)]
                 #[doc = concat!("The typed `Token![", #spelling, "]` atom.")]
                 pub struct #type_name {
-                    raw: ::std::boxed::Box<::m2_syn::TokenTree>,
+                    raw: qf!(Box<::m2_syn::TokenTree>),
                     trailing_trivia: ::m2_syn::TrailingTrivia,
                 }
 
@@ -249,7 +261,7 @@ impl TokenDefinitions {
                 pub fn #type_name<S: ::m2_syn::Spanned>(span: S) -> #type_name {
                     let span = span.expect_span();
                     #type_name {
-                        raw: ::std::boxed::Box::new(#raw_new),
+                        raw: <qf!(Box<_>)>::new(#raw_new),
                         trailing_trivia: ::m2_syn::TrailingTrivia::default(),
                     }
                 }
@@ -261,9 +273,9 @@ impl TokenDefinitions {
                         #raw_matches
                     }
 
-                    fn from_token_tree(token: ::m2_syn::TokenTree) -> ::std::option::Option<Self> {
+                    fn from_token_tree(token: ::m2_syn::TokenTree) -> qf!(Option<Self>) {
                         Self::matches_token_tree(&token).then_some(Self {
-                            raw: ::std::boxed::Box::new(token),
+                            raw: <qf!(Box<_>)>::new(token),
                             trailing_trivia: ::m2_syn::TrailingTrivia::default(),
                         })
                     }
@@ -322,7 +334,7 @@ impl TokenDefinitions {
                         }
                         let span = node.expect_span();
                         Ok(#type_name {
-                            raw: ::std::boxed::Box::new(#raw_from_span),
+                            raw: <qf!(Box<_>)>::new(#raw_from_span),
                             trailing_trivia: ::m2_syn::TrailingTrivia::default(),
                         })
                     }
@@ -344,14 +356,16 @@ impl TokenDefinitions {
         quote! {
             #delimiters
 
-            #(pub(crate) const #precedence_names: u8 = #precedence_values;)*
-
             pub(crate) const GENERATED_OPERATOR_SPELLINGS: &[&str] = &[
                 #(#operator_spellings),*
             ];
 
             pub(crate) const GENERATED_POSTFIX_OPERATOR_SPELLINGS: &[&str] = &[
                 #(#postfix_operator_spellings),*
+            ];
+
+            pub(crate) const GENERATED_AUGMENTED_OPERATOR_SPELLINGS: &[&str] = &[
+                #(#augmented_operator_spellings),*
             ];
 
             pub(crate) const GENERATED_KEYWORD_SPELLINGS: &[&str] = &[
@@ -394,7 +408,7 @@ impl TokenDefinitions {
         }
     }
 
-    fn new(precedences: Precedences, tokens: Vec<TokenDeclaration>) -> Result<Self> {
+    fn new(tokens: Vec<TokenDeclaration>) -> Result<Self> {
         let mut definitions = Vec::<TokenDefinition>::new();
         // `x += y` binds exactly like the assignment it abbreviates, so every
         // augmented form takes its rule from the `=` declaration.
@@ -419,6 +433,7 @@ impl TokenDefinitions {
                     spelling: token.spelling.clone(),
                     parse: token.parse,
                     raw_kind,
+                    augmented: false,
                 },
             )?;
 
@@ -439,15 +454,13 @@ impl TokenDefinitions {
                         spelling: format!("{}=", token.spelling),
                         parse: Some(augmented),
                         raw_kind: RawTokenKind::Punct,
+                        augmented: true,
                     },
                 )?;
             }
         }
 
-        Ok(Self {
-            precedences,
-            definitions,
-        })
+        Ok(Self { definitions })
     }
 }
 
@@ -601,64 +614,29 @@ fn name_span(name: &str, definitions: &[TokenDefinition]) -> Span {
 
 impl SynParse for TokenDefinitions {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let precedences = parse_precedence_stage(input)?;
-        let tokens = parse_token_stage(input, &precedences)?;
-        Self::new(precedences, tokens)
+        let tokens = parse_token_stage(input)?;
+        Self::new(tokens)
     }
 }
 
-fn parse_precedence_stage(input: ParseStream<'_>) -> Result<Precedences> {
-    parse_stage_name(input, "precedence", true)?;
-    let content;
-    braced!(content in input);
-    let mut values = Vec::new();
-    while !content.is_empty() {
-        let name: Ident = content.parse()?;
-        content.parse::<Token![=]>()?;
-        let value = content.parse::<syn::LitInt>()?.base10_parse()?;
-        if !name.to_string().starts_with("PREC_") {
-            return Err(Error::new(
-                name.span(),
-                "precedence names must start with `PREC_`",
-            ));
-        }
-        if values.iter().any(|(existing, _)| existing == &name) {
-            return Err(Error::new(name.span(), "duplicate precedence name"));
-        }
-        values.push((name, value));
-        if content.peek(Token![,]) {
-            content.parse::<Token![,]>()?;
-        } else if !content.is_empty() {
-            return Err(content.error("expected `,` between precedence declarations"));
-        }
-    }
-    Ok(values)
-}
-
-fn parse_token_stage(
-    input: ParseStream<'_>,
-    precedences: &Precedences,
-) -> Result<Vec<TokenDeclaration>> {
-    parse_stage_name(input, "tokens", false)?;
+fn parse_token_stage(input: ParseStream<'_>) -> Result<Vec<TokenDeclaration>> {
+    parse_stage_name(input, "tokens")?;
     let content;
     braced!(content in input);
     let mut declarations = Vec::new();
     while !content.is_empty() {
-        declarations.extend(TokenDeclaration::parse(&content, precedences)?);
+        declarations.extend(TokenDeclaration::parse(&content)?);
     }
     Ok(declarations)
 }
 
-fn parse_stage_name(input: ParseStream<'_>, expected: &str, colon: bool) -> Result<()> {
+fn parse_stage_name(input: ParseStream<'_>, expected: &str) -> Result<()> {
     let name: Ident = input.parse()?;
     if name != expected {
         return Err(Error::new(
             name.span(),
             format!("expected `{expected}` token stage"),
         ));
-    }
-    if colon {
-        input.parse::<Token![:]>()?;
     }
     Ok(())
 }
@@ -722,14 +700,22 @@ fn raw_token_kind(spelling: &str) -> RawTokenKind {
 }
 
 fn token_name(pattern: &TokenStream) -> Result<String> {
-    let base = if pattern.is_empty() {
+    let spelling = token_spelling(pattern)?;
+    let base = if spelling.is_empty() {
         "Adj".to_owned()
+    } else if spelling == "(*)" {
+        "Graded".to_owned()
+    } else if spelling
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic())
+        && spelling
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        word_name(&spelling)
     } else {
-        pattern
-            .clone()
-            .into_iter()
-            .map(token_tree_name)
-            .collect::<Result<String>>()?
+        spelling.chars().map(punctuation_name).collect()
     };
 
     Ok(format!("_{base}"))
@@ -740,32 +726,17 @@ pub(crate) fn token_type_name(pattern: &TokenStream) -> Result<Ident> {
     ident(&token_name(pattern)?, Span::call_site())
 }
 
-fn token_tree_name(tree: TokenTree) -> Result<String> {
-    match tree {
-        TokenTree::Group(group) => {
-            if group.delimiter() != Delimiter::Parenthesis {
-                return Err(Error::new(group.span(), "groups are not valid tokens"));
-            }
-            let mut inner = group.stream().into_iter();
-            match (inner.next(), inner.next()) {
-                (Some(TokenTree::Punct(punctuation)), None) if punctuation.as_char() == '*' => {
-                    Ok("Graded".to_owned())
-                }
-                _ => Err(Error::new(
-                    group.span(),
-                    "only `(*)` is supported as a grouped token",
-                )),
-            }
-        }
-        TokenTree::Ident(ident) if ident == "_" => Ok(punctuation_name('_')?.to_owned()),
-        TokenTree::Ident(ident) => Ok(word_name(&ident.to_string())),
-        TokenTree::Literal(literal) => parse_str::<LitStr>(&literal.to_string())
-            .map_err(|_| Error::new(literal.span(), "token literals must be string literals"))?
-            .value()
-            .chars()
-            .map(punctuation_name)
-            .collect(),
-        TokenTree::Punct(punctuation) => punctuation_name(punctuation.as_char()).map(str::to_owned),
+fn grouped_token_spelling(group: &proc_macro2::Group) -> Result<&'static str> {
+    if group.delimiter() != Delimiter::Parenthesis {
+        return Err(Error::new(group.span(), "groups are not valid tokens"));
+    }
+    let mut inner = group.stream().into_iter();
+    match (inner.next(), inner.next()) {
+        (Some(TokenTree::Punct(punctuation)), None) if punctuation.as_char() == '*' => Ok("(*)"),
+        _ => Err(Error::new(
+            group.span(),
+            "only `(*)` is supported as a grouped token",
+        )),
     }
 }
 
@@ -798,9 +769,7 @@ fn token_spelling(pattern: &TokenStream) -> Result<String> {
     for tree in pattern.clone() {
         match tree {
             TokenTree::Group(group) => {
-                if token_tree_name(TokenTree::Group(group.clone()))? == "Graded" {
-                    spelling.push_str("(*)");
-                }
+                spelling.push_str(grouped_token_spelling(&group)?);
             }
             TokenTree::Ident(ident) => spelling.push_str(&ident.to_string()),
             TokenTree::Literal(literal) => {
@@ -859,39 +828,36 @@ fn ident(name: &str, span: Span) -> Result<Ident> {
     parse_str::<Ident>(name).map_err(|_| Error::new(span, "generated an invalid token name"))
 }
 
-fn punctuation_name(character: char) -> Result<&'static str> {
+fn punctuation_name(character: char) -> String {
     match character {
-        '.' => Ok("Dot"),
-        ',' => Ok("Cma"),
-        ';' => Ok("Scl"),
-        ':' => Ok("Col"),
-        '#' => Ok("Hsh"),
-        '@' => Ok("Att"),
-        '$' => Ok("Dlr"),
-        '%' => Ok("Mod"),
-        '^' => Ok("Crt"),
-        '&' => Ok("Amp"),
-        '*' => Ok("Mul"),
-        '+' => Ok("Add"),
-        '-' => Ok("Sub"),
-        '=' => Ok("Eql"),
-        '<' => Ok("Lst"),
-        '>' => Ok("Gst"),
-        '!' => Ok("Bng"),
-        '?' => Ok("Qsm"),
-        '~' => Ok("Tld"),
-        '|' => Ok("Pip"),
-        '/' => Ok("Slh"),
-        '_' => Ok("Ubs"),
-        '\\' => Ok("Bsl"),
-        '`' => Ok("Btk"),
-        '·' => Ok("Cdt"),
-        '⊠' => Ok("Box"),
-        '⧢' => Ok("Sfp"),
-        _ => Err(Error::new(
-            Span::call_site(),
-            format!("unsupported punctuation character `{character}`"),
-        )),
+        '.' => "Dot".to_owned(),
+        ',' => "Cma".to_owned(),
+        ';' => "Scl".to_owned(),
+        ':' => "Col".to_owned(),
+        '#' => "Hsh".to_owned(),
+        '@' => "Att".to_owned(),
+        '$' => "Dlr".to_owned(),
+        '%' => "Mod".to_owned(),
+        '^' => "Crt".to_owned(),
+        '&' => "Amp".to_owned(),
+        '*' => "Mul".to_owned(),
+        '+' => "Add".to_owned(),
+        '-' => "Sub".to_owned(),
+        '=' => "Eql".to_owned(),
+        '<' => "Lst".to_owned(),
+        '>' => "Gst".to_owned(),
+        '!' => "Bng".to_owned(),
+        '?' => "Qsm".to_owned(),
+        '~' => "Tld".to_owned(),
+        '|' => "Pip".to_owned(),
+        '/' => "Slh".to_owned(),
+        '_' => "Ubs".to_owned(),
+        '\\' => "Bsl".to_owned(),
+        '`' => "Btk".to_owned(),
+        '·' => "Cdt".to_owned(),
+        '⊠' => "Box".to_owned(),
+        '⧢' => "Sfp".to_owned(),
+        _ => format!("U{:06X}", character as u32),
     }
 }
 
@@ -904,7 +870,6 @@ mod tests {
 
     fn declarations() -> TokenDefinitions {
         parse2(quote! {
-            precedence: {}
             tokens {
                 [=] { infix } (14, R)
                 [+] { pref, bin, aug } (50, L)
@@ -956,6 +921,10 @@ mod tests {
             .operator_variants(OperatorKind::Postfix)
             .map(|definition| definition.name.to_string())
             .collect::<BTreeSet<_>>();
+        let augmented = definitions
+            .operator_variants(OperatorKind::Augmented)
+            .map(|definition| definition.name.to_string())
+            .collect::<BTreeSet<_>>();
 
         assert_eq!(prefix, BTreeSet::from(["_Add".into(), "_Not".into()]));
         assert_eq!(
@@ -969,6 +938,10 @@ mod tests {
             ])
         );
         assert_eq!(postfix, BTreeSet::from(["_Bng".into(), "_Graded".into()]));
+        assert_eq!(
+            augmented,
+            BTreeSet::from(["_AddEql".into(), "_BslEql".into()])
+        );
     }
 
     #[test]
@@ -1015,6 +988,33 @@ mod tests {
     }
 
     #[test]
+    fn token_type_names_normalize_mixed_literal_and_rust_fragments() {
+        let names = [
+            quote!(!=),
+            quote!(! =),
+            quote!("!="),
+            quote!("!" =),
+            quote!(!"="),
+            quote!("!" "="),
+        ]
+        .map(|pattern| token_type_name(&pattern).unwrap().to_string());
+
+        assert!(names.iter().all(|name| name == "_BngEql"));
+        assert_eq!(token_type_name(&quote!("n" ot)).unwrap(), "_Not");
+    }
+
+    #[test]
+    fn string_fragments_name_characters_rust_cannot_tokenize() {
+        let definitions = parse2::<TokenDefinitions>(quote! {
+            tokens { ["→"] }
+        })
+        .unwrap();
+
+        assert_eq!(definitions.iter().next().unwrap().name, "_U002192");
+        assert_eq!(token_type_name(&quote!("→")).unwrap(), "_U002192");
+    }
+
+    #[test]
     fn word_tokens_are_operators_only_when_tagged() {
         let definitions = declarations();
         let keywords = definitions
@@ -1035,19 +1035,21 @@ mod tests {
     #[test]
     fn precedence_triple_rejects_non_numeric_slots() {
         let error = parse2::<TokenDefinitions>(quote! {
-            precedence: {}
             tokens { [+] { bin } (PREC_ADDITION, R) }
         })
         .err()
         .expect("a named precedence value must be rejected");
 
-        assert!(error.to_string().contains("is not a declared precedence"));
+        assert!(
+            error
+                .to_string()
+                .contains("precedence slots must be integer literals")
+        );
     }
 
     #[test]
     fn operator_and_postfix_actions_cannot_combine() {
         let error = parse2::<TokenDefinitions>(quote! {
-            precedence: {}
             tokens { [+] { bin, post } (50, L) }
         })
         .err()

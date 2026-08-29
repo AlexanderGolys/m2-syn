@@ -1,8 +1,10 @@
+//! Integration tests for native realtime.
+
 use std::sync::Arc;
 
 use m2_syn::{
-    Lex, LexErrorKind, NativeCellBoundary, NativeCellState, NativeParseError, NativeRealtimeParser,
-    Spanned, TextEdit, TokenStream, TokenTree,
+    CellTokenTree, Lex, LexErrorKind, NativeCellBoundary, NativeCellState, NativeParseError,
+    NativeRealtimeParser, Spanned, TextEdit,
 };
 
 #[test]
@@ -137,12 +139,12 @@ fn an_invalid_edit_is_transactional() {
     assert_eq!(parser.cells()[0].syntax().unwrap().to_m2(), "a b");
 }
 
-fn count_adj(tokens: &TokenStream) -> usize {
+fn count_adj(tokens: &[CellTokenTree]) -> usize {
     tokens
         .iter()
         .map(|token| match token {
-            TokenTree::Group(group) => count_adj(group.stream()),
-            TokenTree::Punct(punctuation) if punctuation.text().is_empty() => 1,
+            CellTokenTree::Group(group) => count_adj(group.stream()),
+            CellTokenTree::Adj(_) => 1,
             _ => 0,
         })
         .sum()

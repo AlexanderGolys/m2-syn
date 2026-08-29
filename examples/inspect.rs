@@ -5,6 +5,7 @@ use std::fs;
 
 use m2_syn::ParsedFile;
 
+/// The SAMPLE sample value.
 const SAMPLE: &str = "f = (x, y) -> if x then {y,} else {,x}\nf 1 2";
 
 fn main() -> Result<(), Box<dyn Error>> {

@@ -21,7 +21,11 @@ macro_rules! syntax {
     };
 }
 
-/// Names the token type generated for a spelling, as in `Token![;]`.
+/// Names the token type generated for an M2 spelling.
+///
+/// Rust spacing and string-fragment boundaries do not affect the result, so
+/// `Token![!=]`, `Token![! =]`, `Token!["!="]`, and mixed forms name the same
+/// type. String fragments can contain characters that Rust cannot tokenize.
 #[macro_export]
 macro_rules! Token {
     [$($spelling:tt)*] => {

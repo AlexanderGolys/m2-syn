@@ -1,3 +1,5 @@
+//! Integration tests for native cell parser.
+
 use std::sync::Arc;
 
 use m2_syn::{Lex, LexErrorKind, NativeCellParser, NativeCellState, NativeParseError, Spanned};

@@ -1,3 +1,5 @@
+//! Integration tests for syntax wrappers.
+
 use m2_syn::{
     Body, Delimited, Delimiter, FragmentParseError, Lex, LiteralKind, LiteralToken, Parse,
     ParseStream, Punctuated, Source, Span, Spanned, Terminated, TokenParseError, TokenStream,
@@ -112,17 +114,14 @@ fn delimiter_atoms_themselves_parse_and_emit() {
 }
 
 #[test]
-fn punct_macro_names_and_constructs_parseable_sequences() {
+fn punct_macro_names_and_constructs_genuinely_punctuated_sequences() {
     type Values = m2_syn::punc!(Value);
-    type ValueComma = m2_syn::PunctPair<Value, m2_syn::Token![,]>;
+    type ValueComma = m2_syn::SeparatedPair<Value, m2_syn::Token![,]>;
 
     assert_syntax::<Values>();
     assert_syntax::<ValueComma>();
     assert_syntax::<Terminated<Values>>();
     assert_syntax::<Body<Values>>();
-
-    let one: Values = m2_syn::punc!(value integer("1"));
-    round_trip(one, "1");
 
     let comma = m2_syn::Token![,](synthetic_span());
     let two: Values = m2_syn::punc!(pairs integer("1"); comma => integer("2"));
@@ -134,6 +133,8 @@ fn punct_macro_names_and_constructs_parseable_sequences() {
         integer("2"),
     );
     round_trip(pair, "1,2");
+
+    assert!(parse_fragment_str::<Values>("1").is_err());
 }
 
 impl Parse for Value {
@@ -203,21 +204,21 @@ fn semicolons_require_a_nonempty_statement_on_their_left() {
         );
     }
 
-    let body = parse_valid_fragment::<Parenthesized>("(1,2;3)").contents;
+    let body = parse_valid_fragment::<Parenthesized>("(1,2;3,4)").contents;
     assert_eq!(body.statements.len(), 1);
     assert_eq!(body.statements[0].statement.len(), 2);
-    assert!(body.tail.is_some());
-    assert_eq!(body.to_m2(), "1,2;3");
+    assert_eq!(body.tail.as_ref().map(Punctuated::len), Some(2));
+    assert_eq!(body.to_m2(), "1,2;3,4");
 }
 
 #[test]
 fn delimited_bodies_parse_emit_and_reparse() {
     type Parenthesized = Delimited<Body<Punctuated<Value>>, Delimiter![()]>;
 
-    let parsed: Parenthesized = parse_valid_fragment("(1,2;3)");
+    let parsed: Parenthesized = parse_valid_fragment("(1,2;3,4)");
     let emitted = parsed.to_token_stream();
     let reparsed: Parenthesized = parse2(emitted.clone()).unwrap();
 
-    assert_eq!(emitted.to_string(), "(1,2;3)");
+    assert_eq!(emitted.to_string(), "(1,2;3,4)");
     assert_eq!(reparsed.to_m2(), parsed.to_m2());
 }

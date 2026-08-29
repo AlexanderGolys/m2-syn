@@ -70,24 +70,25 @@ The frontend has one lexical representation, one cell-partitioned
 representation, and one generated typed graph:
 
 ```text
-source --Lex--> TokenStream --Tokenize--> CellStream --Parser--> typed CST
-                       ^                       ^                         |
-                       |                       +--------Tokenize---------+
-                       +--------------------------Lex--------------------+
+source --Lex--> TokenStream --Tokenize--> CellStream<CellTokenStream> --Parser--> typed CST
+                       ^                                  ^                         |
+                       |                                  +--------Tokenize---------+
+                       +-------------------------------------Lex---------------------+
 ```
 
-`TokenStream` is the raw representation. It is flat at the top level and
+`TokenStream` is the lexical representation. It is flat at the top level and
 recursive only through balanced `Group` token trees. `Tokenize` partitions it
-into independently parseable cells and inserts inferred `Adj` punctuation.
-`CellStream` expresses end-of-cell and end-of-file structurally rather than as
-virtual token variants. Both parser backends consume this same representation.
+into independently parseable `CellTokenStream` values and inserts inferred
+`CellTokenTree::Adj` markers recursively. `CellStream` collects those partially
+parsed cells and expresses end-of-cell and end-of-file structurally rather than
+as virtual token variants. Converting a framed cell back to `TokenStream`
+removes the non-lexical adjacency markers. Both parser backends consume the
+framed representation.
 
 These explicit phases are also the intended macro seams. A future
 function-like macro may consume and produce the less constrained
 `TokenStream` before tokenisation. Transformations that should preserve normal
-M2 cell structure can instead use `CellStream`. Macro expansion itself is not
-implemented yet; the representations do not require it to be hidden inside a
-parser backend later.
+M2 cell structure can instead implement `ProcMacro` over `CellStream`.
 
 `Parse` and `Lex` are the two directions at the typed boundary. For a
 typed value `c`, parsing its emission should recover `c`. Emitting a parsed raw
@@ -128,7 +129,7 @@ The ownership boundaries are intentionally narrow:
 | `parser/parse.rs` | the per-cell token cursor and parser traits |
 | `parser/native.rs` | precedence and typed-node construction |
 | `parser/realtime.rs` | retained native cells and forward reframing |
-| `cst/` | the external-CST migration adapter |
+| `migration/` | the external-CST migration adapter |
 | `schema/nodes.rs` | the compact grammar and token parser metadata declaration |
 | `m2-syn-macros/src/` | generation of tokens, nodes, traversal, parsing, and emission |
 
@@ -415,10 +416,10 @@ the target directly.
 The target-owned `Parse` trait is the dual of `Lex`: `parse2::<T>` consumes
 one complete `TokenStream` as `T`. Generated `Token![..]` atoms, raw token
 categories, token streams, boxes, delimiters, comma-punctuated collections, and
-terminated bodies implement it. `ParseStream` shares immutable token storage
-through `Rc<TokenStream>`; end-of-input is cursor state rather
-than a synthetic token. A `fork` has an independent index and `advance_to`
-explicitly commits successful speculation.
+terminated bodies implement it. `ParseStream` clones the persistent
+`TokenStream` handle, so forks share its immutable backing allocation;
+end-of-input is cursor state rather than a synthetic token. A `fork` has an
+independent index and `advance_to` explicitly commits successful speculation.
 `parse_quote_m2!` composes quoting with type-inferred parsing.
 
 `Lex::to_token_stream` is the lexical projection, while `Tokenize` projects

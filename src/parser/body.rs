@@ -78,6 +78,7 @@ impl<S: Parse> Parse for Body<S> {
     }
 }
 
+/// Handles reject empty statement.
 fn reject_empty_statement(input: &ParseStream) -> Result<(), TokenParseError> {
     let Some(token) = input
         .peek()

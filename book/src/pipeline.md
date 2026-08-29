@@ -1,18 +1,22 @@
 # Representation pipeline
 
-The frontend has one raw syntax representation and one generated typed graph:
+The frontend has a lexical representation, a framed cell representation, and
+one generated typed graph:
 
 ```text
-source --lex--> TokenStream --NativeParser-----------> typed CST
-   |                                                     |
-   +--> Tree-sitter CST --Reconstruct--------------------+
-                                                         |
-source <--Display-- TokenStream <---------Lex-------------+
+source --Lex--> TokenStream --Tokenize--> CellStream<CellTokenStream> --Parser--> typed CST
+   |                                                                            |
+   +------------------> Tree-sitter CST --------------------Migrate--------------+
+                                                                                |
+source <-----------------------Display/Lex---------------------------------------+
 ```
 
-`TokenStream` is the only raw representation. It is flat at the top level and
-recursive only through balanced `Group` token trees. The native parser decides
-top-level cell boundaries after lexing.
+`TokenStream` contains only lexical token trees. `Tokenize` performs the first
+grammar-aware step: it confirms top-level cell boundaries and recursively adds
+`CellTokenTree::Adj` markers. Each resulting `CellTokenStream` is therefore a
+partially parsed cell, and `CellStream` records EOC and EOF structurally through
+the sequence rather than virtual tokens. Converting a cell back into a raw
+`TokenStream` removes adjacency recursively.
 
 `Parse` and `Lex` are the two directions at the typed boundary. For a
 typed value `c`, parsing its emission should recover `c`. Emitting a parsed raw
@@ -24,9 +28,10 @@ Lex(Parse(tokens)) = normalize(tokens)
 ```
 
 The two parser backends differ only in how they reach the generated graph.
-`NativeParser` constructs it directly from the shared token cursor.
+`NativeParser` consumes framed cells and constructs it directly from the shared
+token cursor.
 `TreeSitterParser` lowers Tree-sitter's concrete grammar layout directly and
-uses `ExternalCstNode` plus generated `Reconstruct` for compatible leaves,
+uses `ExternalCstNode` plus generated `Migrate` for compatible leaves,
 operators, and tokens. It never routes the source through `NativeParser`.
 Those adapter traits are not an alternative graph or a traversal API; typed
 traversal is generated as `Visit`, `VisitMut`, and `Fold`.
@@ -37,9 +42,10 @@ The ownership boundaries are intentionally narrow:
 | --- | --- |
 | `lex/token_stream.rs` | raw atoms and recursive groups |
 | `lex/lexer.rs` | byte recognition and delimiter balancing |
+| `lex/cell_stream.rs` | framed cells, inferred adjacency, and cell boundaries |
 | `parser/parse.rs` | the shared token cursor and parser traits |
-| `parser/native.rs` | cell boundaries, precedence, and typed-node construction |
-| `cst/` | the external-CST reconstruction adapter |
+| `parser/native.rs` | precedence and typed-node construction |
+| `migration/` | the external-CST reconstruction adapter |
 | `schema/nodes.rs` | the compact grammar and token parser metadata declaration |
 | `m2-syn-macros/src/` | generation of tokens, nodes, traversal, parsing, and emission |
 

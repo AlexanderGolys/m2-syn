@@ -4,7 +4,7 @@ members = ["m2-syn-macros"]
 
 [package]
 name = "m2-syn"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Typed syntax trees, traversal, and parser adapters for Macaulay2"
 license = "GPL-3.0-only"
@@ -26,9 +26,10 @@ tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-macaulay2"]
 walk = []
 
 [dependencies]
-m2-syn-macros = { version = "0.3.0", path = "m2-syn-macros" }
+m2-syn-macros = { version = "0.4.0", path = "m2-syn-macros" }
 tree-sitter = { version = "0.26.12", optional = true }
 tree-sitter-macaulay2 = { version = "6.0.0", optional = true }
+these-macros-should-be-illegal = { version = "0.4.0" }
 
 [[example]]
 name = "hierarchy_visit_emit"
@@ -43,11 +44,19 @@ name = "live_parser"
 required-features = ["pretty"]
 
 [[example]]
+name = "literal_return_types"
+required-features = ["walk"]
+
+[[example]]
 name = "type_inference"
 required-features = ["tree-sitter", "walk"]
 
 [[test]]
 name = "generated_api"
+required-features = ["tree-sitter", "walk"]
+
+[[test]]
+name = "expression_specializations"
 required-features = ["tree-sitter", "walk"]
 
 [[test]]
@@ -57,6 +66,10 @@ required-features = ["pretty", "tree-sitter"]
 [[test]]
 name = "parser_api"
 required-features = ["tree-sitter"]
+
+[[test]]
+name = "proc_macro"
+required-features = ["walk"]
 
 [[test]]
 name = "realtime_parser"
@@ -69,3 +82,9 @@ required-features = ["tree-sitter"]
 [[test]]
 name = "tree_sitter_reconstruction"
 required-features = ["tree-sitter"]
+
+[lints.rust]
+missing_docs = "deny"
+
+[lints.clippy]
+missing_docs_in_private_items = "deny"

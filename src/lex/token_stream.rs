@@ -1,35 +1,37 @@
 use std::fmt::{Display, Formatter, Result};
+use std::mem::take;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::vec::IntoIter;
 
 use crate::{Source, Span, Spanned, lexer::punctuation_would_merge};
+use these_macros_should_be_illegal::strutuct;
 
 #[path = "token_stream/delim.rs"]
 pub mod delim;
 use delim::{Delimiter, DelimiterKind};
 
 #[path = "token_stream/punct.rs"]
+/// Internal support for punct.
 mod punct;
 pub use punct::Punct;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-/// The lexical category of a literal token.
-pub enum LiteralKind {
-    /// A double-quoted string.
-    String,
-    /// A slash-delimited raw string.
-    RawString,
-    /// An integer number.
-    Integer,
-    /// A floating-point number.
-    Float,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// A literal spelling together with its lexical category and source span.
-pub struct LiteralToken {
+strutuct! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    /// A literal spelling together with its lexical category and source span.
+    LiteralToken
     /// The literal's lexical category.
-    pub kind: LiteralKind,
+    #[derive(Copy, Hash)]
+    kind: LiteralKind {
+        /// A double-quoted string.
+        String,
+        /// A slash-delimited raw string.
+        RawString,
+        /// An integer number.
+        Integer,
+        /// A floating-point number.
+        Float,
+    },
     span: Span,
     leading_trivia: LeadingTrivia,
     trailing_trivia: TrailingTrivia,
@@ -101,10 +103,15 @@ impl Terminal for LiteralToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// An identifier spelling and its source span.
 pub struct IdentToken {
+    /// The span.
     span: Span,
+    /// The source qualifier.
     source_qualifier: Option<Span>,
+    /// The index qualifier.
     index_qualifier: Option<Span>,
+    /// The leading trivia.
     leading_trivia: LeadingTrivia,
+    /// The trailing trivia.
     trailing_trivia: TrailingTrivia,
 }
 
@@ -188,9 +195,13 @@ impl Terminal for IdentToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A delimited raw token stream.
 pub struct TokenGroup {
+    /// The delimiter.
     delimiter: Delimiter,
+    /// The stream.
     stream: TokenStream,
+    /// The leading trivia.
     leading_trivia: LeadingTrivia,
+    /// The trailing trivia.
     trailing_trivia: TrailingTrivia,
 }
 
@@ -235,6 +246,31 @@ impl TokenGroup {
     pub fn into_stream(self) -> TokenStream {
         self.stream
     }
+
+    /// Converts the value into parts.
+    pub(crate) fn into_parts(self) -> (Delimiter, TokenStream, LeadingTrivia, TrailingTrivia) {
+        (
+            self.delimiter,
+            self.stream,
+            self.leading_trivia,
+            self.trailing_trivia,
+        )
+    }
+
+    /// Creates the value from parts.
+    pub(crate) fn from_parts(
+        delimiter: Delimiter,
+        stream: TokenStream,
+        leading_trivia: LeadingTrivia,
+        trailing_trivia: TrailingTrivia,
+    ) -> Self {
+        Self {
+            delimiter,
+            stream,
+            leading_trivia,
+            trailing_trivia,
+        }
+    }
 }
 
 impl Lex for TokenGroup {
@@ -273,7 +309,9 @@ pub enum TriviaKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Spanned)]
 /// A comment retained alongside a lexical atom.
 pub struct Trivia {
+    /// The kind.
     kind: TriviaKind,
+    /// The span.
     span: Span,
 }
 
@@ -421,7 +459,9 @@ impl Lex for LeadingTrivia {
 /// their right. Inner comments occur within the item, including delimited
 /// block comments and `--` comments following code on the same line.
 pub struct CommentTrivia {
+    /// The outer.
     outer: Vec<Trivia>,
+    /// The inner.
     inner: Vec<Trivia>,
 }
 
@@ -441,12 +481,13 @@ impl CommentTrivia {
         self.outer.is_empty() && self.inner.is_empty()
     }
 
+    /// Takes from cell.
     pub(crate) fn take_from_cell(tokens: &mut TokenStream) -> Self {
         let mut outer = Vec::new();
-        if let Some(first) = tokens.0.first_mut() {
+        if let Some(first) = tokens.data_mut().trees.first_mut() {
             let leading = first.leading_trivia_mut().as_mut_vec();
             let mut retained = Vec::with_capacity(leading.len());
-            for trivia in std::mem::take(leading) {
+            for trivia in take(leading) {
                 if trivia.kind() == TriviaKind::LineComment {
                     outer.push(trivia);
                 } else {
@@ -461,6 +502,7 @@ impl CommentTrivia {
         Self { outer, inner }
     }
 
+    /// Takes inner.
     pub(crate) fn take_inner(tokens: &mut TokenStream) -> Self {
         let mut inner = take_stream_comments(tokens);
         sort_comments(&mut inner);
@@ -470,6 +512,7 @@ impl CommentTrivia {
         }
     }
 
+    /// Handles append.
     pub(crate) fn append(&mut self, mut comments: Self) {
         self.outer.append(&mut comments.outer);
         self.inner.append(&mut comments.inner);
@@ -490,20 +533,23 @@ impl CommentTrivia {
     }
 }
 
+/// Handles sort comments.
 fn sort_comments(comments: &mut [Trivia]) {
     comments.sort_by_key(|comment| comment.span().start().unwrap_or(usize::MAX));
 }
 
+/// Takes stream comments.
 fn take_stream_comments(stream: &mut TokenStream) -> Vec<Trivia> {
-    let mut comments = std::mem::take(&mut stream.1).into_vec();
-    for token in &mut stream.0 {
-        comments.extend(std::mem::take(token.leading_trivia_mut()).into_vec());
+    let data = stream.data_mut();
+    let mut comments = take(&mut data.prefix).into_vec();
+    for token in &mut data.trees {
+        comments.extend(take(token.leading_trivia_mut()).into_vec());
         if let TokenTree::Group(group) = token {
             comments.extend(take_stream_comments(group.stream_mut()));
         }
-        comments.extend(std::mem::take(token.trailing_trivia_mut()).into_vec());
+        comments.extend(take(token.trailing_trivia_mut()).into_vec());
     }
-    comments.extend(std::mem::take(&mut stream.2).into_vec());
+    comments.extend(take(&mut data.suffix).into_vec());
     comments
 }
 
@@ -538,6 +584,7 @@ pub trait Terminal: Spanned {
     }
 }
 
+/// Handles identifier qualifier spans.
 fn identifier_qualifier_spans(spelling: &str, span: &Span) -> (Option<Span>, Option<Span>) {
     let separators = spelling
         .match_indices('$')
@@ -556,10 +603,12 @@ fn identifier_qualifier_spans(spelling: &str, span: &Span) -> (Option<Span>, Opt
     (source, index)
 }
 
+/// Returns whether the value is identifier byte.
 fn is_identifier_byte(byte: u8) -> bool {
     byte == b'_' || byte.is_ascii_alphanumeric()
 }
 
+/// Handles span for spelling.
 fn span_for_spelling(text: Arc<str>, span: Span) -> Span {
     if span.text() == Some(text.as_ref()) {
         span
@@ -594,6 +643,7 @@ impl TokenTree {
         }
     }
 
+    /// Handles description.
     pub(crate) fn description(&self) -> String {
         match self {
             Self::Group(group) => group.delim_kind().to_string(),
@@ -641,15 +691,88 @@ impl TokenTree {
         }
     }
 }
+
 impl Lex for TokenTree {
     fn to_tokens(&self, output: &mut TokenStream) {
         output.push(self.clone());
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Spanned)]
-/// An owned sequence of raw M2 token trees.
-pub struct TokenStream(Vec<TokenTree>, TrailingTrivia, LeadingTrivia, Option<Span>);
+#[derive(Debug, Clone, Default)]
+/// Internal state for TokenStreamData.
+struct TokenStreamData {
+    /// The trees.
+    trees: Vec<TokenTree>,
+    /// The prefix.
+    prefix: TrailingTrivia,
+    /// The suffix.
+    suffix: LeadingTrivia,
+    /// The source.
+    source: Option<Arc<Source>>,
+}
+
+/// Internal state for TokenStreamParts.
+pub(crate) struct TokenStreamParts {
+    /// The trees.
+    pub(crate) trees: Vec<TokenTree>,
+    /// The prefix.
+    pub(crate) prefix: TrailingTrivia,
+    /// The suffix.
+    pub(crate) suffix: LeadingTrivia,
+    /// The source.
+    pub(crate) source: Option<Arc<Source>>,
+}
+
+impl PartialEq for TokenStreamData {
+    fn eq(&self, other: &Self) -> bool {
+        self.trees == other.trees
+            && self.prefix == other.prefix
+            && self.suffix == other.suffix
+            && match (&self.source, &other.source) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for TokenStreamData {}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A persistent sequence of raw M2 token trees.
+///
+/// Clones and [`Self::fork`] share immutable backing storage. The first
+/// mutation of either value detaches that value through copy-on-write, so
+/// speculative consumers can retain the original stream without cloning its
+/// token trees eagerly.
+pub struct TokenStream(Arc<TokenStreamData>);
+
+impl Spanned for TokenStream {
+    fn try_span(&self) -> Option<Span> {
+        Span::join_all(
+            self.data()
+                .prefix
+                .try_span()
+                .into_iter()
+                .chain(self.iter().filter_map(Spanned::try_span))
+                .chain(self.data().suffix.try_span()),
+        )
+    }
+}
+
+impl Deref for TokenStream {
+    type Target = [TokenTree];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data().trees
+    }
+}
+
+impl AsRef<[TokenTree]> for TokenStream {
+    fn as_ref(&self) -> &[TokenTree] {
+        self
+    }
+}
 
 impl TokenStream {
     /// Creates an empty token stream.
@@ -657,93 +780,136 @@ impl TokenStream {
         Self::default()
     }
 
-    /// Iterates over the stream's top-level token trees.
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &TokenTree> + ExactSizeIterator {
-        self.0.iter()
+    /// Creates an independently mutable view over the same token storage.
+    ///
+    /// This operation is constant time. Mutating either stream preserves the
+    /// other stream and copies only the backing structures on the modified
+    /// path.
+    pub fn fork(&self) -> Self {
+        self.clone()
     }
 
-    /// Reports whether the stream contains no token trees.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+    /// Borrows the shared backing data.
+    fn data(&self) -> &TokenStreamData {
+        &self.0
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.0.len()
+    /// Borrows the shared backing data mutably.
+    fn data_mut(&mut self) -> &mut TokenStreamData {
+        Arc::make_mut(&mut self.0)
     }
 
-    pub(crate) fn get(&self, position: usize) -> Option<&TokenTree> {
-        self.0.get(position)
+    /// Converts the value into data.
+    fn into_data(self) -> TokenStreamData {
+        Arc::try_unwrap(self.0).unwrap_or_else(|data| (*data).clone())
     }
 
-    pub(crate) fn last(&self) -> Option<&TokenTree> {
-        self.0.last()
+    /// Converts the value into parts.
+    pub(crate) fn into_parts(self) -> TokenStreamParts {
+        let TokenStreamData {
+            trees,
+            prefix,
+            suffix,
+            source,
+        } = self.into_data();
+        TokenStreamParts {
+            trees,
+            prefix,
+            suffix,
+            source,
+        }
     }
 
+    /// Creates the value from parts.
+    pub(crate) fn from_parts(parts: TokenStreamParts) -> Self {
+        Self(Arc::new(TokenStreamData {
+            trees: parts.trees,
+            prefix: parts.prefix,
+            suffix: parts.suffix,
+            source: parts.source,
+        }))
+    }
+
+    /// Handles shares storage.
+    pub(crate) fn shares_storage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    #[cfg(feature = "tree-sitter")]
+    /// Returns whether the value has significant tokens.
     pub(crate) fn has_significant_tokens(&self) -> bool {
-        !self.0.is_empty()
+        !self.is_empty()
     }
 
+    /// Returns whether the value has trivia.
     pub(crate) fn has_trivia(&self) -> bool {
-        !self.1.is_empty() || !self.2.is_empty()
+        !self.data().prefix.is_empty() || !self.data().suffix.is_empty()
     }
 
+    /// Handles prefix trivia.
     pub(crate) fn prefix_trivia(&self) -> &[Trivia] {
-        self.1.as_slice()
+        self.data().prefix.as_slice()
     }
 
+    /// Handles suffix trivia.
     pub(crate) fn suffix_trivia(&self) -> &[Trivia] {
-        self.2.as_slice()
+        self.data().suffix.as_slice()
     }
 
+    /// Returns the associated source snapshot.
     pub(crate) fn source(&self) -> Option<Arc<Source>> {
-        let mut source = self.3.as_ref().map(|span| Arc::clone(span.source()));
+        let mut source = self.data().source.clone();
         coherent_stream_source(self, &mut source)
             .then_some(source)
             .flatten()
     }
 
-    pub(crate) fn set_physical_eof(&mut self, eof: Span) {
-        self.3 = Some(eof);
+    /// Handles set source.
+    pub(crate) fn set_source(&mut self, source: Arc<Source>) {
+        self.data_mut().source = Some(source);
     }
 
-    pub(crate) fn take_physical_eof(&mut self) -> Option<Span> {
-        self.3.take()
-    }
-
+    /// Takes final punctuation.
     pub(crate) fn take_final_punctuation(
         &mut self,
         spelling: &str,
     ) -> Option<(Punct, TrailingTrivia)> {
-        let position = self.0.len().checked_sub(1)?;
-        let TokenTree::Punct(punctuation) = self.0.get(position)? else {
+        let position = self.data().trees.len().checked_sub(1)?;
+        let TokenTree::Punct(punctuation) = self.data().trees.get(position)? else {
             return None;
         };
         if punctuation.text() != spelling {
             return None;
         }
-        let TokenTree::Punct(mut punctuation) = self.0.remove(position) else {
+        let TokenTree::Punct(mut punctuation) = self.data_mut().trees.remove(position) else {
             unreachable!("the final significant token was punctuation")
         };
-        let trailing_trivia = std::mem::take(punctuation.trailing_trivia_mut());
+        let trailing_trivia = take(punctuation.trailing_trivia_mut());
         Some((punctuation, trailing_trivia))
     }
 
+    /// Takes leading trivia.
     pub(crate) fn take_leading_trivia(&mut self) -> TrailingTrivia {
-        let mut trivia = std::mem::take(&mut self.1).into_vec();
-        trivia.extend(std::mem::take(&mut self.2).into_vec());
+        let data = self.data_mut();
+        let mut trivia = take(&mut data.prefix).into_vec();
+        trivia.extend(take(&mut data.suffix).into_vec());
         TrailingTrivia::new(trivia)
     }
 
+    /// Takes prefix trivia.
     pub(crate) fn take_prefix_trivia(&mut self) -> TrailingTrivia {
-        std::mem::take(&mut self.1)
+        take(&mut self.data_mut().prefix)
     }
 
+    /// Takes suffix trivia.
     pub(crate) fn take_suffix_trivia(&mut self) -> LeadingTrivia {
-        std::mem::take(&mut self.2)
+        take(&mut self.data_mut().suffix)
     }
 
+    /// Handles push.
     pub(crate) fn push(&mut self, mut token: TokenTree) {
-        if let Some(TokenTree::Group(group)) = self.0.last_mut()
+        let data = self.data_mut();
+        if let Some(TokenTree::Group(group)) = data.trees.last_mut()
             && !group.delimiter().is_closed()
         {
             group.stream_mut().push(token);
@@ -751,60 +917,68 @@ impl TokenStream {
             token
                 .leading_trivia_mut()
                 .as_mut_vec()
-                .splice(..0, std::mem::take(&mut self.2).into_vec());
-            self.0.push(token);
+                .splice(..0, take(&mut data.suffix).into_vec());
+            data.trees.push(token);
         }
     }
 
+    /// Pushes line comment.
     pub(crate) fn push_line_comment(&mut self, comment: Trivia) {
-        if let Some(TokenTree::Group(group)) = self.0.last_mut()
+        let data = self.data_mut();
+        if let Some(TokenTree::Group(group)) = data.trees.last_mut()
             && !group.delimiter().is_closed()
         {
             group.stream_mut().push_line_comment(comment);
         } else if let Some(comment) = complete_line_comment(&comment) {
-            push_line_comment_block(self.2.as_mut_vec(), comment);
-        } else if let Some(token) = self.0.last_mut() {
+            push_line_comment_block(data.suffix.as_mut_vec(), comment);
+        } else if let Some(token) = data.trees.last_mut() {
             token.trailing_trivia_mut().as_mut_vec().push(comment);
         } else {
-            self.1.as_mut_vec().push(comment);
+            data.prefix.as_mut_vec().push(comment);
         }
     }
 
     #[doc(hidden)]
     pub fn push_leading_trivia(&mut self, trivia: Trivia) {
-        if let Some(TokenTree::Group(group)) = self.0.last_mut()
+        let data = self.data_mut();
+        if let Some(TokenTree::Group(group)) = data.trees.last_mut()
             && !group.delimiter().is_closed()
         {
             group.stream_mut().push_leading_trivia(trivia);
         } else {
-            self.2.as_mut_vec().push(trivia);
+            data.suffix.as_mut_vec().push(trivia);
         }
     }
 
+    /// Pushes block comment.
     pub(crate) fn push_block_comment(&mut self, comment: Trivia) {
-        if let Some(TokenTree::Group(group)) = self.0.last_mut()
+        let data = self.data_mut();
+        if let Some(TokenTree::Group(group)) = data.trees.last_mut()
             && !group.delimiter().is_closed()
         {
             group.stream_mut().push_block_comment(comment);
-        } else if let Some(token) = self.0.last_mut() {
+        } else if let Some(token) = data.trees.last_mut() {
             token.trailing_trivia_mut().as_mut_vec().push(comment);
-        } else if !self.2.is_empty() {
-            self.2.as_mut_vec().push(comment);
+        } else if !data.suffix.is_empty() {
+            data.suffix.as_mut_vec().push(comment);
         } else {
-            self.1.as_mut_vec().push(comment);
+            data.prefix.as_mut_vec().push(comment);
         }
     }
 
+    /// Pushes trailing trivia.
     pub(crate) fn push_trailing_trivia(&mut self, trivia: Trivia) {
-        if let Some(token) = self.0.last_mut() {
+        let data = self.data_mut();
+        if let Some(token) = data.trees.last_mut() {
             token.trailing_trivia_mut().as_mut_vec().push(trivia);
         } else {
-            self.1.as_mut_vec().push(trivia);
+            data.prefix.as_mut_vec().push(trivia);
         }
     }
 
+    /// Handles complete last group.
     pub(crate) fn complete_last_group(&mut self, kind: DelimiterKind, close: Span) -> bool {
-        let Some(TokenTree::Group(group)) = self.0.last_mut() else {
+        let Some(TokenTree::Group(group)) = self.data_mut().trees.last_mut() else {
             return false;
         };
         if group.stream.complete_last_group(kind, close.clone()) {
@@ -817,6 +991,7 @@ impl TokenStream {
         true
     }
 
+    /// Handles last innermost.
     pub(crate) fn last_innermost(&self) -> Option<&TokenTree> {
         let last = self.last()?;
         match last {
@@ -827,18 +1002,22 @@ impl TokenStream {
         }
     }
 
+    /// Handles prepend comment.
     fn prepend_comment(&mut self, comment: Trivia) {
-        if let Some(first) = self.0.first_mut() {
+        let data = self.data_mut();
+        if let Some(first) = data.trees.first_mut() {
             first.leading_trivia_mut().as_mut_vec().insert(0, comment);
         } else {
-            self.1.as_mut_vec().insert(0, comment);
+            data.prefix.as_mut_vec().insert(0, comment);
         }
     }
 
+    /// Inserts inner comment.
     fn insert_inner_comment(&mut self, comment: Trivia) {
         let start = comment.span().start();
+        let data = self.data_mut();
         if let Some(start) = start {
-            for token in &mut self.0 {
+            for token in &mut data.trees {
                 if let TokenTree::Group(group) = token {
                     let span = group.span();
                     if span.shares_source(&comment.span())
@@ -851,7 +1030,7 @@ impl TokenStream {
                 }
             }
 
-            if let Some(token) = self.0.iter_mut().rev().find(|token| {
+            if let Some(token) = data.trees.iter_mut().rev().find(|token| {
                 let span = token.span();
                 span.shares_source(&comment.span())
                     && span.start().is_some_and(|token_start| token_start <= start)
@@ -860,20 +1039,20 @@ impl TokenStream {
                 return;
             }
 
-            if self
-                .0
+            if data
+                .trees
                 .iter()
                 .any(|token| token.span().shares_source(&comment.span()))
             {
-                self.1.as_mut_vec().push(comment);
+                data.prefix.as_mut_vec().push(comment);
                 return;
             }
         }
 
-        if let Some(last) = self.0.last_mut() {
+        if let Some(last) = data.trees.last_mut() {
             last.trailing_trivia_mut().as_mut_vec().push(comment);
         } else {
-            self.1.as_mut_vec().push(comment);
+            data.prefix.as_mut_vec().push(comment);
         }
     }
 
@@ -889,14 +1068,15 @@ impl TokenStream {
 
     #[doc(hidden)]
     pub fn ends_with_line_break(&self) -> bool {
-        self.0
+        self.data()
+            .trees
             .last()
             .is_some_and(|token| gap_after_contains(token, '\n'))
     }
 
     #[doc(hidden)]
     pub fn ends_with_semicolon(&self) -> bool {
-        matches!(self.0.last(), Some(TokenTree::Punct(token)) if token.text() == ";")
+        matches!(self.data().trees.last(), Some(TokenTree::Punct(token)) if token.text() == ";")
     }
 
     /// Appends one emitted syntax fragment with any separator required to keep
@@ -914,7 +1094,7 @@ impl TokenStream {
 
     /// Removes and returns the final token tree, if any.
     pub fn pop(&mut self) -> Option<TokenTree> {
-        self.0.pop()
+        self.data_mut().trees.pop()
     }
 
     /// Migrates source text from the shared sources retained by its spans.
@@ -923,6 +1103,7 @@ impl TokenStream {
     }
 }
 
+/// Handles complete line comment.
 fn complete_line_comment(comment: &Trivia) -> Option<Trivia> {
     let span = comment.span();
     let (Some(start), Some(end)) = (span.start(), span.end()) else {
@@ -943,6 +1124,7 @@ fn complete_line_comment(comment: &Trivia) -> Option<Trivia> {
         })
 }
 
+/// Pushes line comment block.
 fn push_line_comment_block(comments: &mut Vec<Trivia>, comment: Trivia) {
     let Some(previous) = comments.last_mut() else {
         comments.push(comment);
@@ -981,6 +1163,7 @@ fn push_line_comment_block(comments: &mut Vec<Trivia>, comment: Trivia) {
     }
 }
 
+/// Handles coherent stream source.
 fn coherent_stream_source(stream: &TokenStream, source: &mut Option<Arc<Source>>) -> bool {
     for trivia in stream.prefix_trivia().iter().chain(stream.suffix_trivia()) {
         if !record_source(trivia.span(), source) {
@@ -1007,6 +1190,7 @@ fn coherent_stream_source(stream: &TokenStream, source: &mut Option<Arc<Source>>
     true
 }
 
+/// Handles record source.
 fn record_source(span: Span, source: &mut Option<Arc<Source>>) -> bool {
     match source {
         Some(expected) => Arc::ptr_eq(expected, span.source()),
@@ -1022,6 +1206,7 @@ impl Display for TokenStream {
         write_stream(formatter, self)
     }
 }
+/// Handles needs separator.
 fn needs_separator(left: &TokenTree, right: &TokenTree) -> bool {
     let left_span = left.span();
     let right_span = right.span();
@@ -1039,10 +1224,11 @@ fn needs_separator(left: &TokenTree, right: &TokenTree) -> bool {
             if punctuation_would_merge(left.text(), right.text()))
 }
 
+/// Writes stream.
 fn write_stream(formatter: &mut Formatter<'_>, stream: &TokenStream) -> Result {
-    let mut previous_span = write_trivia(formatter, None, stream.1.as_slice())?;
+    let mut previous_span = write_trivia(formatter, None, stream.data().prefix.as_slice())?;
     let mut previous_atom = None::<&TokenTree>;
-    for tree in &stream.0 {
+    for tree in stream {
         if !tree.leading_trivia().is_empty() {
             previous_span =
                 write_trivia(formatter, previous_span, tree.leading_trivia().as_slice())?;
@@ -1063,10 +1249,11 @@ fn write_stream(formatter: &mut Formatter<'_>, stream: &TokenStream) -> Result {
             previous_atom = None;
         }
     }
-    write_trivia(formatter, previous_span, stream.2.as_slice())?;
+    write_trivia(formatter, previous_span, stream.data().suffix.as_slice())?;
     Ok(())
 }
 
+/// Writes trivia.
 fn write_trivia(
     formatter: &mut Formatter<'_>,
     mut previous: Option<Span>,
@@ -1082,6 +1269,7 @@ fn write_trivia(
     Ok(previous)
 }
 
+/// Writes source spaces.
 fn write_source_spaces(
     formatter: &mut Formatter<'_>,
     left: Span,
@@ -1105,6 +1293,7 @@ fn write_source_spaces(
     }
 }
 
+/// Writes tree.
 fn write_tree(formatter: &mut Formatter<'_>, tree: &TokenTree) -> Result {
     match tree {
         TokenTree::Group(group) => {
@@ -1131,6 +1320,7 @@ fn write_tree(formatter: &mut Formatter<'_>, tree: &TokenTree) -> Result {
     }
 }
 
+/// Handles gap after contains.
 fn gap_after_contains(token: &TokenTree, character: char) -> bool {
     let span = token
         .trailing_trivia()
@@ -1160,12 +1350,12 @@ impl<T: Lex> Extend<T> for TokenStream {
 
 impl FromIterator<TokenTree> for TokenStream {
     fn from_iter<T: IntoIterator<Item = TokenTree>>(iter: T) -> Self {
-        Self(
-            iter.into_iter().collect(),
-            TrailingTrivia::default(),
-            LeadingTrivia::default(),
-            None,
-        )
+        Self(Arc::new(TokenStreamData {
+            trees: iter.into_iter().collect(),
+            prefix: TrailingTrivia::default(),
+            suffix: LeadingTrivia::default(),
+            source: None,
+        }))
     }
 }
 
@@ -1173,24 +1363,35 @@ impl IntoIterator for TokenStream {
     type Item = TokenTree;
     type IntoIter = IntoIter<TokenTree>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        self.into_data().trees.into_iter()
+    }
+}
+
+impl<'syntax> IntoIterator for &'syntax TokenStream {
+    type Item = &'syntax TokenTree;
+    type IntoIter = std::slice::Iter<'syntax, TokenTree>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
 impl Lex for TokenStream {
     fn to_tokens(&self, output: &mut TokenStream) {
-        let preserve_eof = output.0.is_empty() && output.1.is_empty() && output.2.is_empty();
-        for trivia in self.1.as_slice().iter().cloned() {
+        let preserve_source =
+            output.is_empty() && output.data().prefix.is_empty() && output.data().suffix.is_empty();
+        for trivia in self.data().prefix.as_slice().iter().cloned() {
             output.push_trailing_trivia(trivia);
         }
-        for token in self.0.iter().cloned() {
+        for token in self.iter().cloned() {
             output.push(token);
         }
         output
-            .2
+            .data_mut()
+            .suffix
             .as_mut_vec()
-            .extend(self.2.as_slice().iter().cloned());
-        output.3 = preserve_eof.then(|| self.3.clone()).flatten();
+            .extend(self.data().suffix.as_slice().iter().cloned());
+        output.data_mut().source = preserve_source.then(|| self.source()).flatten();
     }
 }
 
@@ -1243,5 +1444,25 @@ impl<T: Lex> Lex for [T] {
 impl<T: Lex> Lex for Vec<T> {
     fn to_tokens(&self, output: &mut TokenStream) {
         self.as_slice().to_tokens(output);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::lex_str;
+
+    #[test]
+    fn fork_shares_tokens_until_the_first_mutation() {
+        let original = lex_str("left + right").unwrap();
+        let mut fork = original.fork();
+
+        assert!(original.shares_storage(&fork));
+        assert_eq!((&original).into_iter().count(), original.len());
+
+        fork.pop();
+
+        assert!(!original.shares_storage(&fork));
+        assert_eq!(original.to_string(), "left + right");
+        assert_eq!(fork.to_string(), "left +");
     }
 }

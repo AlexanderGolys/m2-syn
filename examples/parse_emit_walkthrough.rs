@@ -1,9 +1,12 @@
+//! Demonstrates parse emit walkthrough.
+
 use m2_syn::{
     IdentToken, Lex, Parse, ParseStream, Span, Spanned, TokenParseError, TokenStream, TokenTree,
     parse2, quote_m2,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// State used by the Name example.
 struct Name(IdentToken);
 
 impl Parse for Name {
@@ -34,9 +37,13 @@ impl Lex for Name {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// State used by the Addition example.
 struct Addition {
+    /// The left.
     left: Name,
+    /// The operator.
     operator: m2_syn::Token![+],
+    /// The right.
     right: Name,
 }
 

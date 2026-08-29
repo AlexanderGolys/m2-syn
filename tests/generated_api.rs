@@ -1,5 +1,7 @@
+//! Integration tests for generated api.
+
 use m2_syn::nodes::{
-    Array, BinaryExpr, BinaryOperator, Expr, OperatorExpr, PrefixOperator, Symbol,
+    Array, BinaryOperator, Expr, ExprOp, ExprOpBin, ExprOpBinRegular, PrefixOperator, Symbol,
 };
 use m2_syn::{
     DelimiterKind, DelimiterToken, Lex, LiteralKind, Source, Span, Spanned, TokenParseError,
@@ -22,11 +24,22 @@ fn multiply(start: usize) -> m2_syn::Token![*] {
     m2_syn::Token![*](span(start, start + 1))
 }
 
+#[test]
+fn token_macro_normalizes_spacing_and_string_fragments() {
+    let expected = std::any::TypeId::of::<m2_syn::Token![!=]>();
+
+    assert_eq!(expected, std::any::TypeId::of::<m2_syn::Token![! =]>());
+    assert_eq!(expected, std::any::TypeId::of::<m2_syn::Token!["!="]>());
+    assert_eq!(expected, std::any::TypeId::of::<m2_syn::Token!["!"=]>());
+    assert_eq!(expected, std::any::TypeId::of::<m2_syn::Token![!"="]>());
+    assert_eq!(expected, std::any::TypeId::of::<m2_syn::Token!["!" "="]>());
+}
+
 fn assignment() -> Expr {
-    BinaryExpr::new(
-        symbol("left", 0).into(),
+    ExprOpBinRegular::new(
+        Box::new(symbol("left", 0).into()),
         multiply(5).into(),
-        symbol("right", 7).into(),
+        Box::new(symbol("right", 7).into()),
     )
     .into()
 }
@@ -36,7 +49,7 @@ fn constructors_hide_recursive_storage_and_preserve_public_categories() {
     let node = assignment();
     assert!(matches!(
         &node,
-        Expr::OperatorExpr(OperatorExpr::BinaryExpr(_))
+        Expr::Op(ExprOp::Bin(ExprOpBin::Regular(_)))
     ));
     assert_eq!(node.span().start().unwrap(), 0);
     assert_eq!(node.span().end().unwrap(), 12);
@@ -247,7 +260,7 @@ fn quote_composes_interpolated_fragments_by_their_actual_boundaries() {
 
     assert_eq!(tokens.to_m2(), "left+value");
     assert!(matches!(
-        tokens.iter().nth(1),
+        tokens.get(1),
         Some(TokenTree::Punct(token)) if token.text() == "+"
     ));
 }
@@ -273,7 +286,7 @@ fn quote_recurses_through_groups_around_interpolated_values() {
 
     assert_eq!(tokens.to_m2(), "apply (value)");
     assert!(matches!(
-        tokens.iter().nth(1),
+        tokens.get(1),
         Some(TokenTree::Group(group))
             if group.delim_kind() == DelimiterKind::Parenthesis
                 && matches!(group.stream().iter().next(), Some(TokenTree::Ident(_)))

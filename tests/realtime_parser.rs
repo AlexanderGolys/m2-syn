@@ -1,3 +1,5 @@
+//! Integration tests for realtime parser.
+
 use m2_syn::{Lex, LexErrorKind, ParseError, RealtimeParser, Spanned, TextEdit};
 
 #[test]

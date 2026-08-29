@@ -59,8 +59,9 @@ pub fn syntax_pretty_walk(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 /// Resolves a token spelling to the type `syntax!` generates for it.
 ///
 /// This is what `m2_syn::Token![…]` forwards to. The mapping is pure
-/// computation over the spelling, so it needs no access to the schema and
-/// nothing has to be generated for it.
+/// computation over the concatenated M2 spelling, so whitespace and the
+/// boundaries between Rust tokens and string fragments have no effect. It
+/// needs no access to the schema and nothing has to be generated for it.
 #[proc_macro]
 pub fn token(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let base = base_crate();

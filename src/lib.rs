@@ -1,8 +1,9 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
-#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
 extern crate self as m2_syn;
+
+pub use m2_syn_macros::syntax;
 
 // Files are grouped by the stage they belong to — `lex/`, `parser/`,
 // `migration/`, `schema/` — while the module paths stay flat, so `#[path]` carries the
@@ -24,24 +25,16 @@ mod cst;
 mod delimited;
 #[path = "lex/lexer.rs"]
 pub mod lexer;
-// `expand!` reads this file during macro expansion; keep Cargo's dependency
-// tracking aware of the out-of-line source as well.
-const _: &str = include_str!("schema/nodes.rs");
-
-these_macros_should_be_illegal::expand!(
-    crate::__m2_syn_syntax;
-    /// Generated typed Macaulay2 syntax nodes and literal-token types.
-    #[macro_use]
-    #[path = "schema/nodes.rs"]
-    pub mod nodes;
-);
+/// Generated typed Macaulay2 syntax nodes and literal-token types.
+#[macro_use]
+#[path = "schema/nodes.rs"]
+pub mod nodes;
 mod expansion;
 #[path = "parser/native.rs"]
 pub mod native;
 #[path = "parser/parse.rs"]
 pub mod parse;
 mod parsed_file;
-#[cfg(feature = "pretty")]
 pub mod pretty;
 #[path = "parser/punctuated.rs"]
 pub mod punctuated;
@@ -77,23 +70,16 @@ pub use cst::{
 };
 pub use delimited::Delimited;
 pub use expansion::ProcMacro;
-#[cfg(feature = "walk")]
 pub use expansion::{LiteralReturnTypes, LiteralReturnTypesError};
 #[doc(hidden)]
 pub use lexer::{__qualified_identifier_spans, __quote_fragment};
 pub use lexer::{LexError, LexErrorKind, lex, lex_recovering, lex_str, lex_str_recovering};
-#[cfg(not(any(feature = "pretty", feature = "walk")))]
 #[doc(hidden)]
-pub use m2_syn_macros::syntax as __m2_syn_syntax;
-#[cfg(all(feature = "pretty", not(feature = "walk")))]
+pub use m2_syn_macros::__SyntaxWalk;
 #[doc(hidden)]
-pub use m2_syn_macros::syntax_pretty as __m2_syn_syntax;
-#[cfg(all(feature = "pretty", feature = "walk"))]
+pub use m2_syn_macros::__syntax_token_walk;
 #[doc(hidden)]
-pub use m2_syn_macros::syntax_pretty_walk as __m2_syn_syntax;
-#[cfg(all(not(feature = "pretty"), feature = "walk"))]
-#[doc(hidden)]
-pub use m2_syn_macros::syntax_walk as __m2_syn_syntax;
+pub use m2_syn_macros::__syntax_walk_function;
 #[doc(hidden)]
 pub use m2_syn_macros::token as __m2_syn_token;
 pub use m2_syn_macros::{Spanned, parse_quote_m2, quote_m2};
@@ -102,10 +88,8 @@ pub use native::{
     parse_native, parse_native_recovering,
 };
 pub(crate) use nodes::*;
-#[cfg(feature = "walk")]
 pub use nodes::{fold, visit, visit_mut};
 pub use parsed_file::ParsedFile;
-#[cfg(feature = "pretty")]
 pub use pretty::{
     PrettyDetail, PrettyDetailRole, PrettyEdge, PrettyNode, PrettyNodeRole, PrettyOptions,
     PrettyReport, PrettyTree, format_pretty_cell_tokens, format_pretty_tokens, format_pretty_tree,

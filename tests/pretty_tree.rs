@@ -1,7 +1,5 @@
 //! Integration tests for pretty tree.
 
-#![cfg(feature = "pretty")]
-
 use m2_syn::{
     PrettyDetailRole, PrettyNode, PrettyNodeRole, PrettyTree, format_pretty_tree, parse_native,
 };

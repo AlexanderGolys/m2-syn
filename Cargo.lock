@@ -40,6 +40,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
+name = "heck"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
 name = "indexmap"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -57,7 +63,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "m2-syn"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "m2-syn-macros",
  "these-macros-should-be-illegal",
@@ -67,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "m2-syn-macros"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -206,10 +212,11 @@ dependencies = [
 
 [[package]]
 name = "these-macros-should-be-illegal"
-version = "0.4.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96334abf6c60a97d08da3b2140d5a2b1e13200891d037b07f760b1a40b2fb342"
+checksum = "7342201a1f40821438ee4f0bda627d5ea96f5529a0eccc79858bbfc7427984be"
 dependencies = [
+ "heck",
  "proc-macro2",
  "quote",
  "syn 2.0.114",
@@ -237,9 +244,9 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
 name = "tree-sitter-macaulay2"
-version = "6.0.0"
+version = "6.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60fbd81b34c1b4fb71a319663e76c2063341cf2554e96ad3dfbb1b69b50f1e3d"
+checksum = "2f89e14d67e97bd67043766300af6ff7e7ab4445e2097d2e106c3427c2ca92e3"
 dependencies = [
  "cc",
  "tree-sitter",

@@ -163,9 +163,7 @@ pub struct Delimiter {
     pub kind: DelimiterKind,
     /// The opening and closing source spans.
     pub spans: DoubleSpan,
-    /// The opening trivia.
     opening_trivia: TrailingTrivia,
-    /// The closing trivia.
     closing_trivia: TrailingTrivia,
 }
 

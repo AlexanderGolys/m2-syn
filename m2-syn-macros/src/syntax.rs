@@ -1,7 +1,5 @@
 #[path = "syntax/grammar.rs"]
 mod grammar;
-#[path = "syntax/traversal.rs"]
-mod traversal;
 
 use crate::tokens::{OperatorKind, TokenDefinitions};
 use proc_macro2::{Ident, TokenStream};
@@ -9,38 +7,12 @@ use quote::{ToTokens, format_ident, quote};
 use std::collections::{BTreeMap, BTreeSet};
 use syn::parse::{Parse, ParseStream};
 use syn::{Error, Member, Result, parse2};
-use traversal::Traversal;
 
 struct Syntax {
     tokens: TokenDefinitions,
     structs: Vec<StructDefinition>,
     enums: Vec<EnumDefinition>,
-    declarations: Vec<TokenStream>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct SyntaxFeatures {
-    pretty: bool,
-    walk: bool,
-}
-
-impl SyntaxFeatures {
-    pub(crate) const CORE: Self = Self {
-        pretty: false,
-        walk: false,
-    };
-    pub(crate) const PRETTY: Self = Self {
-        pretty: true,
-        walk: false,
-    };
-    pub(crate) const WALK: Self = Self {
-        pretty: false,
-        walk: true,
-    };
-    pub(crate) const PRETTY_WALK: Self = Self {
-        pretty: true,
-        walk: true,
-    };
+    declarations: Vec<grammar::ExplicitDeclaration>,
 }
 
 /// Whole-declaration facts, derived once and shared by every expansion stage.
@@ -52,7 +24,6 @@ impl SyntaxFeatures {
 /// live in whichever file suits them.
 pub(crate) struct SyntaxContext<'syntax> {
     tokens: &'syntax TokenDefinitions,
-    features: SyntaxFeatures,
     /// Types whose declarations request indirection at inline use sites.
     boxed: BTreeSet<SyntaxTypeName>,
     /// How each declared name is written in generated code, which is
@@ -64,7 +35,7 @@ pub(crate) struct SyntaxContext<'syntax> {
 }
 
 impl<'syntax> SyntaxContext<'syntax> {
-    fn new(syntax: &'syntax Syntax, features: SyntaxFeatures) -> Self {
+    fn new(syntax: &'syntax Syntax) -> Self {
         let tokens = &syntax.tokens;
         let declarations = syntax
             .all_types()
@@ -76,7 +47,6 @@ impl<'syntax> SyntaxContext<'syntax> {
         }
         Self {
             tokens,
-            features,
             boxed: syntax
                 .structs
                 .iter()
@@ -109,10 +79,6 @@ impl<'syntax> SyntaxContext<'syntax> {
         self.tokens
     }
 
-    fn pretty(&self) -> bool {
-        self.features.pretty
-    }
-
     pub(crate) fn is_boxed(&self, name: &Ident) -> bool {
         self.boxed.contains(&name.into())
     }
@@ -134,8 +100,8 @@ fn type_reference(tokens: &TokenDefinitions, name: &Ident) -> TokenStream {
     }
 }
 
-pub(crate) fn generate(input: TokenStream, features: SyntaxFeatures) -> Result<TokenStream> {
-    parse2::<Syntax>(input)?.expand(features)
+pub(crate) fn generate(input: TokenStream) -> Result<TokenStream> {
+    parse2::<Syntax>(input)?.expand()
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -387,12 +353,15 @@ fn syntax_references(structs: &[StructDefinition], enums: &[EnumDefinition], nam
 }
 
 impl Syntax {
-    fn expand(&self, features: SyntaxFeatures) -> Result<TokenStream> {
+    fn expand(&self) -> Result<TokenStream> {
         let names = self.declared_names()?;
         self.validate_references(&names)?;
-        let context = SyntaxContext::new(self, features);
-        let tokens = self.tokens.expand(features.pretty);
-        let declarations = &self.declarations;
+        let context = SyntaxContext::new(self);
+        let tokens = self.tokens.expand();
+        let declarations = self
+            .declarations
+            .iter()
+            .map(grammar::ExplicitDeclaration::expand);
         let structs = self
             .structs
             .iter()
@@ -404,21 +373,29 @@ impl Syntax {
             .map(|definition| expand_enum(definition, &context))
             .collect::<Vec<_>>();
         let conversions = self.expand_conversions(&context);
-        let visits = features.walk.then(|| self.expand_visit(&context));
-        let visit_muts = features.walk.then(|| self.expand_visit_mut(&context));
-        let folds = features.walk.then(|| self.expand_fold(&context));
+        let walk_support = self.expand_walk_support();
+        let visits = self.expand_visit(&context);
+        let visit_muts = self.expand_visit_mut(&context);
+        let folds = self.expand_fold(&context);
+        let token_walkers = self.tokens.iter().map(|definition| {
+            let name = &definition.name;
+            let ty = context.type_reference(name);
+            quote!(::m2_syn::__syntax_token_walk!(#name, #ty);)
+        });
 
         Ok(quote! {
             #tokens
             use ::m2_syn::qf;
             use ::m2_syn::{Delimited, Punctuated, Token};
-            #(#declarations)*
             #(#structs)*
             #(#enums)*
             #conversions
+            #walk_support
             #visits
             #visit_muts
             #folds
+            #(#token_walkers)*
+            #(#declarations)*
         })
     }
 
@@ -595,6 +572,7 @@ impl Syntax {
                 };
                 let declaration = (!definition.explicit).then(|| {
                     quote! {
+                        #[derive(::m2_syn::__SyntaxWalk)]
                         #[derive(#derives)]
                         #[doc = concat!("A typed Macaulay2 `", #kind, "` syntax leaf.")]
                         pub struct #name {
@@ -615,19 +593,17 @@ impl Syntax {
                             }
                         }
                     });
-                let pretty_impl = context.pretty().then(|| {
-                    quote! {
-                        impl ::m2_syn::PrettyTree for #name {
-                            fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
-                                ::m2_syn::PrettyNode::token(
-                                    stringify!(#name),
-                                    #pretty_text,
-                                    ::m2_syn::Spanned::expect_span(self),
-                                )
-                            }
+                let pretty_impl = quote! {
+                    impl ::m2_syn::PrettyTree for #name {
+                        fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                            ::m2_syn::PrettyNode::token(
+                                stringify!(#name),
+                                #pretty_text,
+                                ::m2_syn::Spanned::expect_span(self),
+                            )
                         }
                     }
-                });
+                };
                 Ok(quote! {
                 #declaration
 
@@ -765,6 +741,7 @@ impl Syntax {
                 };
                 let declaration = (!definition.explicit).then(|| {
                     quote! {
+                        #[derive(::m2_syn::__SyntaxWalk)]
                         #[derive(Debug, ::m2_syn::Spanned)]
                         #struct_definition
                     }
@@ -883,7 +860,7 @@ impl Syntax {
                     .iter()
                     .map(|field| field.to_tokens(field_separator, context))
                     .collect::<Result<Vec<_>>>()?;
-                let pretty_impl = context.pretty().then(|| {
+                let pretty_impl = {
                     let pretty_fields = fields.iter().map(|field| {
                         let member = &field.member;
                         let label = member.to_token_stream().to_string();
@@ -939,7 +916,7 @@ impl Syntax {
                             }
                         }
                     }
-                });
+                };
                 let emit_contents = match definition.wrapper {
                     Some(Wrapper::Literal(Literal::String)) => quote! {
                         ::m2_syn::Lex::to_tokens(&self.leading_trivia, output);
@@ -1144,7 +1121,10 @@ impl Syntax {
                 }
             }
         });
-        let walkers = self.expand_walkers(Traversal::Visit, context);
+        let walkers = self.all_types().map(|name| {
+            let ty = context.type_reference(name);
+            quote!(::m2_syn::__syntax_walk_function!(visit, #name, #ty);)
+        });
         quote! {
             /// Shared-reference traversal over the typed graph.
             pub mod visit {
@@ -1172,7 +1152,10 @@ impl Syntax {
                 }
             }
         });
-        let walkers = self.expand_walkers(Traversal::VisitMut, context);
+        let walkers = self.all_types().map(|name| {
+            let ty = context.type_reference(name);
+            quote!(::m2_syn::__syntax_walk_function!(visit_mut, #name, #ty);)
+        });
         quote! {
             /// In-place traversal over the typed graph.
             pub mod visit_mut {
@@ -1200,7 +1183,10 @@ impl Syntax {
                 }
             }
         });
-        let walkers = self.expand_walkers(Traversal::Fold, context);
+        let walkers = self.all_types().map(|name| {
+            let ty = context.type_reference(name);
+            quote!(::m2_syn::__syntax_walk_function!(fold, #name, #ty);)
+        });
         quote! {
             /// Owning rebuild of the typed graph.
             pub mod fold {
@@ -1225,27 +1211,243 @@ impl Syntax {
             .chain(self.enums.iter().map(|definition| &definition.name))
     }
 
-    fn expand_walkers(
-        &self,
-        traversal: Traversal,
-        context: &SyntaxContext<'_>,
-    ) -> Vec<TokenStream> {
-        let tokens = self.tokens.iter().map(|definition| {
-            let ty = context.type_reference(&definition.name);
-            traversal.empty_walker(&definition.name, ty)
-        });
-        let structs = self.structs.iter().map(|definition| {
-            let name = &definition.name;
-            match &definition.fields {
-                StructFields::Leaf(_) => traversal.empty_walker(name, quote!(#name)),
-                StructFields::Product { .. } => traversal.struct_walker(definition, context),
+    fn expand_walk_support(&self) -> TokenStream {
+        quote! {
+            mod __walk {
+                use super::*;
+
+                pub(super) trait VisitValue {
+                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                    where
+                        V: super::visit::Visit<'ast> + ?Sized;
+                }
+
+                pub(super) trait VisitValueMut {
+                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
+                    where
+                        V: super::visit_mut::VisitMut + ?Sized;
+                }
+
+                pub(super) trait FoldValue: Sized {
+                    fn fold_value<F>(self, folder: &mut F) -> Self
+                    where
+                        F: super::fold::Fold + ?Sized;
+                }
+
+                pub(super) trait WalkChildren {
+                    fn walk_children<'ast, V>(&'ast self, visitor: &mut V)
+                    where
+                        V: super::visit::Visit<'ast> + ?Sized;
+                }
+
+                pub(super) trait WalkChildrenMut {
+                    fn walk_children_mut<V>(&mut self, visitor: &mut V)
+                    where
+                        V: super::visit_mut::VisitMut + ?Sized;
+                }
+
+                pub(super) trait FoldChildren: Sized {
+                    fn fold_children<F>(self, folder: &mut F) -> Self
+                    where
+                        F: super::fold::Fold + ?Sized;
+                }
+
+                impl<T> VisitValue for Box<T>
+                where
+                    T: VisitValue + ?Sized,
+                {
+                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                    where
+                        V: super::visit::Visit<'ast> + ?Sized,
+                    {
+                        T::visit_value(self, visitor);
+                    }
+                }
+
+                impl<T> VisitValueMut for Box<T>
+                where
+                    T: VisitValueMut + ?Sized,
+                {
+                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
+                    where
+                        V: super::visit_mut::VisitMut + ?Sized,
+                    {
+                        T::visit_value_mut(self, visitor);
+                    }
+                }
+
+                impl<T> FoldValue for Box<T>
+                where
+                    T: FoldValue,
+                {
+                    fn fold_value<F>(self, folder: &mut F) -> Self
+                    where
+                        F: super::fold::Fold + ?Sized,
+                    {
+                        Box::new(T::fold_value(*self, folder))
+                    }
+                }
+
+                impl<T> VisitValue for Option<T>
+                where
+                    T: VisitValue,
+                {
+                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                    where
+                        V: super::visit::Visit<'ast> + ?Sized,
+                    {
+                        if let Some(value) = self {
+                            T::visit_value(value, visitor);
+                        }
+                    }
+                }
+
+                impl<T> VisitValueMut for Option<T>
+                where
+                    T: VisitValueMut,
+                {
+                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
+                    where
+                        V: super::visit_mut::VisitMut + ?Sized,
+                    {
+                        if let Some(value) = self {
+                            T::visit_value_mut(value, visitor);
+                        }
+                    }
+                }
+
+                impl<T> FoldValue for Option<T>
+                where
+                    T: FoldValue,
+                {
+                    fn fold_value<F>(self, folder: &mut F) -> Self
+                    where
+                        F: super::fold::Fold + ?Sized,
+                    {
+                        self.map(|value| T::fold_value(value, folder))
+                    }
+                }
+
+                impl<T> VisitValue for Vec<T>
+                where
+                    T: VisitValue,
+                {
+                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                    where
+                        V: super::visit::Visit<'ast> + ?Sized,
+                    {
+                        for value in self {
+                            T::visit_value(value, visitor);
+                        }
+                    }
+                }
+
+                impl<T> VisitValueMut for Vec<T>
+                where
+                    T: VisitValueMut,
+                {
+                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
+                    where
+                        V: super::visit_mut::VisitMut + ?Sized,
+                    {
+                        for value in self {
+                            T::visit_value_mut(value, visitor);
+                        }
+                    }
+                }
+
+                impl<T> FoldValue for Vec<T>
+                where
+                    T: FoldValue,
+                {
+                    fn fold_value<F>(self, folder: &mut F) -> Self
+                    where
+                        F: super::fold::Fold + ?Sized,
+                    {
+                        self.into_iter()
+                            .map(|value| T::fold_value(value, folder))
+                            .collect()
+                    }
+                }
+
+                impl<T, P> VisitValue for Punctuated<T, P>
+                where
+                    T: VisitValue,
+                {
+                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                    where
+                        V: super::visit::Visit<'ast> + ?Sized,
+                    {
+                        for value in self.iter() {
+                            T::visit_value(value, visitor);
+                        }
+                    }
+                }
+
+                impl<T, P> VisitValueMut for Punctuated<T, P>
+                where
+                    T: VisitValueMut,
+                {
+                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
+                    where
+                        V: super::visit_mut::VisitMut + ?Sized,
+                    {
+                        for value in self.iter_mut() {
+                            T::visit_value_mut(value, visitor);
+                        }
+                    }
+                }
+
+                impl<T, P> FoldValue for Punctuated<T, P>
+                where
+                    T: FoldValue,
+                {
+                    fn fold_value<F>(self, folder: &mut F) -> Self
+                    where
+                        F: super::fold::Fold + ?Sized,
+                    {
+                        self.map_values(|value| T::fold_value(value, folder))
+                    }
+                }
+
+                impl<T, D> VisitValue for Delimited<T, D>
+                where
+                    T: VisitValue,
+                {
+                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                    where
+                        V: super::visit::Visit<'ast> + ?Sized,
+                    {
+                        T::visit_value(&self.contents, visitor);
+                    }
+                }
+
+                impl<T, D> VisitValueMut for Delimited<T, D>
+                where
+                    T: VisitValueMut,
+                {
+                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
+                    where
+                        V: super::visit_mut::VisitMut + ?Sized,
+                    {
+                        T::visit_value_mut(&mut self.contents, visitor);
+                    }
+                }
+
+                impl<T, D> FoldValue for Delimited<T, D>
+                where
+                    T: FoldValue,
+                {
+                    fn fold_value<F>(self, folder: &mut F) -> Self
+                    where
+                        F: super::fold::Fold + ?Sized,
+                    {
+                        let (delimiter, contents) = self.into_parts();
+                        Delimited::new(delimiter, T::fold_value(contents, folder))
+                    }
+                }
             }
-        });
-        let enums = self
-            .enums
-            .iter()
-            .map(|definition| traversal.enum_walker(definition, context));
-        tokens.chain(structs).chain(enums).collect()
+        }
     }
 }
 
@@ -1805,7 +2007,7 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
         .variants
         .is_empty()
         .then(|| quote!(_ => unreachable!("empty generated syntax category")));
-    let pretty_impl = context.pretty().then(|| {
+    let pretty_impl = {
         let pretty_arms = definition.variants.iter().map(|variant| {
             let variant = &variant.name;
             quote! {
@@ -1826,7 +2028,7 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
                 }
             }
         }
-    });
+    };
     let spelling_api = definition.operator.map(|_| {
         let from_token_arms = definition.variants.iter().map(|variant| {
             let variant_name = &variant.name;
@@ -1880,6 +2082,7 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
     });
     let declaration = (!definition.explicit).then(|| {
         quote! {
+            #[derive(::m2_syn::__SyntaxWalk)]
             #[derive(Debug, ::m2_syn::Spanned)]
             #[doc = concat!("The typed `", stringify!(#name), "` syntax category.")]
             pub enum #name {
@@ -1919,7 +2122,7 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
     }
 }
 
-fn to_snake_case(name: &str) -> String {
+pub(crate) fn to_snake_case(name: &str) -> String {
     let characters = name.chars().collect::<Vec<_>>();
     let mut result = String::new();
     for (index, character) in characters.iter().copied().enumerate() {
@@ -1963,7 +2166,7 @@ mod tests {
             }
         })
         .unwrap();
-        let expansion = syntax.expand(SyntaxFeatures::PRETTY_WALK).unwrap();
+        let expansion = syntax.expand().unwrap();
         parse2::<syn::File>(expansion.clone()).unwrap();
         let expansion = expansion.to_string();
 
@@ -1985,5 +2188,29 @@ mod tests {
         assert!(expansion.contains("AddEql"));
         assert!(expansion.contains("_If"));
         assert!(expansion.contains("Cma"));
+    }
+
+    #[test]
+    fn explicit_nodes_expand_after_the_shared_traversal_modules() {
+        let syntax: Syntax = parse2(quote! {
+            tokens { [,] }
+
+            strutuct! {
+                Example
+                child: Token![,],
+            }
+        })
+        .unwrap();
+        let expansion = syntax.expand().unwrap().to_string();
+        let visit = expansion.find("pub mod visit").unwrap();
+        let declaration = expansion
+            .find("these_macros_should_be_illegal :: strutuct !")
+            .unwrap();
+
+        assert!(expansion.contains("pub trait Visit < 'ast >"));
+        assert!(expansion.contains("__syntax_walk_function ! (visit , Example , Example)"));
+        assert!(expansion.contains("derive (:: m2_syn :: __SyntaxWalk)"));
+        assert!(!expansion.contains("VisitValue :: visit_value (& self . child"));
+        assert!(visit < declaration);
     }
 }

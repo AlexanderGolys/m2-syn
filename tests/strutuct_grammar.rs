@@ -40,7 +40,7 @@ mod grammar {
     strutuct! {
         #[derive(Debug, Spanned)]
         LambdaExpression
-        arguments: LambdaArguments {
+        arguments: |LambdaArguments| {
             Variadic(Symbol)
             ArgumentList(Delimited<Option<ArgumentListContent>>)
         },
@@ -73,7 +73,7 @@ mod grammar {
             #[derive(Debug, Clone, PartialEq, Eq)]
             DerivedFamily
             #[derive(Copy, Hash)]
-            kind: DerivedKind { First, Second },
+            kind: |DerivedKind| { First, Second },
         }
 
         fn requires_all<T: std::fmt::Debug + Clone + Copy + PartialEq + Eq + std::hash::Hash>() {}

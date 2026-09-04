@@ -8,10 +8,8 @@
 //! stream out of sync.
 
 use std::fmt::{Display, Formatter};
-#[cfg(feature = "pretty")]
 use std::io;
 
-#[cfg(feature = "pretty")]
 use crate::pretty::{
     PrettyOptions, PrettyReport, PrettyTree, format_tokens, format_tree, print_report,
 };
@@ -118,19 +116,16 @@ impl ParsedFile {
 
     /// Formats the current raw token representation as a recursively flattened
     /// table with explicit group boundaries.
-    #[cfg(feature = "pretty")]
     pub fn pretty_tokens(&self) -> String {
         format_tokens(&self.token_stream(), PrettyOptions::PLAIN)
     }
 
     /// Formats the complete generated typed CST as a Unicode tree.
-    #[cfg(feature = "pretty")]
     pub fn pretty_cst(&self) -> String {
         format_tree(&self.cst.pretty_tree(), PrettyOptions::PLAIN)
     }
 
     /// Builds a combined source, flat-token, and typed-CST inspection report.
-    #[cfg(feature = "pretty")]
     pub fn pretty_report(&self) -> PrettyReport<'_> {
         PrettyReport::new(
             &self.original_source,
@@ -145,7 +140,6 @@ impl ParsedFile {
     /// # Errors
     ///
     /// Returns an I/O error when standard output cannot be written.
-    #[cfg(feature = "pretty")]
     pub fn print_pretty(&self) -> io::Result<()> {
         print_report(self.pretty_report())
     }

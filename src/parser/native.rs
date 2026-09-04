@@ -536,6 +536,7 @@ enum UnaryAction {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Binding powers and unary behavior for one parser token.
 struct ParseInfo {
     /// The precedence.
     precedence: u8,

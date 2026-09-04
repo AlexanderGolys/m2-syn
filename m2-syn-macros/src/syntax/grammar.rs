@@ -23,6 +23,33 @@ struct ExplicitDeclarationKind {
     operator: Option<OperatorKind>,
 }
 
+pub(super) struct ExplicitDeclaration {
+    default_derives: TokenStream,
+    body: TokenStream,
+    generated_members: TokenStream,
+    storage: TokenStream,
+}
+
+impl ExplicitDeclaration {
+    pub(super) fn expand(&self) -> TokenStream {
+        let Self {
+            default_derives,
+            body,
+            generated_members,
+            storage,
+        } = self;
+        quote! {
+            ::these_macros_should_be_illegal::strutuct! {
+                #[derive(::m2_syn::__SyntaxWalk)]
+                #default_derives
+                #body
+                #generated_members
+                #storage
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct DefinitionFlags {
     boxed: bool,
@@ -55,7 +82,11 @@ enum GrammarExpr {
 pub(super) fn parse(
     input: ParseStream<'_>,
     tokens: &TokenDefinitions,
-) -> Result<(Vec<StructDefinition>, Vec<EnumDefinition>, Vec<TokenStream>)> {
+) -> Result<(
+    Vec<StructDefinition>,
+    Vec<EnumDefinition>,
+    Vec<ExplicitDeclaration>,
+)> {
     let mut declarations = Vec::new();
     let mut explicit_declarations = Vec::new();
     while !input.is_empty() {
@@ -87,7 +118,7 @@ fn parse_strutuct(
     input: ParseStream<'_>,
     tokens: &TokenDefinitions,
     declarations: &mut Vec<Declaration>,
-    output: &mut Vec<TokenStream>,
+    output: &mut Vec<ExplicitDeclaration>,
 ) -> Result<()> {
     let attrs = input.call(Attribute::parse_outer)?;
     let name: Ident = input.parse()?;
@@ -122,13 +153,11 @@ fn parse_strutuct(
     } else {
         quote!(#[derive(Debug, ::m2_syn::Spanned)])
     };
-    output.push(quote! {
-        ::these_macros_should_be_illegal::strutuct! {
-            #default_derives
-            #body
-            #generated_members
-            #storage
-        }
+    output.push(ExplicitDeclaration {
+        default_derives,
+        body,
+        generated_members,
+        storage,
     });
     Ok(())
 }
@@ -1292,7 +1321,7 @@ fn ensure_plain_element(shape: &Shape) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::syntax::{LeafKind, Shape, StructFields, Syntax, SyntaxFeatures};
+    use crate::syntax::{LeafKind, Shape, StructFields, Syntax};
     use quote::quote;
     use syn::parse2;
 
@@ -1321,7 +1350,7 @@ mod tests {
         assert!(syntax.structs.iter().any(|node| node.name == "Pair"));
         assert!(syntax.structs.iter().any(|node| node.name == "Wrapped"));
         assert!(syntax.enums.iter().any(|node| node.name == "Choice"));
-        let expansion = syntax.expand(SyntaxFeatures::PRETTY_WALK).unwrap();
+        let expansion = syntax.expand().unwrap();
         syn::parse2::<syn::File>(expansion).unwrap();
     }
 
@@ -1352,7 +1381,7 @@ mod tests {
                 .any(|node| node.name == "Expr" && node.boxed)
         );
 
-        let expansion = syntax.expand(SyntaxFeatures::PRETTY_WALK).unwrap();
+        let expansion = syntax.expand().unwrap();
         let rendered = expansion.to_string();
         assert!(rendered.contains("Box < Expr >"));
         assert!(rendered.contains("Delimited <"));
@@ -1414,7 +1443,7 @@ mod tests {
                 )
         }));
 
-        let expansion = syntax.expand(SyntaxFeatures::PRETTY_WALK).unwrap();
+        let expansion = syntax.expand().unwrap();
         let rendered = expansion.to_string();
         assert!(rendered.contains("PrefixOperator Add (:: m2_syn :: Token ! [+])"));
         assert!(rendered.contains("package_qualifier"));

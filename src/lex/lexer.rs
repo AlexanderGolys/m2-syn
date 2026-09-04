@@ -441,10 +441,7 @@ impl NativeLexer {
     fn lex_identifier(&mut self, output: &mut TokenStream) -> Result<(), LexError> {
         let start = self.offset;
         let mut bytes = vec![self.next_or_error(LexErrorKind::InvalidUtf8, start)?];
-        loop {
-            let Some(byte) = self.peek(0) else {
-                break;
-            };
+        while let Some(byte) = self.peek(0) {
             if !is_identifier_continue(byte) || self.math_operator_width().is_some() {
                 break;
             }
@@ -868,10 +865,8 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
             "list" => {
                 remove_last_clause(&mut required_clauses, RequiredClause::LoopBody);
             }
-            "do" => {
-                if !remove_last_clause(&mut required_clauses, RequiredClause::ExceptBody) {
-                    remove_last_clause(&mut required_clauses, RequiredClause::LoopBody);
-                }
+            "do" if !remove_last_clause(&mut required_clauses, RequiredClause::ExceptBody) => {
+                remove_last_clause(&mut required_clauses, RequiredClause::LoopBody);
             }
             _ => {}
         }
@@ -1490,11 +1485,11 @@ mod tests {
             assert!(is_identifier_start(byte));
             assert!(is_identifier_continue(byte));
         }
-        for byte in [b'0', b'9', b'$', b'\''] {
+        for byte in *b"09$'" {
             assert!(!is_identifier_start(byte));
             assert!(is_identifier_continue(byte));
         }
-        for byte in [b'_', b' ', b'+'] {
+        for byte in *b"_ +" {
             assert!(!is_identifier_start(byte));
             assert!(!is_identifier_continue(byte));
         }

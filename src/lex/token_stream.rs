@@ -17,19 +17,15 @@ mod punct;
 pub use punct::Punct;
 
 strutuct! {
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    /// A literal spelling together with its lexical category and source span.
-    LiteralToken
+/// A literal spelling together with its lexical category and source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiteralToken
     /// The literal's lexical category.
     #[derive(Copy, Hash)]
-    kind: LiteralKind {
-        /// A double-quoted string.
+    kind: |LiteralKind| {
         String,
-        /// A slash-delimited raw string.
         RawString,
-        /// An integer number.
         Integer,
-        /// A floating-point number.
         Float,
     },
     span: Span,
@@ -59,10 +55,6 @@ impl LiteralToken {
     }
 
     /// Returns the complete source spelling, including string delimiters.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `sources` cannot resolve this token's span.
     pub fn text(&self) -> &str {
         self.span
             .text()
@@ -297,23 +289,19 @@ impl Terminal for TokenGroup {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-/// The lexical category of source trivia.
-pub enum TriviaKind {
-    /// A comment extending to the end of a line.
-    LineComment,
-    /// A delimited block comment.
-    BlockComment,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Spanned)]
+strutuct! {
 /// A comment retained alongside a lexical atom.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Spanned)]
 pub struct Trivia {
     /// The kind.
-    kind: TriviaKind,
+    #[derive(Copy)]
+    kind: |TriviaKind| {
+        LineComment,
+        BlockComment
+    },
     /// The span.
     span: Span,
-}
+}}
 
 impl Trivia {
     /// Creates trivia from its category and source span.

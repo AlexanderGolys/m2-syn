@@ -7,6 +7,7 @@
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -131,11 +132,11 @@ impl Spanned for NativeRealtimeCell {
 /// cell boundaries are regenerated together for every reparsed region.
 #[derive(Debug)]
 pub struct NativeRealtimeParser {
-    /// The source.
+    /// The complete current source snapshot.
     source: String,
-    /// The cells.
+    /// Independently framed cells covering the current source.
     cells: Vec<NativeRealtimeCell>,
-    /// The reparsed cells.
+    /// The cell range rebuilt by the most recent operation.
     reparsed_cells: Range<usize>,
 }
 
@@ -184,7 +185,7 @@ impl NativeRealtimeParser {
             .unwrap_or(source.len());
         let rebuilt = analyze_region(&source[region_start..rebuild_end], region_start);
 
-        let mut previous = std::mem::take(&mut self.cells);
+        let mut previous = mem::take(&mut self.cells);
         let previous_suffix = previous.split_off(first_changed);
         let rebuilt_len = rebuilt.len();
         previous.extend(rebuilt);
@@ -388,8 +389,7 @@ fn analyze_region(source: &str, document_start: usize) -> Vec<NativeRealtimeCell
     }
     cells
 }
-
-/// Handles analyze cell.
+/// Handles analyze cell
 fn analyze_cell(
     source: &str,
     document_range: Range<usize>,

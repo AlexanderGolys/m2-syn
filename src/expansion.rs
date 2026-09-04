@@ -1,15 +1,11 @@
 //! Interfaces for expanding Macaulay2 syntax with Rust code.
 
 use std::error::Error;
-#[cfg(feature = "walk")]
 use std::fmt::{Display, Formatter};
 
 use crate::CellStream;
-#[cfg(feature = "walk")]
 use crate::fold::{self, Fold};
-#[cfg(feature = "walk")]
 use crate::nodes::{Expr, ExprAssignInstallMethod, ExprLambda, ExprLiteral, TypeAnnotation};
-#[cfg(feature = "walk")]
 use crate::{CellStreamError, NativeParseError, NativeParser, Parser, Tokenize, parse_quote_m2};
 
 /// A procedural macro over independently parseable Macaulay2 cells.
@@ -23,14 +19,9 @@ pub trait ProcMacro<Args = ()> {
     type Error: Error;
 
     /// Expands `input` using the invocation arguments in `args`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the implementation's error when the input cannot be expanded.
     fn expand(&mut self, input: CellStream, args: &Args) -> Result<CellStream, Self::Error>;
 }
 
-#[cfg(feature = "walk")]
 #[derive(Debug, Default)]
 /// A procedural macro that annotates methods returning a direct literal.
 ///
@@ -50,7 +41,6 @@ pub trait ProcMacro<Args = ()> {
 /// ```
 pub struct LiteralReturnTypes;
 
-#[cfg(feature = "walk")]
 #[derive(Debug)]
 /// A failure to parse or reconstruct input expanded by [`LiteralReturnTypes`].
 pub enum LiteralReturnTypesError {
@@ -60,7 +50,6 @@ pub enum LiteralReturnTypesError {
     Tokenize(CellStreamError),
 }
 
-#[cfg(feature = "walk")]
 impl Display for LiteralReturnTypesError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -70,7 +59,6 @@ impl Display for LiteralReturnTypesError {
     }
 }
 
-#[cfg(feature = "walk")]
 impl Error for LiteralReturnTypesError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
@@ -80,7 +68,6 @@ impl Error for LiteralReturnTypesError {
     }
 }
 
-#[cfg(feature = "walk")]
 impl ProcMacro for LiteralReturnTypes {
     type Error = LiteralReturnTypesError;
 
@@ -95,7 +82,6 @@ impl ProcMacro for LiteralReturnTypes {
     }
 }
 
-#[cfg(feature = "walk")]
 impl Fold for LiteralReturnTypes {
     fn fold_expr_assign_install_method(
         &mut self,
@@ -109,7 +95,6 @@ impl Fold for LiteralReturnTypes {
     }
 }
 
-#[cfg(feature = "walk")]
 /// Handles literal return annotation.
 fn literal_return_annotation(function: &Expr) -> Option<TypeAnnotation> {
     let Expr::Lambda(lambda) = function else {

@@ -140,8 +140,8 @@ impl TokenDefinitions {
         Ident::new(friendly, name_span(name.as_str(), &self.definitions))
     }
 
-    pub(crate) fn expand(&self, pretty: bool) -> TokenStream {
-        let delimiters = expand_delimiters(pretty);
+    pub(crate) fn expand(&self) -> TokenStream {
+        let delimiters = expand_delimiters();
         let operator_spellings = self
             .definitions
             .iter()
@@ -230,22 +230,20 @@ impl TokenDefinitions {
                     },
                 ),
             };
-            let pretty_impl = pretty.then(|| {
-                quote! {
-                    impl ::m2_syn::PrettyTree for #type_name {
-                        fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
-                            ::m2_syn::PrettyNode::token(
-                                ::std::format!(
-                                    "Token![{}]",
-                                    <Self as ::m2_syn::Token>::SPELLING,
-                                ),
+            let pretty_impl = quote! {
+                impl ::m2_syn::PrettyTree for #type_name {
+                    fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                        ::m2_syn::PrettyNode::token(
+                            ::std::format!(
+                                "Token![{}]",
                                 <Self as ::m2_syn::Token>::SPELLING,
-                                ::m2_syn::Spanned::expect_span(self),
-                            )
-                        }
+                            ),
+                            <Self as ::m2_syn::Token>::SPELLING,
+                            ::m2_syn::Spanned::expect_span(self),
+                        )
                     }
                 }
-            });
+            };
 
             quote! {
 
@@ -464,12 +462,7 @@ impl TokenDefinitions {
     }
 }
 
-fn expand_delimiters(pretty: bool) -> TokenStream {
-    let pretty_import = pretty.then(|| {
-        quote! {
-            use ::m2_syn::{PrettyNode, PrettyTree};
-        }
-    });
+fn expand_delimiters() -> TokenStream {
     let definitions = [
         (
             format_ident!("_ParenthesisDelimiter"),
@@ -490,15 +483,13 @@ fn expand_delimiters(pretty: bool) -> TokenStream {
     ]
     .into_iter()
     .map(|(name, kind)| {
-        let pretty_impl = pretty.then(|| {
-            quote! {
-                impl PrettyTree for #name {
-                    fn pretty_tree(&self) -> PrettyNode {
-                        PrettyNode::delimiter(Self::KIND, self.spans.clone())
-                    }
+        let pretty_impl = quote! {
+            impl PrettyTree for #name {
+                fn pretty_tree(&self) -> PrettyNode {
+                    PrettyNode::delimiter(Self::KIND, self.spans.clone())
                 }
             }
-        });
+        };
         quote! {
             #[derive(Debug, Clone, PartialEq, Eq, Spanned)]
             #[doc = concat!("The typed `", stringify!(#name), "` delimiter atom.")]
@@ -594,7 +585,7 @@ fn expand_delimiters(pretty: bool) -> TokenStream {
                 ParseStream, Span, Spanned, Lex, TokenParseError, TokenStream, TrailingTrivia,
                 parse_delimiter,
             };
-            #pretty_import
+            use ::m2_syn::{PrettyNode, PrettyTree};
 
             #(#definitions)*
         }

@@ -25,9 +25,9 @@ pub type Offset = usize;
 /// than bytes or terminal cells, so the first character on every line is at
 /// column one regardless of its UTF-8 width.
 pub struct LineColumn {
-    /// line number
+    /// The one-based line number.
     pub line: usize,
-    /// column number
+    /// The one-based Unicode-scalar column number.
     pub column: usize,
 }
 
@@ -282,9 +282,7 @@ impl Debug for Source {
 /// A shared source snapshot and optional byte range within it.
 #[derive(Clone)]
 pub struct Span {
-    /// The source.
     source: Arc<Source>,
-    /// The range.
     range: Option<Range<Offset>>,
 }
 

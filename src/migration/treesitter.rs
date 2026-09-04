@@ -796,7 +796,11 @@ impl<'source> Lowerer<'source> {
 
     /// Handles binary expr.
     fn binary_expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        let left = self.expr(self.required_field(node, "left")?)?;
+        let left = self.expr(
+            self.child_by_field(node, "left_operand")
+                .or_else(|| self.child_by_field(node, "left"))
+                .ok_or_else(|| self.unsupported("left operand", node))?,
+        )?;
         let operator = self.required_field(node, "operator")?;
         let right = self.expr(self.required_field(node, "right")?)?;
         if operator.kind() == "SPACE" {

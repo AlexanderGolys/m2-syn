@@ -12,17 +12,17 @@ use std::collections::BTreeSet;
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::{ToTokens, format_ident, quote};
-use syn::{Data, DeriveInput, Error, Fields, Member, Result, Type, parse_macro_input, parse_quote};
+use syn::parse::{Parse, ParseStream};
+use syn::{
+    Data, DeriveInput, Error, Fields, Member, Result, Token, Type, parse_macro_input, parse_quote,
+};
 
 fn base_crate() -> TokenStream {
     quote!(::m2_syn)
 }
 
-fn expand_syntax(
-    input: proc_macro::TokenStream,
-    features: syntax::SyntaxFeatures,
-) -> proc_macro::TokenStream {
-    let expansion = match syntax::generate(input.into(), features) {
+fn expand_syntax(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let expansion = match syntax::generate(input.into()) {
         Ok(expansion) => expansion,
         Err(error) => return error.into_compile_error().into(),
     };
@@ -32,28 +32,7 @@ fn expand_syntax(
 /// Declares typed syntax nodes and token atoms.
 #[proc_macro]
 pub fn syntax(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    expand_syntax(input, syntax::SyntaxFeatures::CORE)
-}
-
-/// Declares typed syntax nodes with presentation-tree implementations.
-#[doc(hidden)]
-#[proc_macro]
-pub fn syntax_pretty(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    expand_syntax(input, syntax::SyntaxFeatures::PRETTY)
-}
-
-/// Declares typed syntax nodes with traversal implementations.
-#[doc(hidden)]
-#[proc_macro]
-pub fn syntax_walk(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    expand_syntax(input, syntax::SyntaxFeatures::WALK)
-}
-
-/// Declares typed syntax nodes with presentation-tree and traversal implementations.
-#[doc(hidden)]
-#[proc_macro]
-pub fn syntax_pretty_walk(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    expand_syntax(input, syntax::SyntaxFeatures::PRETTY_WALK)
+    expand_syntax(input)
 }
 
 /// Resolves a token spelling to the type `syntax!` generates for it.
@@ -99,6 +78,408 @@ pub fn derive_spanned(input: proc_macro::TokenStream) -> proc_macro::TokenStream
     match expand_spanned(&input) {
         Ok(expansion) => expansion.into(),
         Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Generates the child-walking implementation for one expanded syntax type.
+#[doc(hidden)]
+#[proc_macro_derive(__SyntaxWalk)]
+pub fn derive_syntax_walk(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_syntax_walk(&input).into()
+}
+
+struct SyntaxTokenWalk {
+    name: syn::Ident,
+    ty: Type,
+}
+
+impl Parse for SyntaxTokenWalk {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let name = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let ty = input.parse()?;
+        Ok(Self { name, ty })
+    }
+}
+
+/// Generates the leaf-walking implementation for one syntax token type.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __syntax_token_walk(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let SyntaxTokenWalk { name, ty } = parse_macro_input!(input as SyntaxTokenWalk);
+    expand_syntax_token_walk(&name, &ty).into()
+}
+
+fn expand_syntax_token_walk(name: &syn::Ident, ty: &Type) -> TokenStream {
+    let snake = syntax::to_snake_case(&name.to_string());
+    let visit_method = format_ident!("visit_{snake}");
+    let visit_mut_method = format_ident!("visit_{snake}_mut");
+    let fold_method = format_ident!("fold_{snake}");
+    quote! {
+        impl __walk::WalkChildren for #ty {
+            fn walk_children<'ast, V>(&'ast self, _visitor: &mut V)
+            where
+                V: visit::Visit<'ast> + ?Sized,
+            {}
+        }
+
+        impl __walk::WalkChildrenMut for #ty {
+            fn walk_children_mut<V>(&mut self, _visitor: &mut V)
+            where
+                V: visit_mut::VisitMut + ?Sized,
+            {}
+        }
+
+        impl __walk::FoldChildren for #ty {
+            fn fold_children<F>(self, _folder: &mut F) -> Self
+            where
+                F: fold::Fold + ?Sized,
+            {
+                self
+            }
+        }
+
+        impl __walk::VisitValue for #ty {
+            fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+            where
+                V: visit::Visit<'ast> + ?Sized,
+            {
+                visitor.#visit_method(self);
+            }
+        }
+
+        impl __walk::VisitValueMut for #ty {
+            fn visit_value_mut<V>(&mut self, visitor: &mut V)
+            where
+                V: visit_mut::VisitMut + ?Sized,
+            {
+                visitor.#visit_mut_method(self);
+            }
+        }
+
+        impl __walk::FoldValue for #ty {
+            fn fold_value<F>(self, folder: &mut F) -> Self
+            where
+                F: fold::Fold + ?Sized,
+            {
+                folder.#fold_method(self)
+            }
+        }
+
+    }
+}
+
+struct SyntaxWalkFunction {
+    traversal: syn::Ident,
+    name: syn::Ident,
+    ty: Type,
+}
+
+impl Parse for SyntaxWalkFunction {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let traversal = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let name = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let ty = input.parse()?;
+        Ok(Self {
+            traversal,
+            name,
+            ty,
+        })
+    }
+}
+
+/// Generates one free function inside a traversal module.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __syntax_walk_function(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(input as SyntaxWalkFunction);
+    expand_syntax_walk_function(&input).into()
+}
+
+fn expand_syntax_walk_function(input: &SyntaxWalkFunction) -> TokenStream {
+    let name = &input.name;
+    let ty = &input.ty;
+    let snake = syntax::to_snake_case(&name.to_string());
+    match input.traversal.to_string().as_str() {
+        "visit" => {
+            let method = format_ident!("visit_{snake}");
+            quote! {
+                #[doc = concat!("Walks the children of a `", stringify!(#name), "` node.")]
+                pub fn #method<'ast, V>(visitor: &mut V, node: &'ast #ty)
+                where
+                    V: Visit<'ast> + ?Sized,
+                {
+                    super::__walk::WalkChildren::walk_children(node, visitor);
+                }
+            }
+        }
+        "visit_mut" => {
+            let method = format_ident!("visit_{snake}_mut");
+            quote! {
+                #[doc = concat!("Walks the mutable children of a `", stringify!(#name), "` node.")]
+                pub fn #method<V>(visitor: &mut V, node: &mut #ty)
+                where
+                    V: VisitMut + ?Sized,
+                {
+                    super::__walk::WalkChildrenMut::walk_children_mut(node, visitor);
+                }
+            }
+        }
+        "fold" => {
+            let method = format_ident!("fold_{snake}");
+            quote! {
+                #[doc = concat!("Folds the children of a `", stringify!(#name), "` node.")]
+                pub fn #method<F>(folder: &mut F, node: #ty) -> #ty
+                where
+                    F: Fold + ?Sized,
+                {
+                    super::__walk::FoldChildren::fold_children(node, folder)
+                }
+            }
+        }
+        _ => Error::new_spanned(&input.traversal, "expected `visit`, `visit_mut`, or `fold`")
+            .to_compile_error(),
+    }
+}
+
+fn is_syntax_storage(member: &Member) -> bool {
+    matches!(
+        member,
+        Member::Named(name)
+            if matches!(
+                name.to_string().as_str(),
+                "span"
+                    | "raw"
+                    | "package_qualifier"
+                    | "index_qualifier"
+                    | "leading_trivia"
+                    | "trailing_trivia"
+                    | "delimiter"
+                    | "comments"
+            )
+    )
+}
+
+fn walk_struct_fields(fields: &Fields, mutable: bool) -> TokenStream {
+    let calls = fields
+        .members()
+        .filter(|member| !is_syntax_storage(member))
+        .map(|member| {
+            if mutable {
+                quote!(__walk::VisitValueMut::visit_value_mut(&mut self.#member, visitor);)
+            } else {
+                quote!(__walk::VisitValue::visit_value(&self.#member, visitor);)
+            }
+        });
+    quote!(#(#calls)*)
+}
+
+fn walk_enum_fields(input: &DeriveInput, mutable: bool) -> TokenStream {
+    let Data::Enum(data) = &input.data else {
+        unreachable!("enum walking requires an enum")
+    };
+    let arms = data.variants.iter().map(|variant| {
+        let name = &variant.ident;
+        let members = variant.fields.members().collect::<Vec<_>>();
+        let bindings = members
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format_ident!("__m2_syn_field_{index}"))
+            .collect::<Vec<_>>();
+        let selected = members
+            .iter()
+            .zip(&bindings)
+            .filter(|(member, _)| !is_syntax_storage(member));
+        let calls = selected.map(|(_, binding)| {
+            if mutable {
+                quote!(__walk::VisitValueMut::visit_value_mut(#binding, visitor);)
+            } else {
+                quote!(__walk::VisitValue::visit_value(#binding, visitor);)
+            }
+        });
+        match &variant.fields {
+            Fields::Named(_) => {
+                let patterns = members
+                    .iter()
+                    .zip(&bindings)
+                    .map(|(member, binding)| quote!(#member: #binding));
+                quote!(Self::#name { #(#patterns),* } => { #(#calls)* })
+            }
+            Fields::Unnamed(_) => quote!(Self::#name(#(#bindings),*) => { #(#calls)* }),
+            Fields::Unit => quote!(Self::#name => {}),
+        }
+    });
+    quote!(match self { #(#arms,)* })
+}
+
+fn fold_struct(input: &DeriveInput) -> TokenStream {
+    let Data::Struct(data) = &input.data else {
+        unreachable!("struct folding requires a struct")
+    };
+    let name = &input.ident;
+    let members = data.fields.members().collect::<Vec<_>>();
+    let bindings = members
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format_ident!("__m2_syn_field_{index}"))
+        .collect::<Vec<_>>();
+    let values = members.iter().zip(&bindings).map(|(member, binding)| {
+        if is_syntax_storage(member) {
+            quote!(#binding)
+        } else {
+            quote!(__walk::FoldValue::fold_value(#binding, folder))
+        }
+    });
+    match &data.fields {
+        Fields::Named(_) => {
+            let patterns = members
+                .iter()
+                .zip(&bindings)
+                .map(|(member, binding)| quote!(#member: #binding));
+            let fields = members
+                .iter()
+                .zip(values)
+                .map(|(member, value)| quote!(#member: #value));
+            quote! {
+                let #name { #(#patterns),* } = self;
+                #name { #(#fields),* }
+            }
+        }
+        Fields::Unnamed(_) => quote! {
+            let #name(#(#bindings),*) = self;
+            #name(#(#values),*)
+        },
+        Fields::Unit => quote!(self),
+    }
+}
+
+fn fold_enum(input: &DeriveInput) -> TokenStream {
+    let Data::Enum(data) = &input.data else {
+        unreachable!("enum folding requires an enum")
+    };
+    let arms = data.variants.iter().map(|variant| {
+        let name = &variant.ident;
+        let members = variant.fields.members().collect::<Vec<_>>();
+        let bindings = members
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format_ident!("__m2_syn_field_{index}"))
+            .collect::<Vec<_>>();
+        let values = members.iter().zip(&bindings).map(|(member, binding)| {
+            if is_syntax_storage(member) {
+                quote!(#binding)
+            } else {
+                quote!(__walk::FoldValue::fold_value(#binding, folder))
+            }
+        });
+        match &variant.fields {
+            Fields::Named(_) => {
+                let patterns = members
+                    .iter()
+                    .zip(&bindings)
+                    .map(|(member, binding)| quote!(#member: #binding));
+                let fields = members
+                    .iter()
+                    .zip(values)
+                    .map(|(member, value)| quote!(#member: #value));
+                quote!(Self::#name { #(#patterns),* } => Self::#name { #(#fields),* })
+            }
+            Fields::Unnamed(_) => {
+                quote!(Self::#name(#(#bindings),*) => Self::#name(#(#values),*))
+            }
+            Fields::Unit => quote!(Self::#name => Self::#name),
+        }
+    });
+    quote!(match self { #(#arms,)* })
+}
+
+fn expand_syntax_walk(input: &DeriveInput) -> TokenStream {
+    let name = &input.ident;
+    if !input.generics.params.is_empty() {
+        return Error::new_spanned(input, "syntax walking requires a concrete syntax type")
+            .to_compile_error();
+    }
+    let snake = syntax::to_snake_case(&name.to_string());
+    let visit_method = format_ident!("visit_{snake}");
+    let visit_mut_method = format_ident!("visit_{snake}_mut");
+    let fold_method = format_ident!("fold_{snake}");
+    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+    let visit = match &input.data {
+        Data::Struct(data) => walk_struct_fields(&data.fields, false),
+        Data::Enum(_) => walk_enum_fields(input, false),
+        Data::Union(_) => {
+            return Error::new_spanned(input, "syntax walking does not support unions")
+                .to_compile_error();
+        }
+    };
+    let visit_mut = match &input.data {
+        Data::Struct(data) => walk_struct_fields(&data.fields, true),
+        Data::Enum(_) => walk_enum_fields(input, true),
+        Data::Union(_) => unreachable!(),
+    };
+    let fold = match &input.data {
+        Data::Struct(_) => fold_struct(input),
+        Data::Enum(_) => fold_enum(input),
+        Data::Union(_) => unreachable!(),
+    };
+    quote! {
+        impl #impl_generics __walk::WalkChildren for #name #type_generics #where_clause {
+            fn walk_children<'ast, V>(&'ast self, visitor: &mut V)
+            where
+                V: visit::Visit<'ast> + ?Sized,
+            {
+                #visit
+            }
+        }
+
+        impl #impl_generics __walk::WalkChildrenMut for #name #type_generics #where_clause {
+            fn walk_children_mut<V>(&mut self, visitor: &mut V)
+            where
+                V: visit_mut::VisitMut + ?Sized,
+            {
+                #visit_mut
+            }
+        }
+
+        impl #impl_generics __walk::FoldChildren for #name #type_generics #where_clause {
+            fn fold_children<F>(self, folder: &mut F) -> Self
+            where
+                F: fold::Fold + ?Sized,
+            {
+                #fold
+            }
+        }
+
+        impl __walk::VisitValue for #name {
+            fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+            where
+                V: visit::Visit<'ast> + ?Sized,
+            {
+                visitor.#visit_method(self);
+            }
+        }
+
+        impl __walk::VisitValueMut for #name {
+            fn visit_value_mut<V>(&mut self, visitor: &mut V)
+            where
+                V: visit_mut::VisitMut + ?Sized,
+            {
+                visitor.#visit_mut_method(self);
+            }
+        }
+
+        impl __walk::FoldValue for #name {
+            fn fold_value<F>(self, folder: &mut F) -> Self
+            where
+                F: fold::Fold + ?Sized,
+            {
+                folder.#fold_method(self)
+            }
+        }
+
     }
 }
 

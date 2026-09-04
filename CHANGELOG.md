@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.5.0 — 2026-09-04
+
+- Expand each typed node through its own `strutuct!` invocation while keeping
+  the shared `Visit`, `VisitMut`, and `Fold` method inventories in one outer
+  `syntax!` expansion, making generated nodes substantially easier for
+  rust-analyzer to locate and display.
+- Generate the default traversal functions directly inside the public
+  `visit`, `visit_mut`, and `fold` modules so consumers can call them without
+  going through a trait method.
+- Make traversal and pretty-tree support unconditional and retain only the
+  optional `tree-sitter` Cargo feature.
+- Update `tree-sitter-macaulay2` to 6.1.2 and align typed reconstruction with
+  its current grammar, including nested lambda blocks, `else continue` inside
+  list comprehensions, and newline-sensitive `lib | name | if` forms found in
+  the Macaulay2 library corpus.
+- Treat a comma-free cell as its contained expression rather than an
+  `ExprPack`; packs now require an actual comma.
+- Simplify the type-inference example to demonstrate visitor dispatch and a
+  small set of expression result rules without inventing an unsupported type
+  hierarchy or solver.
+- Upgrade `these-macros-should-be-illegal` to 0.7 and use explicit nested type
+  names where the typed schema requires stable public names.
+
+### Migration
+
+- Remove `pretty` and `walk` from downstream feature lists. Their APIs are now
+  always available; use `default-features = false` only to omit Tree-sitter.
+- Code that deliberately matched a singleton `ExprPack` should match the
+  contained expression instead. `ExprPack` now represents comma-separated
+  syntax only.
+- Custom syntax declarations continue to use `syntax!`, but their nested
+  `strutuct!` nodes and per-node traversal implementations now expand in later,
+  independent macro-expansion stages.
+
 ## 0.4.0 — 2026-08-29
 
 - Replace the flat generated CST schema with explicit, arbitrarily nested

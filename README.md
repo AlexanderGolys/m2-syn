@@ -5,7 +5,8 @@
 [![license](https://img.shields.io/crates/l/m2-syn.svg)](https://github.com/AlexanderGolys/m2-syn/blob/master/LICENSE)
 
 `m2-syn` is a parser-independent typed syntax graph for Macaulay2. One
-`syntax!` declaration describes the algebraic shape of the graph; generated
+`syntax!` declaration inventories the algebraic graph while its nested
+`strutuct!` declarations expand each node independently. Generated
 implementations provide construction, traversal, source provenance, and
 conversion from a concrete syntax tree.
 
@@ -14,19 +15,15 @@ adapter interfaces are being established.
 
 ## Cargo features
 
-The default feature set preserves the complete API. Consumers can disable it
-and select only the capabilities they use:
+Traversal, typed-tree inspection, and the native parser are always available.
+Only the alternative parser backend is optional:
 
 - `tree-sitter` enables the Tree-sitter parser adapter, incremental parser,
-  `parse_file`, `parse_tokens`, and `ParsedFile::from_source`;
-- `pretty` enables typed-tree and token inspection through `PrettyTree`,
-  `PrettyReport`, and the `ParsedFile::pretty_*` methods;
-- `walk` generates and exports the `visit`, `visit_mut`, and `fold` traversal
-  modules.
+  `parse_file`, `parse_tokens`, and `ParsedFile::from_source`.
 
-The native lexer, native precedence parser, typed nodes, quoting, emission,
-spans, and parser-independent migration traits remain available with
-`default-features = false`.
+The native lexer, native precedence parser, typed nodes, traversal, pretty
+inspection, quoting, emission, spans, and parser-independent migration traits
+remain available with `default-features = false`.
 
 ## Project direction
 
@@ -42,7 +39,7 @@ The current priority is the basic source pipeline:
 3. emit normalized M2 that parses back to the same structure.
 
 The syntax model follows the grammar published as `tree-sitter-macaulay2`
-`6.0.0`, resolved from the registry like any other dependency. Local builds and
+`6.1.2`, resolved from the registry like any other dependency. Local builds and
 tests therefore exercise the same grammar downstream users get, rather than
 whatever happens to be checked out beside the repository.
 
@@ -172,11 +169,12 @@ syntax! {
 }
 ```
 
-The canonical declaration lives in `src/schema/nodes.rs`, where the `syntax!`
-procedural macro expands it into the token, node, traversal, and fold items,
-and into the `visit`, `visit_mut`, and `fold` modules re-exported at the crate
-root. The expansion is items only — no `macro_rules!` — so rust-analyzer
-resolves every generated name.
+The canonical declaration lives in `src/schema/nodes.rs`. The outer `syntax!`
+pass reads the unexpanded declarations to build the shared method inventories,
+then re-emits every `strutuct!` invocation. Rust expands those invocations and
+their per-type child walkers separately. The documented `visit`, `visit_mut`,
+and `fold` modules are re-exported at the crate root without placing hundreds
+of free walker functions directly in the root namespace.
 
 `Token!` and `Delimiter!` are ordinary source in `src/schema/macros.rs` instead of
 part of that expansion. Neither depends on the schema: `Token!` forwards the
@@ -290,12 +288,11 @@ its children. `VisitMut` edits the owned typed graph in place. `Fold` consumes
 nodes and returns the migrated graph.
 
 `cargo run --example type_inference` demonstrates the intended analysis path:
-generated `Visit` dispatch selects node-specific rules, and the binary rule
-consumes the neighbouring operand facts to compute an upward-closed result
-range. Graph storage and fixed-point solving belong in the analysis/LSP layer;
-this example only verifies the syntax traversal boundary. Its generic
-`InferenceContext` leaves concrete types, values, and deferred database or
-signature queries under the control of the consuming analysis layer.
+an expression visitor returns simple names for a few obvious syntax forms,
+passes assignment and parenthesized-expression types through, and joins the
+two result types of a conditional. Unsupported expressions return `Unknown`.
+The example deliberately has no type hierarchy, symbol registry, or solver;
+those belong in the analysis/LSP layer rather than the syntax crate.
 
 ## Spans
 
@@ -501,7 +498,7 @@ snapshot. `from_source` uses Tree-sitter; `from_source_native` selects the direc
 precedence parser.
 
 ```rust
-# #[cfg(all(feature = "pretty", feature = "tree-sitter", feature = "walk"))]
+# #[cfg(feature = "tree-sitter")]
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 use m2_syn::nodes::Symbol;
 use m2_syn::{ParsedFile, visit_mut::VisitMut};
@@ -532,7 +529,7 @@ println!("{}", file.pretty_cst());
 file.print_pretty()?;
 # Ok(())
 # }
-# #[cfg(not(all(feature = "pretty", feature = "tree-sitter", feature = "walk")))]
+# #[cfg(not(feature = "tree-sitter"))]
 # fn main() {}
 ```
 

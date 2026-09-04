@@ -1,3 +1,4 @@
+crate::syntax! {
 // P = precedence, B = binary binding strength, U = unary binding strength.
 // `L` and `R` derive B from P. Columns absent for a role are omitted, and
 // spellings with identical metadata share one row.
@@ -78,125 +79,106 @@ strutuct! { StringContent }
 // `Lines<T>` is stored as `Vec<T>` and printed one element per line.
 #[comments]
 #[cell_stream]
-strutuct! {
-    SourceFile
+strutuct!{ SourceFile
     cells: Lines<Cell>,
     eof: EOF,
 }
 
 #[comments]
-strutuct! {
-    Cell
+strutuct!{ Cell
     content: PackedContent,
     semicolon: Token![;]?,
     eoc: EOC,
 }
 
-strutuct! {
-    Component
+strutuct!{ Component
     Expr(Expr*)
     Empty(Empty)
 }
 
-strutuct! {
-    ExprPack
+strutuct!{ ExprPack
     pack: Punctuated<Component>,
 }
 
-strutuct! {
-    PackedContent
+strutuct!{ PackedContent
     Expr(Expr*)
     Pack(ExprPack)
 }
 
-strutuct! {
-    Statement
+strutuct!{ Statement
     content: PackedContent,
     semicolon: Token![;],
 }
 
 #[delimiter(bracket)]
-strutuct! {
-    Array
+strutuct!{ Array
     statements: Vec<Statement>,
     elements: PackedContent?,
 }
 
 #[delimiter(brace)]
-strutuct! {
-    List
+strutuct!{ List
     statements: Vec<Statement>,
     elements: PackedContent?,
 }
 
 #[delimiter(angle_bar)]
-strutuct! {
-    AngleBarList
+strutuct!{ AngleBarList
     statements: Vec<Statement>,
     elements: PackedContent?,
 }
 
 #[delimiter(parenthesis)]
-strutuct! {
-    Sequence
+strutuct!{ Sequence
     statements: Vec<Statement>,
     elements: PackedContent?,
 }
 
 #[delimiter(parenthesis)]
-strutuct! {
-    Holder
+strutuct!{ Holder
     muted: Vec<Statement>,
     value: Expr*?,
 }
 
-strutuct! {
-    StringElement
+strutuct!{ StringElement
     Escape(EscapeSequence)
     Content(StringContent)
 }
 
 #[literal(string)]
-strutuct! {
-    StringLiteral
+strutuct!{ StringLiteral
     elements: Vec<StringElement>,
 }
 
-strutuct! {
-    RawStringElement
+strutuct!{ RawStringElement
     Escape(EscapeSequence)
     Content(RawStringContent)
 }
 
 #[literal(raw_string)]
-strutuct! {
-    RawStringLiteral
+strutuct!{ RawStringLiteral
     elements: Vec<RawStringElement>,
 }
 
-strutuct! {
-    AssignmentArgument
+strutuct!{ AssignmentArgument
     List(AssignmentList*)
     Empty(Empty)
     Symbol(Symbol)
     Op(ExprOp)
 }
 
-strutuct! {
-    AssignmentListContent
+strutuct!{ AssignmentListContent
     Argument(AssignmentArgument)
     Pack {
         arguments: Punctuated<AssignmentArgument>,
     }
 }
 
-strutuct! {
-    AssignmentList
+strutuct!{ AssignmentList
     contents: Delimited<Option<AssignmentListContent>>,
 }
 
-strutuct! {
-    ArgumentListContent
+strutuct!{ ArgumentListContent
     Symbol(Symbol)
     Pack {
         arguments: Punctuated<Symbol>,
@@ -204,74 +186,62 @@ strutuct! {
 }
 
 // These products are shared by otherwise independent expression families.
-strutuct! {
-    TypeAnnotation
+strutuct!{ TypeAnnotation
     typical_value: Expr*,
     operator: Token![=>],
 }
 
-strutuct! {
-    ThenClause
+strutuct!{ ThenClause
     then_token: Token![then],
     expr: Expr*,
 }
 
-strutuct! {
-    ElseClause
+strutuct!{ ElseClause
     else_token: Token![else],
     expr: Expr*,
 }
 
-strutuct! {
-    RangeBoundFrom
+strutuct!{ RangeBoundFrom
     from_token: Token![from],
     value: Expr*,
 }
 
-strutuct! {
-    RangeBoundTo
+strutuct!{ RangeBoundTo
     to_token: Token![to],
     value: Expr*,
 }
 
-strutuct! {
-    WhenCondition
+strutuct!{ WhenCondition
     when_token: Token![when],
     condition: Expr*,
 }
 
-strutuct! {
-    ListStep
+strutuct!{ ListStep
     list_token: Token![list],
     expr: Expr*,
 }
 
-strutuct! {
-    DoStep
+strutuct!{ DoStep
     do_token: Token![do],
     statement: Expr*,
 }
 
-strutuct! {
-    LoopBody
+strutuct!{ LoopBody
     list_step: ListStep?,
     do_step: DoStep?,
 }
 
-strutuct! {
-    OfClass
+strutuct!{ OfClass
     of_token: Token![of],
     parent: Expr*,
 }
 
-strutuct! {
-    FromInstance
+strutuct!{ FromInstance
     from_token: Token![from],
     instance: Expr*,
 }
 
-strutuct! {
-    TryFallback
+strutuct!{ TryFallback
     Else(ElseClause)
     Except {
         except_token: Token![except],
@@ -283,8 +253,7 @@ strutuct! {
 
 // Semantic alternatives are nested so every layer becomes a dispatch point.
 // The short layer names keep the generated cumulative type names readable.
-strutuct! {
-    Expr
+strutuct!{ Expr
     Literal {
         Float(FloatLiteral)
         Integer(IntegerLiteral)
@@ -557,4 +526,5 @@ strutuct! {
         }
     }
     Symbol(Symbol)
+}
 }

@@ -38,6 +38,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::mem::take;
 use std::ops::Deref;
+use std::slice::Iter;
 use std::sync::Arc;
 use std::vec::IntoIter;
 
@@ -434,7 +435,7 @@ impl IntoIterator for CellTokenStream {
 
 impl<'syntax> IntoIterator for &'syntax CellTokenStream {
     type Item = &'syntax CellTokenTree;
-    type IntoIter = std::slice::Iter<'syntax, CellTokenTree>;
+    type IntoIter = Iter<'syntax, CellTokenTree>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
@@ -442,11 +443,8 @@ impl<'syntax> IntoIterator for &'syntax CellTokenStream {
 }
 
 #[derive(Debug, Clone, Default)]
-/// Internal state for CellStreamData.
 struct CellStreamData {
-    /// The cells.
     cells: Vec<CellTokenStream>,
-    /// The source.
     source: Option<Arc<Source>>,
 }
 
@@ -782,7 +780,7 @@ impl IntoIterator for CellStream {
 
 impl<'syntax> IntoIterator for &'syntax CellStream {
     type Item = &'syntax CellTokenStream;
-    type IntoIter = std::slice::Iter<'syntax, CellTokenStream>;
+    type IntoIter = Iter<'syntax, CellTokenStream>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()

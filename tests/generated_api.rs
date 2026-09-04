@@ -112,6 +112,22 @@ fn fold_migrates_the_owned_tree() {
 }
 
 #[test]
+fn default_walkers_are_public_functions() {
+    let mut node = assignment();
+    let mut collector = SymbolCollector(Vec::new());
+
+    m2_syn::visit::visit_expr(&mut collector, &node);
+    assert_eq!(collector.0, ["left", "right"]);
+
+    m2_syn::visit_mut::visit_expr_mut(&mut Rename, &mut node);
+    let node = m2_syn::fold::fold_expr(&mut Uppercase, node);
+    let mut collector = SymbolCollector(Vec::new());
+    m2_syn::visit::visit_expr(&mut collector, &node);
+
+    assert_eq!(collector.0, ["LEFT_MUT", "RIGHT_MUT"]);
+}
+
+#[test]
 fn direct_and_transitive_embeddings_are_generated() {
     let expression: Expr = symbol("x", 0).into();
     let operator: BinaryOperator = multiply(1).into();

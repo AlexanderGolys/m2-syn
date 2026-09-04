@@ -98,11 +98,8 @@ macro_rules! punc {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Spanned)]
 pub struct Punctuated<S, P = Token![,]> {
-    /// The first.
     first: S,
-    /// The second.
     second: (P, S),
-    /// The rest.
     rest: Vec<(P, S)>,
 }
 
@@ -219,18 +216,14 @@ impl<S, P> Punctuated<S, P> {
     pub fn try_map<T, Q, E>(
         self,
         mut map_value: impl FnMut(S) -> Result<T, E>,
-        mut map_punctuation: impl FnMut(P) -> Result<Q, E>,
+        mut map_punct: impl FnMut(P) -> Result<Q, E>,
     ) -> Result<Punctuated<T, Q>, E> {
         let (pair, rest) = self.into_parts();
-        let (first, punctuation, second) = pair.into_parts();
+        let (first, punct, second) = pair.into_parts();
         Ok(Punctuated::from_pair_and_rest(
-            SeparatedPair::new(
-                map_value(first)?,
-                map_punctuation(punctuation)?,
-                map_value(second)?,
-            ),
+            SeparatedPair::new(map_value(first)?, map_punct(punct)?, map_value(second)?),
             rest.into_iter()
-                .map(|(punctuation, value)| Ok((map_punctuation(punctuation)?, map_value(value)?)))
+                .map(|(punct, value)| Ok((map_punct(punct)?, map_value(value)?)))
                 .collect::<Result<Vec<_>, E>>()?,
         ))
     }
@@ -239,8 +232,8 @@ impl<S, P> Punctuated<S, P> {
 impl<S: Lex, P: Lex> Lex for Punctuated<S, P> {
     fn to_tokens(&self, output: &mut TokenStream) {
         self.first.to_tokens(output);
-        for (punctuation, value) in self.pairs() {
-            punctuation.to_tokens(output);
+        for (punct, value) in self.pairs() {
+            punct.to_tokens(output);
             value.to_tokens(output);
         }
     }
@@ -253,12 +246,12 @@ where
 {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
         let first = S::parse(input)?;
-        let punctuation = P::parse(input)?;
+        let punct = P::parse(input)?;
         let second = S::parse(input)?;
-        let mut values = Self::new(first, punctuation, second);
+        let mut values = Self::new(first, punct, second);
         while input.peek().is_some_and(P::matches_token_tree) {
-            let punctuation = P::parse(input)?;
-            values.push(punctuation, S::parse(input)?);
+            let punct = P::parse(input)?;
+            values.push(punct, S::parse(input)?);
         }
         Ok(values)
     }

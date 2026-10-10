@@ -2,3 +2,6 @@
 /book/book
 /AGENTS.md
 /TODO.md
+/codex-session-*.md
+.claude/settings.local.json
+/examples/zz_*.rs

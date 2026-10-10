@@ -288,11 +288,15 @@ its children. `VisitMut` edits the owned typed graph in place. `Fold` consumes
 nodes and returns the migrated graph.
 
 `cargo run --example type_inference` demonstrates the intended analysis path:
-an expression visitor returns simple names for a few obvious syntax forms,
-passes assignment and parenthesized-expression types through, and joins the
-two result types of a conditional. Unsupported expressions return `Unknown`.
-The example deliberately has no type hierarchy, symbol registry, or solver;
-those belong in the analysis/LSP layer rather than the syntax crate.
+generated dispatch selects one node-specific rule per syntax form instead of a
+hand-written match, and a rule calls its own free walker before reading the
+classes its operands recorded. Literals, the four bracketing classes, prefix and
+binary operators, simple assignment, parenthesization, conditionals, and cell
+value suppression each own one override; a conditional joins its branches by
+walking the Macaulay2 class hierarchy, so `if p then 1 else 1.5` infers `Number`
+and an unmodelled expression keeps the `Thing` bound. The example deliberately
+has no symbol registry or solver; those belong in the analysis/LSP layer rather
+than the syntax crate.
 
 ## Spans
 
@@ -623,4 +627,4 @@ The schema is expanded by the `syntax!` procedural macro, so changes to
 `src/schema/nodes.rs` are picked up by the next compile; there is no generated source
 to refresh or commit.
 
-`m2-syn` is licensed under the [GNU General Public License v3.0](https://github.com/AlexanderGolys/m2-syn/blob/master/LICENSE).
+`m2-syn` is licensed under the [MIT License](https://github.com/AlexanderGolys/m2-syn/blob/master/LICENSE).

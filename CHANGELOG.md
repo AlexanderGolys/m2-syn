@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-10-10
 
+- Relicense `m2-syn` and `m2-syn-macros` from GPL-3.0-only to MIT.
+- Accept `x <- y` as a parallel assignment target, as in `(T <- T) := f`, which
+  installs a method for `<-`, through the new `AssignmentArgument::Evaluated`.
+- Rewrite the `type_inference` example around generated per-node dispatch:
+  each rule overrides one node, and conditionals join their branches through
+  the Macaulay2 class hierarchy.
 - Recover the layout between a delimiter and the comment beside it, measuring
   each gap from the span written last rather than from the nearest token, so
   `( -- c\nx)` and `(x -- c\n)` keep their spaces and line breaks.

@@ -1,9 +1,9 @@
 [package]
 name = "m2-syn-macros"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Procedural macros for m2-syn"
-license = "GPL-3.0-only"
+license = "MIT"
 repository = "https://github.com/AlexanderGolys/m2-syn"
 
 [lib]

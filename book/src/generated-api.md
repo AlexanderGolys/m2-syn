@@ -23,7 +23,10 @@ nodes and returns the reconstructed graph.
 `cargo run --example type_inference` demonstrates the intended analysis path:
 generated `Visit` dispatch selects node-specific rules, and the binary rule
 consumes the neighbouring operand facts to compute an upward-closed result
-range. Graph storage and fixed-point solving belong in the analysis/LSP layer;
-this example only verifies the syntax traversal boundary. Its generic
-`InferenceContext` leaves concrete types, values, and deferred database or
-signature queries under the control of the consuming analysis layer.
+range. Each rule overrides exactly one node, calls that node's free walker when
+it needs its operands, and records the most specific Macaulay2 class it can
+prove; conditionals join their branches through the class hierarchy and
+unmodelled expressions keep the `Thing` bound. Symbol resolution, graph storage
+and fixed-point solving belong in the analysis/LSP layer; this example only
+verifies the syntax traversal boundary, so its span-keyed fact table is the
+smallest storage that lets a parent rule read what its children proved.

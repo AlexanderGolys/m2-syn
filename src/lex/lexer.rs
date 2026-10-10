@@ -262,12 +262,7 @@ pub fn lex_str_recovering(source: &str) -> Result<Recovered<TokenStream, LexErro
 pub(crate) fn lex_source_recovering(
     source: &Arc<Source>,
 ) -> Result<Recovered<TokenStream, LexError>, LexError> {
-    NativeLexer {
-        source: Arc::<str>::from(source.text()),
-        source_span: Span::ranged(Arc::clone(source), 0..source.text().len()),
-        offset: 0,
-    }
-    .lex_recovering()
+    NativeLexer::over(Arc::clone(source)).lex_recovering()
 }
 
 /// Lexes one statically spelled fragment emitted by [`crate::quote_m2!`].
@@ -284,7 +279,7 @@ pub(crate) fn lex_source_recovering(
 /// spelling cannot be represented directly in Rust macro input.
 #[doc(hidden)]
 pub fn __quote_fragment(source: &str) -> TokenStream {
-    NativeLexer::new(Arc::<str>::from(source))
+    NativeLexer::over(Source::synthetic(source))
         .lex()
         .unwrap_or_else(|error| panic!("invalid static M2 quote fragment: {error}"))
 }
@@ -315,6 +310,16 @@ struct NativeLexer {
 }
 
 impl NativeLexer {
+    /// Creates a lexer over an existing snapshot, so every span it produces
+    /// points into `source`.
+    fn over(source: Arc<Source>) -> Self {
+        Self {
+            source: Arc::<str>::from(source.text()),
+            source_span: Span::ranged(Arc::clone(&source), 0..source.text().len()),
+            offset: 0,
+        }
+    }
+
     /// Creates a new value.
     fn new(source: Arc<str>) -> Self {
         let source_span = Span::ranged(Source::new(Arc::clone(&source)), 0..source.len());

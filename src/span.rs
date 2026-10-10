@@ -187,6 +187,12 @@ impl File {
         Self::FileId(raw)
     }
 
+    /// Reports whether this identity labels syntax constructed outside an
+    /// input file, whose text records no layout an author wrote.
+    pub const fn is_synthetic(self) -> bool {
+        matches!(self, Self::Synthetic(_))
+    }
+
     /// Returns the application-defined integer stored by this identity.
     pub const fn into_raw(self) -> u16 {
         match self {

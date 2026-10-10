@@ -754,7 +754,10 @@ impl Display for CellStream {
                     && end <= start
                 {
                     let gap = &left.source().text()[end..start];
-                    if !gap.is_empty() && gap.bytes().all(|byte| byte.is_ascii_whitespace()) {
+                    // Synthetic text is assembled without layout, so cells
+                    // touching there were never written on one line.
+                    let written = !gap.is_empty() || !left.source().file().is_synthetic();
+                    if written && gap.bytes().all(|byte| byte.is_ascii_whitespace()) {
                         formatter.write_str(gap)?;
                         recovered = true;
                     }

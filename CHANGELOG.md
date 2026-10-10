@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep cells written on one line, such as `x = 1;y = 2`, on one line instead
+  of inserting a line break after `;`. Syntax quoted with `quote_m2!` now has
+  a synthetic source, reported by `File::is_synthetic`, and its cells keep
+  their line-break separation.
 - Add a `BOF` beginning-of-file marker, the counterpart of `EOF`, spanning the
   layout before the first significant byte, so whitespace opening a file
   survives a parse and emit round trip in both parsers. `SourceFile::new` takes

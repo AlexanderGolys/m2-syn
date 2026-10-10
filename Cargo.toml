@@ -66,6 +66,10 @@ name = "review_regressions"
 required-features = ["tree-sitter"]
 
 [[test]]
+name = "cell_separation"
+required-features = ["tree-sitter"]
+
+[[test]]
 name = "comment_after_closer"
 required-features = ["tree-sitter"]
 

@@ -449,6 +449,8 @@ impl<'syntax> IntoIterator for &'syntax CellTokenStream {
 struct CellStreamData {
     cells: Vec<CellTokenStream>,
     source: Option<Arc<Source>>,
+    /// The span of the layout that precedes the first cell.
+    bof: Option<Span>,
     /// The span of the layout that follows the final cell.
     eof: Option<Span>,
 }
@@ -504,13 +506,19 @@ impl CellStream {
     /// operator without its right operand or inside an unclosed delimiter.
     pub fn new(tokens: TokenStream) -> Result<Self, CellStreamError> {
         let source = tokens.source();
+        let bof = leading_layout_span(source.as_ref());
         let eof = trailing_layout_span(source.as_ref());
         let FramedCells { cells, incomplete } = frame_recovering(tokens);
         match incomplete {
             Some(tokens) => Err(CellStreamError {
                 span: end_span(&tokens),
             }),
-            None => Ok(Self(Arc::new(CellStreamData { cells, source, eof }))),
+            None => Ok(Self(Arc::new(CellStreamData {
+                cells,
+                source,
+                bof,
+                eof,
+            }))),
         }
     }
 
@@ -530,6 +538,7 @@ impl CellStream {
     ) -> Self {
         Self(Arc::new(CellStreamData {
             cells: cells.into_iter().collect(),
+            bof: leading_layout_span(source.as_ref()),
             eof: trailing_layout_span(source.as_ref()),
             source,
         }))
@@ -601,6 +610,23 @@ impl CellStream {
             .then(|| Arc::clone(source))
     }
 
+    /// Handles physical beginning-of-file.
+    ///
+    /// The span covers the layout before the first significant byte, so the
+    /// beginning-of-file marker built from it retains input that no cell owns.
+    /// For a stream whose cells do not cover one shared source snapshot it is
+    /// the empty span where the first cell starts.
+    pub(crate) fn physical_bof(&self) -> Span {
+        if let Some(source) = self.complete_source() {
+            let leading = source.leading_whitespace();
+            return Span::ranged(Arc::clone(&source), leading);
+        }
+        self.first()
+            .and_then(cell_first_span)
+            .and_then(|span| span.start().map(|start| span.at(start)))
+            .unwrap_or_else(|| Span::for_text(""))
+    }
+
     /// Handles physical end-of-file.
     ///
     /// The span covers the layout between the last significant byte and the
@@ -641,6 +667,7 @@ impl CellStream {
                 .map(CellTokenStream::from_augmented)
                 .collect(),
             source: None,
+            bof: source_file.bof.try_span(),
             eof: source_file.eof.try_span(),
         }))
     }
@@ -711,6 +738,11 @@ fn covers_span(span: Span, source: &Arc<Source>, cursor: &mut usize) -> bool {
 
 impl Display for CellStream {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        write_leading_layout(
+            formatter,
+            self.data().bof.as_ref(),
+            self.first().and_then(cell_first_span).as_ref(),
+        )?;
         let mut previous: Option<Span> = None;
         for (index, cell) in self.iter().enumerate() {
             if index != 0 {
@@ -735,6 +767,39 @@ impl Display for CellStream {
             previous = cell_last_span(cell);
         }
         write_trailing_layout(formatter, self.data().eof.as_ref(), previous.as_ref())
+    }
+}
+
+/// Spans the layout opening a source snapshot the cells were framed from.
+fn leading_layout_span(source: Option<&Arc<Source>>) -> Option<Span> {
+    source.map(|source| Span::ranged(Arc::clone(source), source.leading_whitespace()))
+}
+
+/// Writes the layout the beginning-of-file span retains before the first cell.
+///
+/// The prefix is emitted only when it is the whitespace physically preceding
+/// the first cell, so a marker left before an edited or reassembled stream
+/// contributes nothing rather than stale text. Without cells, the
+/// end-of-file marker owns all layout.
+fn write_leading_layout(
+    formatter: &mut Formatter<'_>,
+    bof: Option<&Span>,
+    first_cell: Option<&Span>,
+) -> FmtResult {
+    let (Some(bof), Some(first)) = (bof, first_cell) else {
+        return Ok(());
+    };
+    if !first.shares_source(bof) {
+        return Ok(());
+    }
+    let Some((start, stop)) = bof.start().zip(first.start()) else {
+        return Ok(());
+    };
+    match bof.source().text().get(start..stop) {
+        Some(prefix) if prefix.bytes().all(|byte| byte.is_ascii_whitespace()) => {
+            formatter.write_str(prefix)
+        }
+        _ => Ok(()),
     }
 }
 
@@ -910,6 +975,7 @@ impl Tokenize for TokenStream {
         let output = output.data_mut();
         if output.cells.is_empty() {
             output.source = tokenized.source;
+            output.bof = tokenized.bof;
             output.eof = tokenized.eof;
         } else {
             output.source = None;
@@ -936,6 +1002,9 @@ impl Tokenize for crate::SourceFile {
     fn tokenize(&self, output: &mut CellStream) -> Result<(), CellStreamError> {
         let tokenized = CellStream::from_source_file(self).into_data();
         let output = output.data_mut();
+        if output.cells.is_empty() {
+            output.bof = tokenized.bof;
+        }
         output.eof = output.cells.is_empty().then_some(tokenized.eof).flatten();
         output.cells.extend(tokenized.cells);
         output.source = None;

@@ -246,7 +246,7 @@ impl PrettyNode {
         {
             return Self::delimiter(kind, DoubleSpan::new(span.clone(), span));
         }
-        let role = if matches!(text.as_str(), "∅" | "EOC" | "EOF") {
+        let role = if matches!(text.as_str(), "∅" | "EOC" | "BOF" | "EOF") {
             PrettyDetailRole::Glyph
         } else {
             PrettyDetailRole::Text

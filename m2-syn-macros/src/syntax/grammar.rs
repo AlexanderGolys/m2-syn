@@ -147,7 +147,7 @@ fn parse_strutuct(
         TokenStream::new()
     } else if matches!(
         kind.leaf,
-        Some(LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof)
+        Some(LeafKind::Adj | LeafKind::Eoc | LeafKind::Bof | LeafKind::Eof)
     ) {
         quote!(#[derive(Debug, Clone, PartialEq, Eq, Hash)])
     } else {
@@ -715,6 +715,7 @@ fn leaf_kind(attrs: &[Attribute]) -> Result<Option<LeafKind>> {
                 "empty" => Ok(LeafKind::Empty),
                 "adj" => Ok(LeafKind::Adj),
                 "eoc" => Ok(LeafKind::Eoc),
+                "bof" => Ok(LeafKind::Bof),
                 "eof" => Ok(LeafKind::Eof),
                 "float" => Ok(LeafKind::Float),
                 "integer" => Ok(LeafKind::Integer),
@@ -731,6 +732,7 @@ fn inferred_leaf_kind(name: &Ident) -> LeafKind {
         "Empty" => LeafKind::Empty,
         "Adj" => LeafKind::Adj,
         "EOC" => LeafKind::Eoc,
+        "BOF" => LeafKind::Bof,
         "EOF" => LeafKind::Eof,
         "FloatLiteral" => LeafKind::Float,
         "IntegerLiteral" => LeafKind::Integer,

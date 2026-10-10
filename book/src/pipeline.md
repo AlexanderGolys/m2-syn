@@ -15,10 +15,12 @@ source <-----------------------Display/Lex--------------------------------------
 grammar-aware step: it confirms top-level cell boundaries and recursively adds
 `CellTokenTree::Adj` markers. Each resulting `CellTokenStream` is therefore a
 partially parsed cell, and `CellStream` records EOC and EOF structurally through
-the sequence rather than virtual tokens. The EOF marker spans the layout between
-the last significant byte and the physical end, so the bytes closing a file
-survive emission even though no cell owns them. Converting a cell back into a
-raw `TokenStream` removes adjacency recursively.
+the sequence rather than virtual tokens. Layout is the source gap between two
+neighbouring spans, so a file's two edges need owners: the BOF marker spans the
+layout before the first significant byte and the EOF marker the layout after
+the last one. Each is emitted only while it still physically borders the first
+or last cell, so joined or edited streams never reinstate stale text.
+Converting a cell back into a raw `TokenStream` removes adjacency recursively.
 
 `Parse` and `Lex` are the two directions at the typed boundary. For a
 typed value `c`, parsing its emission should recover `c`. Emitting a parsed raw

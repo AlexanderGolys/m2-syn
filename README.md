@@ -439,7 +439,7 @@ region in a delimiter therefore never rewrites its tokens.
 
 ```rust
 # use std::convert::Infallible;
-use m2_syn::nodes::{EOF, SourceFile};
+use m2_syn::nodes::{BOF, EOF, SourceFile};
 use m2_syn::{CellStream, Parser, Span, Tokenize, lex_str, parse_with};
 
 struct EmptyParser;
@@ -448,7 +448,11 @@ impl Parser for EmptyParser {
     type Error = Infallible;
 
     fn parse_cells(&mut self, _cells: CellStream) -> Result<SourceFile, Self::Error> {
-        Ok(SourceFile::new(Vec::new(), EOF::new("", Span::for_text(""))))
+        Ok(SourceFile::new(
+            BOF::new("", Span::for_text("")),
+            Vec::new(),
+            EOF::new("", Span::for_text("")),
+        ))
     }
 }
 

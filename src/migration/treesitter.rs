@@ -493,9 +493,20 @@ impl<'source> Lowerer<'source> {
                 kind => return Err(self.unsupported(kind, child)),
             }
         }
-        let mut source_file = SourceFile::new(cells, EOF::new("", self.trailing_span()));
+        let mut source_file = SourceFile::new(
+            BOF::new("", self.leading_span()),
+            cells,
+            EOF::new("", self.trailing_span()),
+        );
         TriviaTransfer::from_source(self.source_span.source())?.apply(&mut source_file);
         Ok(source_file)
+    }
+
+    /// Spans the layout between the physical start and the first significant
+    /// byte, which the beginning-of-file marker owns.
+    fn leading_span(&self) -> Span {
+        let source = self.source_span.source();
+        Span::ranged(Arc::clone(source), source.leading_whitespace())
     }
 
     /// Spans the layout between the last significant byte and the physical end.

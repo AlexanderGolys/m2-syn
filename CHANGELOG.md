@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add a `BOF` beginning-of-file marker, the counterpart of `EOF`, spanning the
+  layout before the first significant byte, so whitespace opening a file
+  survives a parse and emit round trip in both parsers. `SourceFile::new` takes
+  it as its first argument and `Source::leading_whitespace` exposes the range.
+  Like `EOF`, the marker emits its layout only while it still precedes the
+  first cell, so inserted or removed cells never bring back stale text.
 - Store every comment in the slot where it occurs instead of reattaching
   cell-owned comments by source position on emission. Comments before a cell's
   first token live in the new `Cell::leading_trivia`, comments after an

@@ -147,6 +147,7 @@ enum LeafKind {
     Adj,
     Empty,
     Eoc,
+    Bof,
     Eof,
     Float,
     Integer,
@@ -466,7 +467,7 @@ impl Syntax {
                             ::m2_syn::Punct::from_span(::m2_syn::Spanned::expect_span(self)),
                         )]);
                     },
-                    LeafKind::Eoc | LeafKind::Eof => quote! {},
+                    LeafKind::Eoc | LeafKind::Bof | LeafKind::Eof => quote! {},
                     LeafKind::Float => quote! {
                         output.extend([::m2_syn::LiteralToken::from_span(
                             ::m2_syn::LiteralKind::Float,
@@ -487,10 +488,14 @@ impl Syntax {
                 };
                 let pretty_text = if matches!(leaf, LeafKind::Empty) {
                     quote!("∅")
-                } else if matches!(leaf, LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof) {
+                } else if matches!(
+                    leaf,
+                    LeafKind::Adj | LeafKind::Eoc | LeafKind::Bof | LeafKind::Eof
+                ) {
                     let marker = match leaf {
                         LeafKind::Adj => "∅",
                         LeafKind::Eoc => "EOC",
+                        LeafKind::Bof => "BOF",
                         LeafKind::Eof => "EOF",
                         _ => unreachable!(),
                     };
@@ -520,7 +525,11 @@ impl Syntax {
                             trailing_trivia: ::m2_syn::TrailingTrivia::default(),
                         }
                     },
-                    LeafKind::Empty | LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof => quote! {
+                    LeafKind::Empty
+                    | LeafKind::Adj
+                    | LeafKind::Eoc
+                    | LeafKind::Bof
+                    | LeafKind::Eof => quote! {
                         let _ = text;
                         Self {
                             span,
@@ -538,7 +547,11 @@ impl Syntax {
                     },
                 };
                 let text_api = match leaf {
-                    LeafKind::Empty | LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof => quote! {},
+                    LeafKind::Empty
+                    | LeafKind::Adj
+                    | LeafKind::Eoc
+                    | LeafKind::Bof
+                    | LeafKind::Eof => quote! {},
                     LeafKind::QualifiedIdent => quote! {
                         /// Returns the leaf spelling.
                         pub fn text(&self) -> &str {
@@ -565,7 +578,10 @@ impl Syntax {
                         }
                     },
                 };
-                let derives = if matches!(leaf, LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof) {
+                let derives = if matches!(
+                    leaf,
+                    LeafKind::Adj | LeafKind::Eoc | LeafKind::Bof | LeafKind::Eof
+                ) {
                     quote!(Debug, Clone, PartialEq, Eq, Hash)
                 } else {
                     quote!(Debug, ::m2_syn::Spanned)
@@ -583,16 +599,19 @@ impl Syntax {
                         }
                     }
                 });
-                let boundary_spanned =
-                    matches!(leaf, LeafKind::Adj | LeafKind::Eoc | LeafKind::Eof).then(|| {
-                        quote! {
-                            impl ::m2_syn::Spanned for #name {
-                                fn try_span(&self) -> qf!(Option<::m2_syn::Span>) {
-                                    Some(self.span.clone())
-                                }
+                let boundary_spanned = matches!(
+                    leaf,
+                    LeafKind::Adj | LeafKind::Eoc | LeafKind::Bof | LeafKind::Eof
+                )
+                .then(|| {
+                    quote! {
+                        impl ::m2_syn::Spanned for #name {
+                            fn try_span(&self) -> qf!(Option<::m2_syn::Span>) {
+                                Some(self.span.clone())
                             }
                         }
-                    });
+                    }
+                });
                 let pretty_impl = quote! {
                     impl ::m2_syn::PrettyTree for #name {
                         fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
@@ -1615,7 +1634,7 @@ impl FieldDefinition {
     fn is_attached(&self, context: &SyntaxContext<'_>) -> bool {
         matches!(
             self.shape.base_ident().to_string().as_str(),
-            "Adj" | "EOC" | "EOF"
+            "Adj" | "EOC" | "BOF" | "EOF"
         ) || context
             .tokens()
             .spelling(self.shape.base_ident())

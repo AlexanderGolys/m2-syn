@@ -260,6 +260,29 @@ impl Source {
         significant.len()..self.text.len()
     }
 
+    /// Returns the byte range of the layout that opens this snapshot.
+    ///
+    /// The range is empty when the text starts with a significant byte, and
+    /// also when the text holds no significant byte at all: that layout closes
+    /// the snapshot, so [`Source::trailing_whitespace`] owns it instead.
+    ///
+    /// ```
+    /// use m2_syn::Source;
+    ///
+    /// let source = Source::new("\n  x = 1\n");
+    /// assert_eq!(source.leading_whitespace(), 0..3);
+    /// assert_eq!(Source::new("   \n").leading_whitespace(), 0..0);
+    /// ```
+    pub fn leading_whitespace(&self) -> Range<Offset> {
+        let layout = self.text.len()
+            - self
+                .text
+                .trim_start_matches(|character: char| character.is_ascii_whitespace())
+                .len();
+        let layout = if layout == self.text.len() { 0 } else { layout };
+        0..layout
+    }
+
     /// Converts a byte boundary into a one-based line and character column.
     ///
     /// Returns `None` when `offset` lies outside this snapshot or inside a

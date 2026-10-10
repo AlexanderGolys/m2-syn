@@ -1842,6 +1842,7 @@ pub(crate) fn installation_value(value: Expr) -> (Option<TypeAnnotation>, Expr) 
 /// Parses cell stream.
 fn parse_cell_stream(cells: CellStream) -> Result<SourceFile, NativeParseError> {
     let mut elements = Vec::new();
+    let bof_span = cells.physical_bof();
     let eof_span = cells.physical_eof();
     // Comments of a comment-only cell lead the next cell that has tokens, or
     // close the file when no such cell follows.
@@ -1860,7 +1861,7 @@ fn parse_cell_stream(cells: CellStream) -> Result<SourceFile, NativeParseError> 
             elements.push(element);
         }
     }
-    let mut source_file = SourceFile::new(elements, EOF::new("", eof_span));
+    let mut source_file = SourceFile::new(BOF::new("", bof_span), elements, EOF::new("", eof_span));
     source_file.set_closing_comments(detached);
     Ok(source_file)
 }

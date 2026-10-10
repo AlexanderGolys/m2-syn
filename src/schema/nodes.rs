@@ -69,6 +69,7 @@ strutuct! { Symbol }
 strutuct! { Empty }
 strutuct! { Adj }
 strutuct! { EOC }
+strutuct! { BOF }
 strutuct! { EOF }
 strutuct! { EscapeSequence }
 strutuct! { FloatLiteral }
@@ -80,6 +81,7 @@ strutuct! { StringContent }
 #[comments]
 #[cell_stream]
 strutuct!{ SourceFile
+    bof: BOF,
     cells: Lines<Cell>,
     eof: EOF,
 }

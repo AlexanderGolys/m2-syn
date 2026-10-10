@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 use std::vec::IntoIter;
 
-use m2_syn::nodes::{EOF, Expr, SourceFile, Symbol};
+use m2_syn::nodes::{BOF, EOF, Expr, SourceFile, Symbol};
 use m2_syn::{
     CSTNodeClassLabel, CellStream, ExternalCstChild, ExternalCstNode, Lex, NativeParser, Parse,
     ParseStream, Parser, Span, Spanned, Token, Tokenize, TreeSitterParser, lex_str, migrate,
@@ -18,6 +18,7 @@ impl Parser for EmptyFileParser {
 
     fn parse_cells(&mut self, _cells: CellStream) -> Result<SourceFile, Self::Error> {
         Ok(SourceFile::new(
+            BOF::new("", Span::for_text("")),
             Vec::new(),
             EOF::new("", Span::for_text("")),
         ))

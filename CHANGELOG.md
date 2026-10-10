@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Retain unfinished ordinary and raw string literals as typed syntax in both
+  realtime parsers until their closing delimiter arrives.
+
 ## 0.5.0 — 2026-09-04
 
 - Expand each typed node through its own `strutuct!` invocation while keeping

@@ -127,6 +127,30 @@ fn an_unterminated_raw_string_invalidates_only_its_forward_suffix() {
 }
 
 #[test]
+fn an_unterminated_string_remains_typed_until_its_closer_arrives() {
+    let mut parser = NativeRealtimeParser::new("\"");
+
+    assert_eq!(parser.state(), NativeCellState::Incomplete);
+    assert_eq!(parser.cells().len(), 1);
+    assert_eq!(parser.cells()[0].boundary(), NativeCellBoundary::Unbounded);
+    assert_eq!(parser.cells()[0].syntax().unwrap().to_m2(), "\"");
+    assert_eq!(
+        parser.cells()[0].lexer_diagnostics()[0].kind(),
+        LexErrorKind::UnterminatedString
+    );
+
+    assert_eq!(parser.append("hello world"), NativeCellState::Incomplete);
+    assert_eq!(parser.cells()[0].syntax().unwrap().to_m2(), "\"hello world");
+
+    assert_eq!(parser.append("\""), NativeCellState::Complete);
+    assert_eq!(
+        parser.cells()[0].syntax().unwrap().to_m2(),
+        "\"hello world\""
+    );
+    assert!(parser.cells()[0].lexer_diagnostics().is_empty());
+}
+
+#[test]
 fn an_invalid_edit_is_transactional() {
     let mut parser = NativeRealtimeParser::new("a b\n");
     let source = parser.source().to_owned();

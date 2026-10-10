@@ -131,19 +131,39 @@ impl LexError {
         self.kind
     }
 
-    /// Returns the unclosed expression family for a missing group closer.
+    /// Returns the unclosed expression family for a missing closer.
     pub fn unclosed_expression(&self) -> Option<&'static str> {
-        self.delimiter.as_ref().map(DelimiterKind::expression_name)
+        match self.kind {
+            LexErrorKind::UnterminatedGroup => {
+                self.delimiter.as_ref().map(DelimiterKind::expression_name)
+            }
+            LexErrorKind::UnterminatedString => Some("string literal"),
+            LexErrorKind::UnterminatedRawString => Some("raw string literal"),
+            _ => None,
+        }
     }
 
     /// Returns the token spelling required to complete this error.
     pub fn expected(&self) -> Option<&'static str> {
-        self.delimiter.map(DelimiterKind::closing)
+        match self.kind {
+            LexErrorKind::UnterminatedGroup => self.delimiter.map(DelimiterKind::closing),
+            LexErrorKind::UnterminatedString => Some("\""),
+            LexErrorKind::UnterminatedRawString => Some("///"),
+            LexErrorKind::UnterminatedBlockComment => Some("*-"),
+            _ => None,
+        }
     }
 
     /// Returns a readable description of what terminated this error.
     pub fn found(&self) -> Option<&'static str> {
-        self.delimiter.map(|_| "end of input")
+        matches!(
+            self.kind,
+            LexErrorKind::UnterminatedGroup
+                | LexErrorKind::UnterminatedString
+                | LexErrorKind::UnterminatedRawString
+                | LexErrorKind::UnterminatedBlockComment
+        )
+        .then_some("end of input")
     }
 }
 
@@ -167,8 +187,12 @@ impl Display for LexError {
                 }
                 "unterminated delimited group"
             }
-            LexErrorKind::UnterminatedString => "unterminated string literal",
-            LexErrorKind::UnterminatedRawString => "unterminated raw string literal",
+            LexErrorKind::UnterminatedString => {
+                "unclosed string literal: expected `\"`, found end of input"
+            }
+            LexErrorKind::UnterminatedRawString => {
+                "unclosed raw string literal: expected `///`, found end of input"
+            }
             LexErrorKind::UnterminatedBlockComment => "unterminated block comment",
         };
         formatter.write_str(message)
@@ -221,12 +245,13 @@ pub fn lex_str(source: &str) -> Result<TokenStream, LexError> {
     NativeLexer::new(Arc::<str>::from(source)).lex()
 }
 
-/// Lexes source text while retaining the interior of unclosed groups.
+/// Lexes source text while retaining unclosed groups and string literals.
 ///
 /// # Errors
 ///
 /// Returns [`LexError`] for malformed lexical syntax other than missing group
-/// closers, which are returned in [`Recovered::diagnostics`].
+/// or string-literal closers, which are returned in
+/// [`Recovered::diagnostics`].
 pub fn lex_str_recovering(source: &str) -> Result<Recovered<TokenStream, LexError>, LexError> {
     NativeLexer::new(Arc::<str>::from(source)).lex_recovering()
 }
@@ -299,6 +324,7 @@ impl NativeLexer {
     fn lex_recovering(mut self) -> Result<Recovered<TokenStream, LexError>, LexError> {
         let mut output = TokenStream::new();
         let mut groups = Vec::<OpenGroup>::new();
+        let mut diagnostics = Vec::new();
         // A quote specifier takes the following token literally, so that token
         // is not interpreted as structure. This is the one grammar fact the
         // lexer needs: without it `symbol (` opens a group and `symbol ;` ends
@@ -307,7 +333,6 @@ impl NativeLexer {
         loop {
             let Some(first) = self.peek(0) else {
                 output.set_source(Arc::clone(self.source_span.source()));
-                let mut diagnostics = Vec::with_capacity(groups.len());
                 while let Some(group) = groups.pop() {
                     diagnostics.push(LexError {
                         kind: LexErrorKind::UnterminatedGroup,
@@ -340,7 +365,17 @@ impl NativeLexer {
                 self.lex_number(&mut output)?;
                 quote_next = false;
             } else if first == b'"' {
-                self.lex_string(&mut output)?;
+                match self.lex_string(&mut output) {
+                    Ok(()) => {}
+                    Err(error) if error.kind == LexErrorKind::UnterminatedString => {
+                        output.extend([TokenTree::Literal(LiteralToken::from_span(
+                            LiteralKind::String,
+                            error.span.clone(),
+                        ))]);
+                        diagnostics.push(error);
+                    }
+                    Err(error) => return Err(error),
+                }
                 quote_next = false;
             } else if let Some(fixed) = self.match_fixed() {
                 let quoted = take(&mut quote_next);
@@ -363,9 +398,17 @@ impl NativeLexer {
                         self.lex_block_comment(fixed.len, &mut output)?;
                         quote_next = quoted;
                     }
-                    FixedKind::RawString => {
-                        self.lex_raw_string(fixed.len, &mut output)?;
-                    }
+                    FixedKind::RawString => match self.lex_raw_string(fixed.len, &mut output) {
+                        Ok(()) => {}
+                        Err(error) if error.kind == LexErrorKind::UnterminatedRawString => {
+                            output.extend([TokenTree::Literal(LiteralToken::from_span(
+                                LiteralKind::RawString,
+                                error.span.clone(),
+                            ))]);
+                            diagnostics.push(error);
+                        }
+                        Err(error) => return Err(error),
+                    },
                     FixedKind::Open(kind) => {
                         if groups.len() == MAX_GROUP_DEPTH {
                             return Err(self.error(LexErrorKind::NestingLimitExceeded, self.offset));
@@ -1457,6 +1500,24 @@ mod tests {
             lex_str(&nested).unwrap_err().kind(),
             LexErrorKind::NestingLimitExceeded
         );
+    }
+
+    #[test]
+    fn recovering_lexer_retains_unclosed_string_literals() {
+        for (source, kind, expected) in [
+            ("\"", LexErrorKind::UnterminatedString, "\""),
+            ("\"unfinished", LexErrorKind::UnterminatedString, "\""),
+            ("///", LexErrorKind::UnterminatedRawString, "///"),
+            ("///unfinished", LexErrorKind::UnterminatedRawString, "///"),
+        ] {
+            let recovered = lex_str_recovering(source).unwrap();
+
+            assert_eq!(recovered.value.to_string(), source);
+            assert_eq!(recovered.diagnostics.len(), 1);
+            assert_eq!(recovered.diagnostics[0].kind(), kind);
+            assert_eq!(recovered.diagnostics[0].expected(), Some(expected));
+            assert_eq!(recovered.diagnostics[0].found(), Some("end of input"));
+        }
     }
 
     #[test]

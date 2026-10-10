@@ -1986,7 +1986,12 @@ fn empty_span_at(lookahead: &Span) -> Span {
 
 /// Lowers string literal.
 fn lower_string_literal(text: &str, span: Span, trailing_trivia: TrailingTrivia) -> Expr {
-    let body = &text[1..text.len() - 1];
+    let body_end = if text.len() > 1 && text.ends_with('"') {
+        text.len() - 1
+    } else {
+        text.len()
+    };
+    let body = &text[1..body_end];
     let mut elements = Vec::new();
     let mut content_start = 0;
     let mut cursor = 0;
@@ -2028,7 +2033,7 @@ fn lower_string_literal(text: &str, span: Span, trailing_trivia: TrailingTrivia)
     if content_start < body.len() {
         elements.push(StringElement::Content(StringContent::new(
             &body[content_start..],
-            span.subspan(content_start + 1, text.len() - 1),
+            span.subspan(content_start + 1, body_end),
         )));
     }
     typed_terminal(StringLiteral::new(elements, span), trailing_trivia).into()
@@ -2036,7 +2041,12 @@ fn lower_string_literal(text: &str, span: Span, trailing_trivia: TrailingTrivia)
 
 /// Lowers raw string literal.
 fn lower_raw_string_literal(text: &str, span: Span, trailing_trivia: TrailingTrivia) -> Expr {
-    let body = &text[3..text.len() - 3];
+    let body_end = if text.len() >= 6 && text.ends_with("///") {
+        text.len() - 3
+    } else {
+        text.len()
+    };
+    let body = &text[3..body_end];
     let mut elements = Vec::new();
     let mut content_start = 0;
     let mut cursor = 0;
@@ -2062,7 +2072,7 @@ fn lower_raw_string_literal(text: &str, span: Span, trailing_trivia: TrailingTri
     if content_start < body.len() {
         elements.push(RawStringElement::Content(RawStringContent::new(
             &body[content_start..],
-            span.subspan(content_start + 3, text.len() - 3),
+            span.subspan(content_start + 3, body_end),
         )));
     }
     typed_terminal(RawStringLiteral::new(elements, span), trailing_trivia).into()

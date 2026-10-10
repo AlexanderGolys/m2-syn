@@ -40,6 +40,42 @@ fn realtime_parser_retains_and_then_completes_an_unclosed_group() {
 }
 
 #[test]
+fn realtime_parser_retains_and_then_completes_an_unclosed_string() {
+    let mut parser = RealtimeParser::new("\"").unwrap();
+    let source_id = parser.syntax().span().source_id();
+
+    assert_eq!(parser.source(), "\"");
+    assert_eq!(parser.syntax().to_m2(), "\"");
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        LexErrorKind::UnterminatedString
+    );
+    assert_eq!(
+        parser.diagnostics()[0].unclosed_expression(),
+        Some("string literal")
+    );
+    assert_eq!(parser.diagnostics()[0].expected(), Some("\""));
+    assert_eq!(parser.diagnostics()[0].found(), Some("end of input"));
+    assert_eq!(
+        parser.diagnostics()[0].to_string(),
+        "unclosed string literal: expected `\"`, found end of input"
+    );
+
+    parser
+        .apply_edit(&TextEdit::insertion(1, "hello world"))
+        .unwrap();
+    assert_eq!(parser.syntax().span().source_id(), source_id);
+    assert_eq!(parser.syntax().to_m2(), "\"hello world");
+    assert_eq!(parser.diagnostics().len(), 1);
+
+    parser.apply_edit(&TextEdit::insertion(12, "\"")).unwrap();
+    assert_eq!(parser.source(), "\"hello world\"");
+    assert_eq!(parser.syntax().to_m2(), "\"hello world\"");
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn realtime_parser_handles_multibyte_offsets_and_rejects_invalid_edits_transactionally() {
     let mut parser = RealtimeParser::new("é + x").unwrap();
     parser

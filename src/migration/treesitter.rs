@@ -140,7 +140,7 @@ impl RealtimeParser {
     /// # Errors
     ///
     /// Returns [`ParseError`] when the grammar cannot parse and lower the
-    /// source, apart from recoverable missing group closers.
+    /// source, apart from recoverable missing group and string-literal closers.
     pub fn new(source: impl Into<String>) -> Result<Self, ParseError> {
         let source = Source::new(source.into());
         let mut parser = TreeSitterParser::new()?.parser;
@@ -428,12 +428,13 @@ pub fn parse_file(source: &str) -> Result<SourceFile, ParseError> {
     parser.parse_cells(cells)
 }
 
-/// Parses incomplete source while retaining syntax inside unclosed groups.
+/// Parses incomplete source while retaining unclosed groups and string literals.
 ///
 /// # Errors
 ///
-/// Returns [`ParseError`] for failures other than missing closing delimiters or
-/// when the recovered Tree-sitter CST cannot be lowered.
+/// Returns [`ParseError`] for failures other than missing group or
+/// string-literal closers, or when the recovered Tree-sitter CST cannot be
+/// lowered.
 pub fn parse_file_recovering(source: &str) -> Result<Recovered<SourceFile, LexError>, ParseError> {
     TreeSitterParser::new()?.parse_recovering(source)
 }
@@ -1483,14 +1484,24 @@ fn renamed_source_recovering(source: &str) -> Result<RecoveredSource<'_>, LexErr
     collect_core_aliases(&tokens, &mut aliases);
     let mut missing = Vec::new();
     collect_missing_closers(&tokens, &mut missing);
+    let missing_literal = diagnostics
+        .iter()
+        .find_map(|diagnostic| match diagnostic.kind() {
+            crate::LexErrorKind::UnterminatedString => Some("\""),
+            crate::LexErrorKind::UnterminatedRawString => Some("///"),
+            _ => None,
+        });
 
-    if aliases.is_empty() && missing.is_empty() {
+    if aliases.is_empty() && missing.is_empty() && missing_literal.is_none() {
         return Ok((Cow::Borrowed(source), aliases, diagnostics));
     }
 
     let mut renamed = source.as_bytes().to_vec();
     for alias in &aliases {
         renamed[alias.full.start..alias.bare.start].fill(b' ');
+    }
+    if let Some(closer) = missing_literal {
+        renamed.extend_from_slice(closer.as_bytes());
     }
     for kind in missing {
         renamed.extend_from_slice(kind.closing().as_bytes());

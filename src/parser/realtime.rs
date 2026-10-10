@@ -324,6 +324,9 @@ fn ends_at_confirmed_boundary(source: &str) -> bool {
     let Ok(recovered) = lex_str_recovering(source) else {
         return false;
     };
+    if !recovered.diagnostics.is_empty() {
+        return false;
+    }
     let framed = frame_recovering(recovered.value);
     if framed.incomplete.is_some() {
         return false;
@@ -349,6 +352,7 @@ fn analyze_region(source: &str, document_start: usize) -> Vec<NativeRealtimeCell
             )];
         }
     };
+    let lexically_incomplete = !recovered.diagnostics.is_empty();
     let framed = frame_recovering(recovered.value);
     let complete_count = framed.cells.len();
     let has_incomplete = framed.incomplete.is_some();
@@ -364,7 +368,9 @@ fn analyze_region(source: &str, document_start: usize) -> Vec<NativeRealtimeCell
         if !has_following && end < source.len() {
             end = source.len();
         }
-        let boundary = if has_following
+        let boundary = if !has_following && lexically_incomplete {
+            NativeCellBoundary::Unbounded
+        } else if has_following
             || ends_with_cell_semicolon(&tokens)
             || source[start..end].ends_with('\n')
         {

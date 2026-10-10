@@ -17,10 +17,10 @@ use crate::native::{LambdaArguments, assignment_list, installation_value, lambda
 use crate::nodes::*;
 use crate::trivia_transfer::TriviaTransfer;
 use crate::{
-    CSTNodeClassLabel, CellStream, CellStreamError, DelimiterKind, DelimiterToken, DoubleSpan,
-    ExternalCstChild, ExternalCstNode, LexError, Migrate, MigrateError, Parser, Punctuated,
-    Recovered, Source, SourceFile, Span, Spanned, TextEdit, TokenStream, TokenTree, Tokenize,
-    lex_str, lex_str_recovering,
+    CSTNodeClassLabel, CellStream, CellStreamError, CommentTrivia, DelimiterKind, DelimiterToken,
+    DoubleSpan, ExternalCstChild, ExternalCstNode, LexError, Migrate, MigrateError, Parser,
+    Punctuated, Recovered, Source, SourceFile, Span, Spanned, TextEdit, TokenStream, TokenTree,
+    Tokenize, TriviaKind, lex_str, lex_str_recovering,
 };
 
 #[derive(Debug)]
@@ -1503,6 +1503,11 @@ fn renamed_source_recovering(source: &str) -> Result<RecoveredSource<'_>, LexErr
     for alias in &aliases {
         renamed[alias.full.start..alias.bare.start].fill(b' ');
     }
+    // A line comment runs to the end of its line, so appended closers must
+    // start on a new one to remain syntax.
+    if !missing.is_empty() && ends_in_line_comment(&tokens, source.len()) {
+        renamed.push(b'\n');
+    }
     if let Some(closer) = missing_literal {
         renamed.extend_from_slice(closer.as_bytes());
     }
@@ -1514,6 +1519,16 @@ fn renamed_source_recovering(source: &str) -> Result<RecoveredSource<'_>, LexErr
         aliases,
         diagnostics,
     ))
+}
+
+/// Reports whether the source ends inside a line comment.
+fn ends_in_line_comment(tokens: &TokenStream, source_len: usize) -> bool {
+    CommentTrivia::of(tokens)
+        .into_trivia()
+        .last()
+        .is_some_and(|comment| {
+            comment.kind() == TriviaKind::LineComment && comment.span().end() == Some(source_len)
+        })
 }
 
 /// Collects missing closers.

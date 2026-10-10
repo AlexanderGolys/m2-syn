@@ -99,3 +99,33 @@ fn a_file_without_cells_owns_its_comments() {
         assert_eq!(comment_texts(&file.comments()), [vec![], vec!["-- only"]]);
     }
 }
+
+#[test]
+fn layout_beside_a_comment_next_to_a_delimiter_survives() {
+    for source in [
+        "( -- c\nx)",
+        "(x\n-- c\n)",
+        "f(-- c\n)",
+        "x = (\n  -- c\n  1)",
+        "(x -- c   \n)",
+    ] {
+        for file in both_parsers(source) {
+            assert_eq!(file.to_m2(), source, "{source:?}");
+        }
+    }
+}
+
+#[test]
+fn layout_beside_a_comment_in_an_unclosed_group_survives_recovery() {
+    for source in ["( -- c", "(-- c\n", "[\n\n-- c", "{\t-- c"] {
+        let native = m2_syn::parse_native_recovering(source)
+            .expect("the recovering native parser accepts the source")
+            .value;
+        let sitter = parse_file_recovering(source)
+            .expect("the recovering tree-sitter parser accepts the source")
+            .value;
+
+        assert_eq!(native.to_m2(), source, "{source:?}");
+        assert_eq!(sitter.to_m2(), source, "{source:?}");
+    }
+}

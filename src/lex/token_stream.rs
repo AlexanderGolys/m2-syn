@@ -1125,7 +1125,7 @@ fn record_source(span: Span, source: &mut Option<Arc<Source>>) -> bool {
 
 impl Display for TokenStream {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
-        write_stream(formatter, self)
+        write_stream(formatter, self, None).map(drop)
     }
 }
 /// Handles needs separator.
@@ -1147,8 +1147,16 @@ fn needs_separator(left: &TokenTree, right: &TokenTree) -> bool {
 }
 
 /// Writes stream.
-fn write_stream(formatter: &mut Formatter<'_>, stream: &TokenStream) -> Result {
-    let mut previous_span = write_trivia(formatter, None, stream.data().prefix.as_slice())?;
+///
+/// `previous` is the span written just before the stream, such as its opening
+/// delimiter, so the layout following it is recovered too. Returns the span
+/// written last.
+fn write_stream(
+    formatter: &mut Formatter<'_>,
+    stream: &TokenStream,
+    previous: Option<Span>,
+) -> std::result::Result<Option<Span>, std::fmt::Error> {
+    let mut previous_span = write_trivia(formatter, previous, stream.data().prefix.as_slice())?;
     let mut previous_atom = None::<&TokenTree>;
     for tree in stream {
         if !tree.leading_trivia().is_empty() {
@@ -1171,8 +1179,7 @@ fn write_stream(formatter: &mut Formatter<'_>, stream: &TokenStream) -> Result {
             previous_atom = None;
         }
     }
-    write_trivia(formatter, previous_span, stream.data().suffix.as_slice())?;
-    Ok(())
+    write_trivia(formatter, previous_span, stream.data().suffix.as_slice())
 }
 
 /// Writes trivia.
@@ -1221,17 +1228,9 @@ fn write_tree(formatter: &mut Formatter<'_>, tree: &TokenTree) -> Result {
         TokenTree::Group(group) => {
             formatter.write_str(group.delim_kind().opening())?;
             let opening = group.delimiter().opening_span();
-            if let Some(first) = group.stream.iter().next() {
-                write_source_spaces(formatter, opening.clone(), first.span())?;
-            }
-            write_stream(formatter, &group.stream)?;
+            let last = write_stream(formatter, &group.stream, Some(opening.clone()))?;
             if let Some(closing) = group.delimiter().closing_span() {
-                let left = group
-                    .stream
-                    .iter()
-                    .next_back()
-                    .map_or(opening, Spanned::span);
-                write_source_spaces(formatter, left, closing)?;
+                write_source_spaces(formatter, last.unwrap_or(opening), closing)?;
                 formatter.write_str(group.delim_kind().closing())?;
             }
             Ok(())

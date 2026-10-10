@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Recover the layout between a delimiter and the comment beside it, measuring
+  each gap from the span written last rather than from the nearest token, so
+  `( -- c\nx)` and `(x -- c\n)` keep their spaces and line breaks.
+- Recover an unclosed group whose input ends inside a line comment in the
+  recovering Tree-sitter parser, which appended its missing closers to the
+  comment and rejected the source.
 - Keep cells written on one line, such as `x = 1;y = 2`, on one line instead
   of inserting a line break after `;`. Syntax quoted with `quote_m2!` now has
   a synthetic source, reported by `File::is_synthetic`, and its cells keep

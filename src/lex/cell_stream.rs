@@ -1163,9 +1163,20 @@ fn token_end_span(token: &CellTokenTree) -> Span {
     }
     if let CellTokenTree::Group(group) = token
         && !group.delimiter().is_closed()
-        && let Some(inner) = group.stream().iter().next_back()
     {
-        return token_end_span(inner);
+        let contents = group.stream();
+        if let Some(inner) = contents.iter().next_back() {
+            return token_end_span(inner);
+        }
+        if let Some(trivia) = contents
+            .data()
+            .suffix
+            .as_slice()
+            .last()
+            .or_else(|| contents.data().prefix.as_slice().last())
+        {
+            return trivia.span();
+        }
     }
     token.span()
 }

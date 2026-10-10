@@ -446,6 +446,8 @@ impl<'syntax> IntoIterator for &'syntax CellTokenStream {
 struct CellStreamData {
     cells: Vec<CellTokenStream>,
     source: Option<Arc<Source>>,
+    /// The span of the layout that follows the final cell.
+    eof: Option<Span>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -499,12 +501,13 @@ impl CellStream {
     /// operator without its right operand or inside an unclosed delimiter.
     pub fn new(tokens: TokenStream) -> Result<Self, CellStreamError> {
         let source = tokens.source();
+        let eof = trailing_layout_span(source.as_ref());
         let FramedCells { cells, incomplete } = frame_recovering(tokens);
         match incomplete {
             Some(tokens) => Err(CellStreamError {
                 span: end_span(&tokens),
             }),
-            None => Ok(Self(Arc::new(CellStreamData { cells, source }))),
+            None => Ok(Self(Arc::new(CellStreamData { cells, source, eof }))),
         }
     }
 
@@ -524,6 +527,7 @@ impl CellStream {
     ) -> Self {
         Self(Arc::new(CellStreamData {
             cells: cells.into_iter().collect(),
+            eof: trailing_layout_span(source.as_ref()),
             source,
         }))
     }
@@ -595,12 +599,15 @@ impl CellStream {
     }
 
     /// Handles physical end-of-file.
+    ///
+    /// The span covers the layout between the last significant byte and the
+    /// physical end, so the end-of-file marker built from it retains input that
+    /// no cell owns. It stays empty for a stream whose cells do not cover one
+    /// shared source snapshot.
     pub(crate) fn physical_eof(&self) -> Span {
         if let Some(source) = self.complete_source() {
-            return Span::ranged(
-                Arc::clone(&source),
-                source.text().len()..source.text().len(),
-            );
+            let trailing = source.trailing_whitespace();
+            return Span::ranged(Arc::clone(&source), trailing);
         }
         self.last().map_or_else(|| Span::for_text(""), end_span)
     }
@@ -642,6 +649,7 @@ impl CellStream {
                 .map(CellTokenStream::from_augmented)
                 .collect(),
             source: None,
+            eof: source_file.eof.try_span(),
         }))
     }
 }
@@ -734,7 +742,41 @@ impl Display for CellStream {
             cell.fmt(formatter)?;
             previous = cell_last_span(cell);
         }
-        Ok(())
+        write_trailing_layout(formatter, self.data().eof.as_ref(), previous.as_ref())
+    }
+}
+
+/// Spans the layout closing a source snapshot the cells were framed from.
+fn trailing_layout_span(source: Option<&Arc<Source>>) -> Option<Span> {
+    source.map(|source| Span::ranged(Arc::clone(source), source.trailing_whitespace()))
+}
+
+/// Writes the layout the end-of-file span retains after the final cell.
+///
+/// The suffix is emitted only when it is the whitespace physically following
+/// the last cell, so a marker left behind by an edited or reassembled stream
+/// contributes nothing rather than stale text.
+fn write_trailing_layout(
+    formatter: &mut Formatter<'_>,
+    eof: Option<&Span>,
+    last_cell: Option<&Span>,
+) -> FmtResult {
+    let Some(eof) = eof else {
+        return Ok(());
+    };
+    let resume = match last_cell {
+        Some(last) if last.shares_source(eof) => last.end(),
+        Some(_) => return Ok(()),
+        None => eof.start(),
+    };
+    let Some((resume, stop)) = resume.zip(eof.end()) else {
+        return Ok(());
+    };
+    match eof.source().text().get(resume..stop) {
+        Some(suffix) if suffix.bytes().all(|byte| byte.is_ascii_whitespace()) => {
+            formatter.write_str(suffix)
+        }
+        _ => Ok(()),
     }
 }
 
@@ -876,8 +918,10 @@ impl Tokenize for TokenStream {
         let output = output.data_mut();
         if output.cells.is_empty() {
             output.source = tokenized.source;
+            output.eof = tokenized.eof;
         } else {
             output.source = None;
+            output.eof = None;
         }
         output.cells.extend(tokenized.cells);
         Ok(())
@@ -888,6 +932,7 @@ impl Tokenize for crate::SourceFile {
     fn tokenize(&self, output: &mut CellStream) -> Result<(), CellStreamError> {
         let tokenized = CellStream::from_source_file(self).into_data();
         let output = output.data_mut();
+        output.eof = output.cells.is_empty().then_some(tokenized.eof).flatten();
         output.cells.extend(tokenized.cells);
         output.source = None;
         Ok(())

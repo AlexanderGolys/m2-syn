@@ -505,14 +505,16 @@ impl<'source> Lowerer<'source> {
                 kind => return Err(self.unsupported(kind, child)),
             }
         }
-        let eof_offset = cells
-            .last()
-            .and_then(|cell| cell.eoc.span().start())
-            .unwrap_or(self.source.len());
-        Ok(SourceFile::new(
-            cells,
-            EOF::new("", self.source_span.at(eof_offset)),
-        ))
+        Ok(SourceFile::new(cells, EOF::new("", self.trailing_span())))
+    }
+
+    /// Spans the layout between the last significant byte and the physical end.
+    ///
+    /// The end-of-file marker owns this region so that input no cell covers is
+    /// still reconstructed from the typed graph.
+    fn trailing_span(&self) -> Span {
+        let source = self.source_span.source();
+        Span::ranged(Arc::clone(source), source.trailing_whitespace())
     }
 
     /// Handles cell.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Give the end-of-file marker the span of the layout that closes its input, so
+  a parsed file emits the source byte for byte, including a final newline and
+  any trailing whitespace that belongs to no cell. `Source::trailing_whitespace`
+  exposes that range, and emission skips a marker that no longer follows the
+  final cell, which keeps it last and inert after nodes are appended.
+- Place the tree-sitter end-of-file marker at the physical end of the input
+  rather than at the start of the final cell's end-of-cell boundary.
 - Retain unfinished ordinary and raw string literals as typed syntax in both
   realtime parsers until their closing delimiter arrives.
 

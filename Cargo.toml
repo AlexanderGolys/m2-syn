@@ -66,6 +66,10 @@ name = "review_regressions"
 required-features = ["tree-sitter"]
 
 [[test]]
+name = "trailing_layout"
+required-features = ["tree-sitter"]
+
+[[test]]
 name = "tree_sitter_reconstruction"
 required-features = ["tree-sitter"]
 

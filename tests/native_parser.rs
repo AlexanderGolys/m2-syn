@@ -160,8 +160,10 @@ fn physical_eof_retains_trailing_layout_after_the_final_cell() {
     let file = parse_native("x   ").unwrap();
 
     assert_eq!(file.cells[0].eoc.span().bounds(), Some((1, 1)));
-    assert_eq!(file.eof.span().bounds(), Some((4, 4)));
+    assert_eq!(file.eof.span().bounds(), Some((1, 4)));
+    assert_eq!(file.eof.span().text(), Some("   "));
     assert_eq!(file.span().bounds(), Some((0, 4)));
+    assert_eq!(file.to_m2(), "x   ");
 }
 
 #[test]

@@ -240,6 +240,26 @@ impl Source {
         &self.text
     }
 
+    /// Returns the byte range of the layout that closes this snapshot.
+    ///
+    /// The range is empty when the text ends with a significant byte. Parsers
+    /// give the end-of-file marker exactly this range, so the bytes that follow
+    /// the last token survive a parse and emit round trip.
+    ///
+    /// ```
+    /// use m2_syn::Source;
+    ///
+    /// let source = Source::new("x = 1\n\n");
+    /// assert_eq!(source.trailing_whitespace(), 5..7);
+    /// assert_eq!(&source.text()[source.trailing_whitespace()], "\n\n");
+    /// ```
+    pub fn trailing_whitespace(&self) -> Range<Offset> {
+        let significant = self
+            .text
+            .trim_end_matches(|character: char| character.is_ascii_whitespace());
+        significant.len()..self.text.len()
+    }
+
     /// Converts a byte boundary into a one-based line and character column.
     ///
     /// Returns `None` when `offset` lies outside this snapshot or inside a

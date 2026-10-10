@@ -165,6 +165,8 @@ strutuct!{ AssignmentArgument
     Empty(Empty)
     Symbol(Symbol)
     Op(ExprOp)
+    // `x <- y` as a target: M2 reads it as an installation target for `<-`.
+    Evaluated(ExprAssignEvaluated)
 }
 
 strutuct!{ AssignmentListContent

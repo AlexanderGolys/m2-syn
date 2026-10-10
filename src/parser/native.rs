@@ -2114,6 +2114,9 @@ fn assignment_argument(component: Component) -> Option<AssignmentArgument> {
         Component::Expr(value) => match *value {
             Expr::Symbol(value) => Some(AssignmentArgument::Symbol(value)),
             Expr::Op(value) => Some(AssignmentArgument::Op(value)),
+            Expr::Assign(ExprAssign::Evaluated(value)) => {
+                Some(AssignmentArgument::Evaluated(value))
+            }
             value => assignment_list(value).map(Into::into),
         },
     }

@@ -1010,7 +1010,7 @@ impl TokenStream {
                     let span = group.span();
                     if span.shares_source(&comment.span())
                         && span.start().is_some_and(|open| open <= start)
-                        && span.end().is_some_and(|close| start <= close)
+                        && span.end().is_some_and(|close| start < close)
                     {
                         group.stream_mut().insert_inner_comment(comment);
                         return;

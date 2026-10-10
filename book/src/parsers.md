@@ -149,7 +149,8 @@ cargo run --example inspect
 cargo run --example inspect -- path/to/file.m2
 ```
 
-Tree-sitter extras are not reconstructed yet. `ChildCursor` currently removes
-extra children, so comments are discarded instead of being retained as
-ordered trivia. They must be anchored relative to semantic children before
-comment-preserving round trips can be claimed.
+`ChildCursor` removes Tree-sitter extras, so comments do not come from the
+Tree-sitter CST. After lowering, the adapter lexes the same source, settles
+every comment onto the raw token it follows, and transfers that trivia to the
+typed terminal or delimiter spanning exactly the same bytes, which places
+comments as the native parser does.

@@ -52,6 +52,11 @@ mod token_stream;
 pub mod treesitter;
 
 #[cfg(feature = "tree-sitter")]
+#[path = "migration/trivia_transfer.rs"]
+/// Internal support for carrying lexer trivia onto lowered syntax.
+mod trivia_transfer;
+
+#[cfg(feature = "tree-sitter")]
 pub use treesitter::{
     ParseError, RealtimeParser, TreeSitterParser, parse_file, parse_file_recovering, parse_tokens,
 };

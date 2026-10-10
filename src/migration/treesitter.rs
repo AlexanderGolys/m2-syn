@@ -15,6 +15,7 @@ use std::vec::IntoIter;
 
 use crate::native::{LambdaArguments, assignment_list, installation_value, lambda_arguments};
 use crate::nodes::*;
+use crate::trivia_transfer::TriviaTransfer;
 use crate::{
     CSTNodeClassLabel, CellStream, CellStreamError, DelimiterKind, DelimiterToken, DoubleSpan,
     ExternalCstChild, ExternalCstNode, LexError, Migrate, MigrateError, Parser, Punctuated,
@@ -397,23 +398,10 @@ impl Parser for TreeSitterParser {
     type Error = ParseError;
 
     fn parse_cells(&mut self, cells: CellStream) -> Result<SourceFile, Self::Error> {
-        let (cell_comments, comments) = cells.comment_ownership();
-        let mut source_file = match cells.complete_source() {
+        match cells.complete_source() {
             Some(source) => self.parse_source_in(source),
             None => self.parse_source_in(Source::new(cells.to_string())),
-        }?;
-        if source_file.cells.len() == cell_comments.len() {
-            for (cell, comments) in source_file.cells.iter_mut().zip(cell_comments) {
-                cell.comments = comments;
-            }
-            source_file.comments = comments;
-        } else {
-            source_file.comments = comments;
-            for comments in cell_comments {
-                source_file.comments.append(comments);
-            }
         }
-        Ok(source_file)
     }
 }
 
@@ -505,7 +493,9 @@ impl<'source> Lowerer<'source> {
                 kind => return Err(self.unsupported(kind, child)),
             }
         }
-        Ok(SourceFile::new(cells, EOF::new("", self.trailing_span())))
+        let mut source_file = SourceFile::new(cells, EOF::new("", self.trailing_span()));
+        TriviaTransfer::from_source(self.source_span.source())?.apply(&mut source_file);
+        Ok(source_file)
     }
 
     /// Spans the layout between the last significant byte and the physical end.

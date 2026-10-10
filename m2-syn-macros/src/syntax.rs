@@ -704,10 +704,27 @@ impl Syntax {
                         pub delimiter: #ty,
                     )
                 });
-                let comments_field = definition.comments.then(|| {
+                let comments_slot_field = definition.comments.then(|| {
                     quote! {
-                        /// Comments structurally owned by this syntax node.
-                        pub comments: ::m2_syn::CommentTrivia,
+                        /// Comments preceding the first token of this node,
+                        /// including its documentation block.
+                        pub leading_trivia: ::m2_syn::LeadingTrivia,
+                    }
+                });
+                let comments_slot_member = definition
+                    .comments
+                    .then(|| quote!(leading_trivia: ::m2_syn::LeadingTrivia::default(),));
+                let comments_slot_print = definition.comments.then(
+                    || quote!(::m2_syn::Lex::to_tokens(&self.leading_trivia, &mut contents);),
+                );
+                let comments_accessor = definition.comments.then(|| {
+                    quote! {
+                        /// Collects the comments within this node from the
+                        /// trivia of its tokens. Complete-line `--` blocks
+                        /// leading the first token are outer comments.
+                        pub fn comments(&self) -> ::m2_syn::CommentTrivia {
+                            ::m2_syn::CommentTrivia::of(&::m2_syn::Lex::to_token_stream(self))
+                        }
                     }
                 });
                 let retains_span = matches!(definition.wrapper, Some(Wrapper::Literal(_)));
@@ -722,10 +739,10 @@ impl Syntax {
                     ProductStyle::Named => quote! {
                         #[doc = concat!("A typed Macaulay2 `", #kind, "` syntax node.")]
                         pub struct #name {
+                            #comments_slot_field
                             #(#expanded_fields,)*
                             #delimiter_field
                             #retained_span_field
-                            #comments_field
                         }
                     },
                     ProductStyle::Tuple => {
@@ -783,9 +800,6 @@ impl Syntax {
                     }
                 });
                 let delimiter_member = typed_delimiter.as_ref().map(|_| quote!(delimiter,));
-                let comments_member = definition
-                    .comments
-                    .then(|| quote!(comments: ::m2_syn::CommentTrivia::default(),));
                 let retained_span_member = retains_span.then(|| {
                     quote! {
                         span,
@@ -796,10 +810,10 @@ impl Syntax {
                 let constructor_value = match style {
                     ProductStyle::Named if constructor_delimiter.is_some() => quote!({
                         #constructor_delimiter
-                        Self { #(#constructor_fields,)* #delimiter_member #retained_span_member #comments_member }
+                        Self { #(#constructor_fields,)* #delimiter_member #retained_span_member #comments_slot_member }
                     }),
                     ProductStyle::Named => {
-                        quote!(Self { #(#constructor_fields,)* #retained_span_member #comments_member })
+                        quote!(Self { #(#constructor_fields,)* #retained_span_member #comments_slot_member })
                     }
                     ProductStyle::Tuple => quote!(Self(#(#constructor_fields,)*)),
                 };
@@ -848,10 +862,10 @@ impl Syntax {
                 });
                 let migrated = match style {
                     ProductStyle::Named if migrate_delimiter.is_some() => {
-                        quote!(Self { #(#migrated_fields,)* #delimiter_member #retained_span_member #comments_member })
+                        quote!(Self { #(#migrated_fields,)* #delimiter_member #retained_span_member #comments_slot_member })
                     }
                     ProductStyle::Named => {
-                        quote!(Self { #(#migrated_fields,)* #retained_span_member #comments_member })
+                        quote!(Self { #(#migrated_fields,)* #retained_span_member #comments_slot_member })
                     }
                     ProductStyle::Tuple => quote!(Self(#(#migrated_fields,)*)),
                 };
@@ -900,7 +914,7 @@ impl Syntax {
                     });
                     let pretty_comments = definition
                         .comments
-                        .then(|| quote!(node.push("comments", &self.comments);));
+                        .then(|| quote!(node.push("comments", &self.comments());));
                     quote! {
                         impl ::m2_syn::PrettyTree for #name {
                             fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
@@ -947,9 +961,6 @@ impl Syntax {
                         ::m2_syn::Lex::to_tokens(&contents, output);
                     },
                 };
-                let apply_comments = definition
-                    .comments
-                    .then(|| quote!(self.comments.__apply_to(&mut contents);));
                 let terminal_impl = retains_span.then(|| {
                     quote! {
                         impl ::m2_syn::Terminal for #name {
@@ -989,12 +1000,14 @@ impl Syntax {
                             #constructor_span
                             #constructor
                         }
+
+                        #comments_accessor
                     }
                     impl ::m2_syn::Lex for #name {
                         fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
                             let mut contents = ::m2_syn::TokenStream::new();
+                            #comments_slot_print
                             #(#print_fields)*
-                            #apply_comments
                             #emit_contents
                         }
 
@@ -1165,6 +1178,14 @@ impl Syntax {
                 /// of the same name.
                 pub trait VisitMut {
                     #(#methods)*
+
+                    /// Visits a token, leaf, or literal that owns its adjacent
+                    /// trivia. The free walker of every such node calls it.
+                    fn visit_terminal_mut(&mut self, _terminal: &mut dyn ::m2_syn::Terminal) {}
+
+                    /// Visits the delimiter pair of a delimited node. The
+                    /// family must be kept; spans and trivia may change.
+                    fn visit_delimiter_mut(&mut self, _delimiter: &mut ::m2_syn::Delimiter) {}
                 }
 
                 #(#walkers)*
@@ -1387,12 +1408,15 @@ impl Syntax {
                 impl<T, P> VisitValueMut for Punctuated<T, P>
                 where
                     T: VisitValueMut,
+                    P: VisitValueMut,
                 {
                     fn visit_value_mut<V>(&mut self, visitor: &mut V)
                     where
                         V: super::visit_mut::VisitMut + ?Sized,
                     {
-                        for value in self.iter_mut() {
+                        T::visit_value_mut(self.first_mut(), visitor);
+                        for (separator, value) in self.pairs_mut() {
+                            P::visit_value_mut(separator, visitor);
                             T::visit_value_mut(value, visitor);
                         }
                     }
@@ -1425,11 +1449,16 @@ impl Syntax {
                 impl<T, D> VisitValueMut for Delimited<T, D>
                 where
                     T: VisitValueMut,
+                    D: ::m2_syn::DelimiterValue,
                 {
                     fn visit_value_mut<V>(&mut self, visitor: &mut V)
                     where
                         V: super::visit_mut::VisitMut + ?Sized,
                     {
+                        let mut delimiter = ::m2_syn::DelimiterValue::delimiter(&self.delimiter);
+                        visitor.visit_delimiter_mut(&mut delimiter);
+                        self.delimiter = ::m2_syn::DelimiterValue::from_delimiter(delimiter)
+                            .expect("a delimiter visitor keeps the delimiter family");
                         T::visit_value_mut(&mut self.contents, visitor);
                     }
                 }

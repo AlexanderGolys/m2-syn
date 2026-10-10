@@ -352,11 +352,15 @@ single greedy operator rather than a parenthesized group. Quotation marks are
 part of a single literal token, not delimiter groups.
 
 Consecutive `--` comments occupying complete physical lines coalesce into one
-outer comment block. Cell tokenization attaches that block to the cell on its
-right. A `--` comment following code on the same line and every `-* ... *-`
-comment are inner comments of their containing cell. Comment-only source is
-owned by `SourceFile`; token leaves never become the accidental owners of
-cell documentation.
+outer comment block. Every comment is stored where it occurs: before a cell's
+first token it lives in that cell's `leading_trivia`, after an opening
+delimiter in the delimiter's opening trivia, and anywhere else in the trailing
+trivia of the token it follows, so comments after the last token belong to the
+last cell. A file without cells keeps its comments in its own
+`leading_trivia`. `Cell::comments` collects a cell's comments on demand: the
+complete-line `--` block before its first token is the outer documentation
+comment, and every other comment is inner. Token leaves never become the
+accidental owners of cell documentation.
 
 `$` remains an identifier-continuation character. `Package$name$12` is one
 `IdentToken` with one overall span; the typed `Symbol` additionally records
@@ -553,11 +557,12 @@ cargo run --example inspect
 cargo run --example inspect -- path/to/file.m2
 ```
 
-Both parser adapters transfer cell-token trivia into the same typed ownership:
-outer documentation blocks and inner comments live on `Cell`, while global
-comment-only input lives on `SourceFile`. Raw token projection reattaches the
-comments at their source-relative positions, so unchanged typed trees preserve
-their comment layout across emission.
+Both parser adapters place comments by the same rule. The native parser reads
+them from the trivia of the tokens it consumes; the Tree-sitter adapter lexes
+the same source and moves each raw atom's trivia onto the typed terminal or
+delimiter covering exactly the same bytes. Emission writes every comment from
+the slot that stores it, so a typed tree reproduces its comments in place
+without any positional reconstruction.
 
 ## Quoting
 

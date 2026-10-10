@@ -14,9 +14,9 @@ use crate::nodes::*;
 use crate::parse::{Lookahead, SignificantToken};
 use crate::{
     CellStream, CellStreamError, CellTokenStream, CommentTrivia, Delimited, DelimiterKind,
-    DelimiterToken, DelimiterValue, LexError, LexErrorKind, LiteralKind, Parse, ParseStream,
-    Parser, Punctuated, Recovered, Span, Spanned, Terminal, Token, TokenParseError, TokenStream,
-    TokenTree, Tokenize, TrailingTrivia, lex_str, lex_str_recovering,
+    DelimiterToken, DelimiterValue, LeadingTrivia, LexError, LexErrorKind, LiteralKind, Parse,
+    ParseStream, Parser, Punctuated, Recovered, Span, Spanned, Terminal, Token, TokenParseError,
+    TokenStream, TokenTree, Tokenize, TrailingTrivia, Trivia, lex_str, lex_str_recovering,
 };
 
 /// Tests a raw token against one typed-token spelling.
@@ -1843,25 +1843,25 @@ pub(crate) fn installation_value(value: Expr) -> (Option<TypeAnnotation>, Expr) 
 fn parse_cell_stream(cells: CellStream) -> Result<SourceFile, NativeParseError> {
     let mut elements = Vec::new();
     let eof_span = cells.physical_eof();
-    let mut comments = CommentTrivia::default();
+    // Comments of a comment-only cell lead the next cell that has tokens, or
+    // close the file when no such cell follows.
+    let mut detached = Vec::new();
     let mut cells = cells.into_iter().peekable();
     while let Some(cell) = cells.next() {
         if cell.is_empty() {
-            comments.append(CommentTrivia::take_inner(
-                &mut cell.into_parser_token_stream(),
-            ));
+            detached.extend(CommentTrivia::of(&cell.into_parser_token_stream()).into_trivia());
             continue;
         }
         let eoc = cells
             .peek()
             .and_then(cell_start_span)
             .unwrap_or_else(|| end_span(&cell));
-        if let Some(element) = parse_raw_cell_at(cell, eoc)? {
+        if let Some(element) = parse_raw_cell_at(cell, eoc, std::mem::take(&mut detached))? {
             elements.push(element);
         }
     }
     let mut source_file = SourceFile::new(elements, EOF::new("", eof_span));
-    source_file.comments = comments;
+    source_file.set_closing_comments(detached);
     Ok(source_file)
 }
 
@@ -1886,17 +1886,21 @@ pub(crate) fn parse_raw_cell(
     tokens: CellTokenStream,
 ) -> Result<Option<crate::nodes::Cell>, NativeParseError> {
     let eoc = end_span(&tokens);
-    parse_raw_cell_at(tokens, eoc)
+    parse_raw_cell_at(tokens, eoc, Vec::new())
 }
 
 /// Parses raw cell at.
+///
+/// `detached` comments, which precede the cell outside it, lead the comments
+/// before its first token in the cell's leading trivia.
 fn parse_raw_cell_at(
     tokens: CellTokenStream,
     eoc: Span,
+    mut detached: Vec<Trivia>,
 ) -> Result<Option<crate::nodes::Cell>, NativeParseError> {
     let ends_with_semicolon = ends_with_cell_semicolon(&tokens);
     let mut tokens = tokens.into_parser_token_stream();
-    let comments = CommentTrivia::take_from_cell(&mut tokens);
+    detached.extend(tokens.take_prefix_trivia().into_vec());
     let semicolon = ends_with_semicolon
         .then(|| tokens.take_final_punctuation(";"))
         .flatten()
@@ -1909,7 +1913,7 @@ fn parse_raw_cell_at(
         });
     let mut cell = Engine::new(tokens).parse_cell(semicolon, eoc)?;
     if let Some(cell) = &mut cell {
-        cell.comments = comments;
+        cell.leading_trivia = LeadingTrivia::new(detached);
     }
     Ok(cell)
 }

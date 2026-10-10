@@ -226,8 +226,8 @@ fn trivia_only_source_files_place_eof_at_the_physical_end() {
     let source_file = parse_file(source).unwrap();
 
     assert!(source_file.cells.is_empty());
-    assert_eq!(source_file.comments.inner().len(), 1);
-    assert_eq!(source_file.comments.inner()[0].text(), source);
+    assert_eq!(source_file.comments().inner().len(), 1);
+    assert_eq!(source_file.comments().inner()[0].text(), source);
     assert_eq!(
         source_file.eof.span().bounds(),
         Some((source.len(), source.len()))
@@ -242,9 +242,9 @@ fn tree_sitter_preserves_cell_owned_documentation_blocks() {
     let source_file = parse_file(source).unwrap();
 
     assert_eq!(source_file.cells.len(), 1);
-    assert_eq!(source_file.cells[0].comments.outer().len(), 1);
+    assert_eq!(source_file.cells[0].comments().outer().len(), 1);
     assert_eq!(
-        source_file.cells[0].comments.outer()[0].text(),
+        source_file.cells[0].comments().outer()[0].text(),
         "-- first line\n-- second line"
     );
     assert_eq!(source_file.to_m2(), source);

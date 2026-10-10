@@ -615,10 +615,10 @@ fn documentation_line_blocks_belong_to_the_following_cell() {
     let file = parse_native(source).unwrap();
 
     assert_eq!(file.cells.len(), 1);
-    assert_eq!(file.cells[0].comments.outer().len(), 1);
-    assert!(file.cells[0].comments.inner().is_empty());
+    assert_eq!(file.cells[0].comments().outer().len(), 1);
+    assert!(file.cells[0].comments().inner().is_empty());
     assert_eq!(
-        file.cells[0].comments.outer()[0].text(),
+        file.cells[0].comments().outer()[0].text(),
         source.split_once("\n    recordValue").unwrap().0
     );
     assert_eq!(file.to_m2(), source);
@@ -634,7 +634,7 @@ fn cell_owned_documentation_does_not_leak_onto_its_first_leaf() {
         panic!("the documented cell must contain the symbol expression");
     };
 
-    assert_eq!(file.cells[0].comments.outer().len(), 1);
+    assert_eq!(file.cells[0].comments().outer().len(), 1);
     assert!(symbol.leading_trivia().is_empty());
     assert!(symbol.trailing_trivia().is_empty());
 }
@@ -645,9 +645,9 @@ fn inline_line_comments_are_inner_comments_of_their_cell() {
     let file = parse_native(source).unwrap();
 
     assert_eq!(file.cells.len(), 2);
-    assert_eq!(file.cells[0].comments.inner().len(), 1);
-    assert_eq!(file.cells[0].comments.inner()[0].text(), "-- suppressed");
-    assert!(file.cells[1].comments.is_empty());
+    assert_eq!(file.cells[0].comments().inner().len(), 1);
+    assert_eq!(file.cells[0].comments().inner()[0].text(), "-- suppressed");
+    assert!(file.cells[1].comments().is_empty());
     assert_eq!(file.to_m2(), source);
 }
 
@@ -657,8 +657,8 @@ fn comment_only_source_is_owned_by_the_source_file() {
     let file = parse_native(source).unwrap();
 
     assert!(file.cells.is_empty());
-    assert_eq!(file.comments.inner().len(), 1);
-    assert_eq!(file.comments.inner()[0].text(), source);
+    assert_eq!(file.comments().inner().len(), 1);
+    assert_eq!(file.comments().inner()[0].text(), source);
     assert_eq!(file.to_m2(), source);
 }
 
@@ -668,10 +668,10 @@ fn block_comments_are_inner_comments_of_the_containing_cell() {
     let file = parse_native(source).unwrap();
 
     assert_eq!(file.cells.len(), 1);
-    assert!(file.cells[0].comments.outer().is_empty());
-    assert_eq!(file.cells[0].comments.inner().len(), 1);
+    assert!(file.cells[0].comments().outer().is_empty());
+    assert_eq!(file.cells[0].comments().inner().len(), 1);
     assert_eq!(
-        file.cells[0].comments.inner()[0].text(),
+        file.cells[0].comments().inner()[0].text(),
         "-* implementation note *-"
     );
     assert_eq!(file.to_m2(), source);

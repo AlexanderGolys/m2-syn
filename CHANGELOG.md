@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Store every comment in the slot where it occurs instead of reattaching
+  cell-owned comments by source position on emission. Comments before a cell's
+  first token live in the new `Cell::leading_trivia`, comments after an
+  opening delimiter in its opening trivia, and all others in the trailing
+  trivia of the token they follow; a file without cells keeps its comments in
+  `SourceFile::leading_trivia`. The `comments` field of `Cell` and
+  `SourceFile` is replaced by a `comments()` accessor built on the new
+  `CommentTrivia::of`. Comments before a delimited group, complete-line
+  comments inside a cell, and comments touching a closing delimiter are no
+  longer dropped or moved.
+- Carry lexer trivia onto the Tree-sitter lowering by exact source range in
+  every adapter entry point, including recovering and realtime parsing, so
+  both backends place comments identically.
+- Add `VisitMut::visit_terminal_mut` and `VisitMut::visit_delimiter_mut`, and
+  walk the separators of `Punctuated` and the delimiter of `Delimited`.
 - Give the end-of-file marker the span of the layout that closes its input, so
   a parsed file emits the source byte for byte, including a final newline and
   any trailing whitespace that belongs to no cell. `Source::trailing_whitespace`

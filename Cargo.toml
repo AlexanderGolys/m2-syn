@@ -66,6 +66,18 @@ name = "review_regressions"
 required-features = ["tree-sitter"]
 
 [[test]]
+name = "comment_after_closer"
+required-features = ["tree-sitter"]
+
+[[test]]
+name = "comment_placement"
+required-features = ["tree-sitter"]
+
+[[test]]
+name = "left_arrow_assignment_target"
+required-features = ["tree-sitter"]
+
+[[test]]
 name = "trailing_layout"
 required-features = ["tree-sitter"]
 

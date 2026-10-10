@@ -256,6 +256,20 @@ pub fn lex_str_recovering(source: &str) -> Result<Recovered<TokenStream, LexErro
     NativeLexer::new(Arc::<str>::from(source)).lex_recovering()
 }
 
+/// Lexes an existing snapshot while retaining unclosed groups and string
+/// literals, so every span of the result points into `source`.
+#[cfg(feature = "tree-sitter")]
+pub(crate) fn lex_source_recovering(
+    source: &Arc<Source>,
+) -> Result<Recovered<TokenStream, LexError>, LexError> {
+    NativeLexer {
+        source: Arc::<str>::from(source.text()),
+        source_span: Span::ranged(Arc::clone(source), 0..source.text().len()),
+        offset: 0,
+    }
+    .lex_recovering()
+}
+
 /// Lexes one statically spelled fragment emitted by [`crate::quote_m2!`].
 ///
 /// Procedural-macro input arrives as Rust token trees, so the macro first joins

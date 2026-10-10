@@ -235,7 +235,7 @@ fn explicit_storage_fields(attrs: &[Attribute], leaf: Option<LeafKind>) -> Resul
     }
     for attr in attrs {
         if attr.path().is_ident("comments") {
-            fields.extend(quote!(comments: ::m2_syn::CommentTrivia,));
+            fields.extend(quote!(leading_trivia: ::m2_syn::LeadingTrivia,));
         } else if attr.path().is_ident("literal") {
             fields.extend(quote! {
                 span: ::m2_syn::Span,

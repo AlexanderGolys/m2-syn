@@ -125,10 +125,12 @@ fn expand_syntax_token_walk(name: &syn::Ident, ty: &Type) -> TokenStream {
         }
 
         impl __walk::WalkChildrenMut for #ty {
-            fn walk_children_mut<V>(&mut self, _visitor: &mut V)
+            fn walk_children_mut<V>(&mut self, visitor: &mut V)
             where
                 V: visit_mut::VisitMut + ?Sized,
-            {}
+            {
+                visitor.visit_terminal_mut(self);
+            }
         }
 
         impl __walk::FoldChildren for #ty {
@@ -258,7 +260,6 @@ fn is_syntax_storage(member: &Member) -> bool {
                     | "leading_trivia"
                     | "trailing_trivia"
                     | "delimiter"
-                    | "comments"
             )
     )
 }
@@ -274,7 +275,28 @@ fn walk_struct_fields(fields: &Fields, mutable: bool) -> TokenStream {
                 quote!(__walk::VisitValue::visit_value(&self.#member, visitor);)
             }
         });
-    quote!(#(#calls)*)
+    let storage_hooks = mutable.then(|| walk_trivia_storage_mut(fields));
+    quote!(#(#calls)* #storage_hooks)
+}
+
+/// Hands the trivia a node stores itself to the mutable visitor's hooks.
+fn walk_trivia_storage_mut(fields: &Fields) -> TokenStream {
+    let has_member = |name: &str| {
+        fields
+            .members()
+            .any(|member| matches!(&member, Member::Named(ident) if ident == name))
+    };
+    let base = base_crate();
+    let terminal = has_member("trailing_trivia").then(|| quote!(visitor.visit_terminal_mut(self);));
+    let delimiter = has_member("delimiter").then(|| {
+        quote! {
+            let mut __m2_syn_delimiter = #base::DelimiterValue::delimiter(&self.delimiter);
+            visitor.visit_delimiter_mut(&mut __m2_syn_delimiter);
+            self.delimiter = #base::DelimiterValue::from_delimiter(__m2_syn_delimiter)
+                .expect("a delimiter visitor keeps the delimiter family");
+        }
+    });
+    quote!(#terminal #delimiter)
 }
 
 fn walk_enum_fields(input: &DeriveInput, mutable: bool) -> TokenStream {

@@ -42,8 +42,6 @@ use std::slice::Iter;
 use std::sync::Arc;
 use std::vec::IntoIter;
 
-#[cfg(feature = "tree-sitter")]
-use crate::CommentTrivia;
 use crate::lexer::{canonical_word_spelling, is_quote_specifier, newline_ends_cell};
 use crate::token_stream::TokenStreamParts;
 use crate::{
@@ -363,6 +361,9 @@ impl CellTokenStream {
     }
 
     /// Converts the value into parser token stream.
+    ///
+    /// Comments are settled onto the tokens they follow, so a parser finds
+    /// them in trailing trivia and in the stream prefix only.
     pub(crate) fn into_parser_token_stream(self) -> TokenStream {
         let CellTokenStreamData {
             trees,
@@ -370,7 +371,7 @@ impl CellTokenStream {
             suffix,
             source,
         } = self.into_data();
-        TokenStream::from_parts(TokenStreamParts {
+        let mut tokens = TokenStream::from_parts(TokenStreamParts {
             trees: trees
                 .into_iter()
                 .map(CellTokenTree::into_parser_token)
@@ -378,7 +379,9 @@ impl CellTokenStream {
             prefix,
             suffix,
             source,
-        })
+        });
+        tokens.settle_trivia();
+        tokens
     }
 
     /// Creates the value from framed cells.
@@ -612,22 +615,6 @@ impl CellStream {
         self.last().map_or_else(|| Span::for_text(""), end_span)
     }
 
-    #[cfg(feature = "tree-sitter")]
-    /// Handles comment ownership.
-    pub(crate) fn comment_ownership(&self) -> (Vec<CommentTrivia>, CommentTrivia) {
-        let mut cells = Vec::new();
-        let mut stream = CommentTrivia::default();
-        for tokens in self {
-            let mut tokens = tokens.clone().into_parser_token_stream();
-            if tokens.has_significant_tokens() {
-                cells.push(CommentTrivia::take_from_cell(&mut tokens));
-            } else {
-                stream.append(CommentTrivia::take_inner(&mut tokens));
-            }
-        }
-        (cells, stream)
-    }
-
     /// Creates the value from source file.
     pub(crate) fn from_source_file(source_file: &crate::SourceFile) -> Self {
         let mut cells = source_file
@@ -635,12 +622,17 @@ impl CellStream {
             .iter()
             .map(Lex::to_token_stream)
             .collect::<Vec<_>>();
-        if !source_file.comments.is_empty() {
-            if cells.is_empty() {
-                cells.push(TokenStream::new());
-            }
-            if let Some(cell) = cells.last_mut() {
-                source_file.comments.__apply_to(cell);
+        for (index, comments) in [
+            (0, &source_file.leading_trivia),
+            (cells.len(), source_file.eof.leading_trivia()),
+        ]
+        .into_iter()
+        .rev()
+        {
+            if !comments.is_empty() {
+                let mut comment_cell = TokenStream::new();
+                comment_cell.extend(comments.as_slice().iter().cloned());
+                cells.insert(index, comment_cell);
             }
         }
         Self(Arc::new(CellStreamData {
@@ -925,6 +917,18 @@ impl Tokenize for TokenStream {
         }
         output.cells.extend(tokenized.cells);
         Ok(())
+    }
+}
+
+impl crate::SourceFile {
+    /// Places comments that follow every cell: on the end-of-file marker, or
+    /// on the file itself when it has no cells for them to follow.
+    pub(crate) fn set_closing_comments(&mut self, comments: Vec<Trivia>) {
+        if self.cells.is_empty() {
+            self.leading_trivia = LeadingTrivia::new(comments);
+        } else {
+            self.eof.set_leading_trivia(comments);
+        }
     }
 }
 

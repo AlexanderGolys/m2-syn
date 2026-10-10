@@ -469,76 +469,44 @@ impl CommentTrivia {
         self.outer.is_empty() && self.inner.is_empty()
     }
 
-    /// Takes from cell.
-    pub(crate) fn take_from_cell(tokens: &mut TokenStream) -> Self {
-        let mut outer = Vec::new();
-        if let Some(first) = tokens.data_mut().trees.first_mut() {
-            let leading = first.leading_trivia_mut().as_mut_vec();
-            let mut retained = Vec::with_capacity(leading.len());
-            for trivia in take(leading) {
-                if trivia.kind() == TriviaKind::LineComment {
-                    outer.push(trivia);
+    /// Collects the comments a token projection carries, without detaching
+    /// them from the tokens that own them.
+    ///
+    /// Complete-line `--` blocks leading the first token are outer comments;
+    /// every other comment, in source order, is inner.
+    pub fn of(tokens: &TokenStream) -> Self {
+        let mut comments = Self::default();
+        let data = tokens.data();
+        comments
+            .inner
+            .extend(data.prefix.as_slice().iter().cloned());
+        for (index, token) in data.trees.iter().enumerate() {
+            for trivia in token.leading_trivia().as_slice() {
+                if index == 0 && trivia.kind() == TriviaKind::LineComment {
+                    comments.outer.push(trivia.clone());
                 } else {
-                    retained.push(trivia);
+                    comments.inner.push(trivia.clone());
                 }
             }
-            *leading = retained;
+            if let TokenTree::Group(group) = token {
+                comments
+                    .inner
+                    .extend(Self::of(group.stream()).into_trivia());
+            }
+            comments
+                .inner
+                .extend(token.trailing_trivia().as_slice().iter().cloned());
         }
-        let mut inner = take_stream_comments(tokens);
-        sort_comments(&mut outer);
-        sort_comments(&mut inner);
-        Self { outer, inner }
+        comments
+            .inner
+            .extend(data.suffix.as_slice().iter().cloned());
+        comments
     }
 
-    /// Takes inner.
-    pub(crate) fn take_inner(tokens: &mut TokenStream) -> Self {
-        let mut inner = take_stream_comments(tokens);
-        sort_comments(&mut inner);
-        Self {
-            outer: Vec::new(),
-            inner,
-        }
+    /// Consumes the collection and returns its comments in source order.
+    pub(crate) fn into_trivia(self) -> impl Iterator<Item = Trivia> {
+        self.outer.into_iter().chain(self.inner)
     }
-
-    /// Handles append.
-    pub(crate) fn append(&mut self, mut comments: Self) {
-        self.outer.append(&mut comments.outer);
-        self.inner.append(&mut comments.inner);
-        sort_comments(&mut self.outer);
-        sort_comments(&mut self.inner);
-    }
-
-    /// Reattaches owned comments to a raw projection at their source-relative
-    /// positions.
-    #[doc(hidden)]
-    pub fn __apply_to(&self, output: &mut TokenStream) {
-        for comment in self.outer.iter().rev().cloned() {
-            output.prepend_comment(comment);
-        }
-        for comment in self.inner.iter().cloned() {
-            output.insert_inner_comment(comment);
-        }
-    }
-}
-
-/// Handles sort comments.
-fn sort_comments(comments: &mut [Trivia]) {
-    comments.sort_by_key(|comment| comment.span().start().unwrap_or(usize::MAX));
-}
-
-/// Takes stream comments.
-fn take_stream_comments(stream: &mut TokenStream) -> Vec<Trivia> {
-    let data = stream.data_mut();
-    let mut comments = take(&mut data.prefix).into_vec();
-    for token in &mut data.trees {
-        comments.extend(take(token.leading_trivia_mut()).into_vec());
-        if let TokenTree::Group(group) = token {
-            comments.extend(take_stream_comments(group.stream_mut()));
-        }
-        comments.extend(take(token.trailing_trivia_mut()).into_vec());
-    }
-    comments.extend(take(&mut data.suffix).into_vec());
-    comments
 }
 
 /// A typed terminal together with its adjacent comments.
@@ -823,12 +791,6 @@ impl TokenStream {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    #[cfg(feature = "tree-sitter")]
-    /// Returns whether the value has significant tokens.
-    pub(crate) fn has_significant_tokens(&self) -> bool {
-        !self.is_empty()
-    }
-
     /// Returns whether the value has trivia.
     pub(crate) fn has_trivia(&self) -> bool {
         !self.data().prefix.is_empty() || !self.data().suffix.is_empty()
@@ -892,6 +854,32 @@ impl TokenStream {
     /// Takes suffix trivia.
     pub(crate) fn take_suffix_trivia(&mut self) -> LeadingTrivia {
         take(&mut self.data_mut().suffix)
+    }
+
+    /// Moves every comment onto the trailing trivia of the token it follows.
+    ///
+    /// Afterwards no token has leading trivia and the suffix is empty: comments
+    /// before the first token remain in the prefix, which a delimiter or cell
+    /// owns, and the emitted order of tokens and comments is unchanged.
+    pub(crate) fn settle_trivia(&mut self) {
+        let data = self.data_mut();
+        let mut previous: Option<&mut TokenTree> = None;
+        for token in &mut data.trees {
+            let leading = take(token.leading_trivia_mut()).into_vec();
+            match previous {
+                Some(previous) => previous.trailing_trivia_mut().as_mut_vec().extend(leading),
+                None => data.prefix.as_mut_vec().extend(leading),
+            }
+            if let TokenTree::Group(group) = token {
+                group.stream_mut().settle_trivia();
+            }
+            previous = Some(token);
+        }
+        let suffix = take(&mut data.suffix).into_vec();
+        match previous {
+            Some(last) => last.trailing_trivia_mut().as_mut_vec().extend(suffix),
+            None => data.prefix.as_mut_vec().extend(suffix),
+        }
     }
 
     /// Handles push.
@@ -987,60 +975,6 @@ impl TokenStream {
                 group.stream().last_innermost().or(Some(last))
             }
             _ => Some(last),
-        }
-    }
-
-    /// Handles prepend comment.
-    fn prepend_comment(&mut self, comment: Trivia) {
-        let data = self.data_mut();
-        if let Some(first) = data.trees.first_mut() {
-            first.leading_trivia_mut().as_mut_vec().insert(0, comment);
-        } else {
-            data.prefix.as_mut_vec().insert(0, comment);
-        }
-    }
-
-    /// Inserts inner comment.
-    fn insert_inner_comment(&mut self, comment: Trivia) {
-        let start = comment.span().start();
-        let data = self.data_mut();
-        if let Some(start) = start {
-            for token in &mut data.trees {
-                if let TokenTree::Group(group) = token {
-                    let span = group.span();
-                    if span.shares_source(&comment.span())
-                        && span.start().is_some_and(|open| open <= start)
-                        && span.end().is_some_and(|close| start < close)
-                    {
-                        group.stream_mut().insert_inner_comment(comment);
-                        return;
-                    }
-                }
-            }
-
-            if let Some(token) = data.trees.iter_mut().rev().find(|token| {
-                let span = token.span();
-                span.shares_source(&comment.span())
-                    && span.start().is_some_and(|token_start| token_start <= start)
-            }) {
-                token.trailing_trivia_mut().as_mut_vec().push(comment);
-                return;
-            }
-
-            if data
-                .trees
-                .iter()
-                .any(|token| token.span().shares_source(&comment.span()))
-            {
-                data.prefix.as_mut_vec().push(comment);
-                return;
-            }
-        }
-
-        if let Some(last) = data.trees.last_mut() {
-            last.trailing_trivia_mut().as_mut_vec().push(comment);
-        } else {
-            data.prefix.as_mut_vec().push(comment);
         }
     }
 

@@ -2,6 +2,7 @@
 /book/book
 /AGENTS.md
 /TODO.md
+/RELEASE-AUDIT.local.md
 /codex-session-*.md
 .claude/settings.local.json
 /examples/zz_*.rs

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 — 2026-10-23
+
+- Expose `frame_recovering` and `FramedCells` as a stateless API for cell
+  framing. Callers receive completed cells alongside an optional incomplete
+  tail, with original source spans and trivia preserved. For example,
+  `a = 1\nf = x -> (` yields the completed `a = 1` cell and the incomplete
+  `f = x -> (` tail.
+- Keep `CellStream::new` unchanged: it still rejects an incomplete final cell.
+
 ## 0.6.1 — 2026-10-22
 
 - Parse empty parentheses `()` as an empty sequence in the native parser.

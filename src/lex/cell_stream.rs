@@ -504,6 +504,7 @@ impl CellStream {
     /// Returns [`CellStreamError`] when the final tokens require more input
     /// before they can form an independently parseable cell, such as after an
     /// operator without its right operand or inside an unclosed delimiter.
+    /// Use [`frame_recovering`] to retain completed cells alongside that tail.
     pub fn new(tokens: TokenStream) -> Result<Self, CellStreamError> {
         let source = tokens.source();
         let bof = leading_layout_span(source.as_ref());
@@ -1032,17 +1033,22 @@ impl<T: Tokenize + ?Sized> Tokenize for &T {
 /// Only the final source prefix can be incomplete: every confirmed boundary
 /// before it is retained in [`Self::cells`]. This lets realtime and recovering
 /// parsers reuse completed work while continuing to accumulate the tail.
-pub(crate) struct FramedCells {
+/// Both parts retain their original source spans and trivia, accessible through
+/// [`Spanned`] and [`CellTokenStream::to_token_stream`]. A cell's span covers
+/// its tokens; attached comments retain their own spans and can be collected
+/// with [`crate::CommentTrivia::of`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FramedCells {
     /// Complete cells in their original source order.
-    pub(crate) cells: Vec<CellTokenStream>,
+    pub cells: Vec<CellTokenStream>,
     /// The final token prefix that still requires more input, when present.
-    pub(crate) incomplete: Option<CellTokenStream>,
+    pub incomplete: Option<CellTokenStream>,
 }
 
 /// Partitions raw tokens at confirmed top-level cell boundaries.
 ///
 /// An unquoted top-level semicolon always confirms a boundary. A physical
-/// newline confirms one only when [`newline_ends_cell`] says that the current
+/// newline confirms one only when the current
 /// operator/clause state can end there. At end of input, a nonempty tail is
 /// complete under the same rule unless its final delimiter group is unclosed;
 /// otherwise the tail is returned through [`FramedCells::incomplete`]. Empty
@@ -1052,7 +1058,27 @@ pub(crate) struct FramedCells {
 /// comments and physical source spans, observes quote specifiers so their next
 /// token cannot act as syntax, and inserts the zero-width adjacency punctuation
 /// required by the native parser into both complete and incomplete results.
-pub(crate) fn frame_recovering(tokens: TokenStream) -> FramedCells {
+/// It retains no state between calls; callers decide which results to reuse.
+/// Lexical recovery is separate: use [`crate::lex_str_recovering`] to obtain
+/// tokens for source with unclosed delimiters or string literals, and retain
+/// its diagnostics independently.
+///
+/// # Examples
+///
+/// ```
+/// use m2_syn::{Spanned, frame_recovering, lex_str_recovering};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let tokens = lex_str_recovering("a = 1\nf = x -> (")?;
+/// let framed = frame_recovering(tokens.value);
+/// assert_eq!(framed.cells.len(), 1);
+/// assert_eq!(framed.cells[0].span().text(), Some("a = 1"));
+/// let tail = framed.incomplete.unwrap();
+/// assert_eq!(tail.span().text(), Some("f = x -> ("));
+/// # Ok(())
+/// # }
+/// ```
+pub fn frame_recovering(tokens: TokenStream) -> FramedCells {
     let mut tokens = tokens;
     // Stream-level trivia must follow the first/last framed cell instead of
     // being lost when the significant tokens are distributed between cells.
@@ -1290,8 +1316,76 @@ fn can_end_operand(token: &TokenTree) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, CellStream};
-    use crate::{CellTokenTree, TokenTree, Tokenize, TriviaKind, lex_str};
+    use super::{Arc, CellStream, frame_recovering};
+    use crate::{
+        CellTokenTree, CommentTrivia, Spanned, TokenTree, Tokenize, TriviaKind, lex_str,
+        lex_str_recovering,
+    };
+
+    #[test]
+    fn recovering_framing_retains_completed_prefix_and_incomplete_tail() {
+        let source = "a = 1\nf = x -> (";
+        let recovered = lex_str_recovering(source).unwrap();
+        let framed = frame_recovering(recovered.value);
+
+        assert_eq!(framed.cells.len(), 1);
+        let completed = framed.cells[0].span();
+        assert_eq!(completed.text(), Some("a = 1"));
+        assert_eq!(completed.range(), Some(0..5));
+        let tail = framed.incomplete.unwrap();
+        assert_eq!(tail.span().text(), Some("f = x -> ("));
+        assert_eq!(tail.span().range(), Some(6..source.len()));
+        assert!(completed.shares_source(&tail.span()));
+    }
+
+    #[test]
+    fn recovering_framing_preserves_comments_in_both_parts() {
+        let source = "-- complete\na = 1 -- retained\n-- incomplete\nf = x -> ( -- inside\n";
+        let framed = frame_recovering(lex_str_recovering(source).unwrap().value);
+        assert_eq!(framed.cells.len(), 1);
+        let completed = &framed.cells[0];
+        let tail = framed.incomplete.unwrap();
+
+        let comments = |cell: &super::CellTokenStream| {
+            let comments = CommentTrivia::of(&cell.to_token_stream());
+            comments
+                .outer()
+                .iter()
+                .chain(comments.inner())
+                .map(|trivia| {
+                    assert_eq!(trivia.span().text(), Some(trivia.text()));
+                    assert!(trivia.span().shares_source(&cell.span()));
+                    trivia.text().to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(comments(completed), ["-- complete", "-- retained"]);
+        assert_eq!(comments(&tail), ["-- incomplete", "-- inside"]);
+        assert_eq!(completed.span().text(), Some("a = 1"));
+        assert_eq!(tail.span().text(), Some("f = x -> ("));
+    }
+
+    #[test]
+    fn recovering_framing_handles_complete_empty_and_trivia_only_input() {
+        for (source, expected) in [
+            ("a = 1; b = 2", vec!["a = 1;", "b = 2"]),
+            ("", vec![]),
+            (" \n ", vec![]),
+            ("-- comment", vec!["-- comment"]),
+        ] {
+            let framed = frame_recovering(lex_str(source).unwrap());
+            assert!(framed.incomplete.is_none(), "{source:?}");
+            assert_eq!(
+                framed
+                    .cells
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{source:?}",
+            );
+        }
+    }
 
     fn count_cell_adjacency(tokens: &[CellTokenTree]) -> usize {
         tokens

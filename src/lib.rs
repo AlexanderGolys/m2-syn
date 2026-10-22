@@ -68,7 +68,8 @@ pub use parse::{
 
 pub use body::{Body, Terminated};
 pub use cell_stream::{
-    CellStream, CellStreamError, CellTokenGroup, CellTokenStream, CellTokenTree, Tokenize,
+    CellStream, CellStreamError, CellTokenGroup, CellTokenStream, CellTokenTree, FramedCells,
+    Tokenize, frame_recovering,
 };
 pub use cst::{
     CSTNodeClassLabel, ChildCursor, ExternalCstChild, ExternalCstNode, Migrate, MigrateError, Token,

@@ -4,7 +4,7 @@ members = ["m2-syn-macros"]
 
 [package]
 name = "m2-syn"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 description = "Parser, typed CST, traversal and procedural macros for Macaulay2"
 license = "MIT"

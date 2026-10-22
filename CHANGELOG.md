@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 — 2026-10-22
+
+- Parse empty parentheses `()` as an empty sequence in the native parser.
+- Update `tree-sitter-macaulay2` to 6.3.2, whose grammar classifies empty
+  parentheses as a sequence.
+
 ## 0.6.0 — 2026-10-10
 
 - Relicense `m2-syn` and `m2-syn-macros` from GPL-3.0-only to MIT.

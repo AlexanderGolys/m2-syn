@@ -99,7 +99,10 @@ fn bracket_precedence_differs_from_parenthesis_precedence() {
     let parenthesis = expression("a x ()");
     let (_, right) = adjacent(&parenthesis);
     let (_, call) = adjacent(right);
-    assert!(matches!(call, Expr::Holder(_)));
+    assert!(
+        matches!(call, Expr::Collection(ExprCollection::Sequence(_))),
+        "{call:#?}"
+    );
 }
 
 #[test]
@@ -108,12 +111,18 @@ fn chained_delimiters_inherit_the_application_floor() {
     let (_, right) = adjacent(&low_then_high);
     let (array, parenthesis) = adjacent(right);
     assert!(matches!(array, Expr::Collection(ExprCollection::Array(_))));
-    assert!(matches!(parenthesis, Expr::Holder(_)));
+    assert!(matches!(
+        parenthesis,
+        Expr::Collection(ExprCollection::Sequence(_))
+    ));
 
     let high_then_low = expression("a () []");
     let (left, array) = adjacent(&high_then_low);
     let (_, parenthesis) = adjacent(left);
-    assert!(matches!(parenthesis, Expr::Holder(_)));
+    assert!(matches!(
+        parenthesis,
+        Expr::Collection(ExprCollection::Sequence(_))
+    ));
     assert!(matches!(array, Expr::Collection(ExprCollection::Array(_))));
 }
 

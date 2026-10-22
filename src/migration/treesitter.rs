@@ -1642,3 +1642,45 @@ impl Spanned for TreeSitterNode<'_, '_> {
         self.span.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expressions(source: &str) -> [Expr; 2] {
+        [
+            parse_file(source).unwrap(),
+            crate::parse_native(source).unwrap(),
+        ]
+        .map(|mut file| {
+            assert_eq!(file.cells.len(), 1, "source: {source}");
+            let PackedContent::Expr(value) = file.cells.pop().unwrap().content else {
+                panic!("expected one expression for {source}");
+            };
+            *value
+        })
+    }
+
+    #[test]
+    fn empty_parentheses_are_empty_sequences_in_both_backends() {
+        for source in ["()", "( )", "(-* comment *-)", "(-- comment\n)"] {
+            for expression in expressions(source) {
+                let Expr::Collection(ExprCollection::Sequence(sequence)) = expression else {
+                    panic!("expected an empty sequence for {source}, found {expression:?}");
+                };
+                assert!(sequence.statements.is_empty(), "source: {source}");
+                assert!(sequence.elements.is_none(), "source: {source}");
+                assert_eq!(sequence.span().text(), Some(source));
+            }
+        }
+    }
+
+    #[test]
+    fn parenthesized_values_and_statements_remain_holders() {
+        for source in ["(x)", "(x;)", "(x; y)"] {
+            for expression in expressions(source) {
+                assert!(matches!(expression, Expr::Holder(_)), "source: {source}");
+            }
+        }
+    }
+}

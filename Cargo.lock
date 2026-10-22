@@ -63,7 +63,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "m2-syn"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "m2-syn-macros",
  "these-macros-should-be-illegal",
@@ -244,9 +244,9 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
 name = "tree-sitter-macaulay2"
-version = "6.1.2"
+version = "6.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f89e14d67e97bd67043766300af6ff7e7ab4445e2097d2e106c3427c2ca92e3"
+checksum = "2b8e1250ca4df7491ef42c8c88ab3ae1140585f1ed78dbdf8758d7288b308d50"
 dependencies = [
  "cc",
  "tree-sitter",

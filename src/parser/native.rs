@@ -1476,6 +1476,11 @@ fn parse_delimited(token: SignificantToken) -> Result<Expr, NativeParseError> {
             value.delimiter = typed_delimiter(delimiter_spans, opening_trivia, group_trailing);
             value.into()
         }
+        DelimiterKind::Parenthesis if muted.is_empty() && elements.is_none() => {
+            let mut value = Sequence::new(Vec::new(), None);
+            value.delimiter = typed_delimiter(delimiter_spans, opening_trivia, group_trailing);
+            value.into()
+        }
         DelimiterKind::Parenthesis
             if !muted.is_empty() || elements.as_ref().is_some_and(Components::is_punctuated) =>
         {

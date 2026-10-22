@@ -4,7 +4,7 @@ members = ["m2-syn-macros"]
 
 [package]
 name = "m2-syn"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "Parser, typed CST, traversal and procedural macros for Macaulay2"
 license = "MIT"
@@ -26,7 +26,7 @@ tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-macaulay2"]
 [dependencies]
 m2-syn-macros = { version = "0.6.0", path = "m2-syn-macros" }
 tree-sitter = { version = "0.26.12", optional = true }
-tree-sitter-macaulay2 = { version = "6.1.2", optional = true }
+tree-sitter-macaulay2 = { version = "6.3.2", optional = true }
 these-macros-should-be-illegal = { version = "0.7.0" }
 
 [[example]]

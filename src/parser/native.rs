@@ -875,6 +875,16 @@ impl Engine {
                         return Err(NativeParseError::MissingOperand { operator, span });
                     }
                 };
+                if matches!(
+                    &quoted.token,
+                    TokenTree::Literal(literal)
+                        if matches!(literal.kind, LiteralKind::String | LiteralKind::RawString)
+                ) {
+                    return Err(unexpected!(
+                        quoted.token,
+                        "a quoted token other than a string literal"
+                    ));
+                }
                 let quoted_span = quoted.token.expect_span();
                 let Some(quoted_text) = quoted.token.spelling().map(str::to_owned) else {
                     return Err(unexpected!(quoted.token, "a quoted token"));
@@ -2246,9 +2256,9 @@ fn parse_info(token: &TokenTree) -> ParseInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{NativeCellParser, NativeCellState};
+    use super::{NativeCellParser, NativeCellState, NativeParseError};
     use crate::cell_stream::frame_recovering;
-    use crate::{Spanned, lex_str};
+    use crate::{NativeRealtimeParser, Spanned, lex_str, parse_native, parse_native_recovering};
 
     /// Cell boundaries are decided here, from the flat stream, using the same
     /// operator/clause/quote state the grammar needs. Verified against M2
@@ -2313,6 +2323,70 @@ mod tests {
                 .unwrap_or_else(|| panic!("expected a diagnostic for `{source}`"));
             assert_eq!(error.to_string(), diagnostic, "source: `{source}`");
             assert_eq!(error.span().text(), Some(diagnostic_text));
+        }
+    }
+
+    #[test]
+    fn quote_modifiers_reject_string_literals_with_a_located_syntax_error() {
+        for modifier in ["symbol", "local", "global", "threadLocal", "threadVariable"] {
+            for literal in ["\"a\"", "///a///"] {
+                let source = format!("{modifier} {literal}");
+                for result in [
+                    parse_native(&source),
+                    parse_native_recovering(&source).map(|recovered| recovered.value),
+                ] {
+                    let error = result.unwrap_err();
+                    assert!(
+                        matches!(error, NativeParseError::Unexpected { .. }),
+                        "{source}: {error}"
+                    );
+                    assert_eq!(error.span().text(), Some(literal), "{source}");
+                    assert_eq!(
+                        error.to_string(),
+                        format!(
+                            "expected a quoted token other than a string literal, found `{literal}`"
+                        ),
+                        "{source}",
+                    );
+                }
+                let mut parser = NativeCellParser::new();
+                assert_eq!(
+                    parser.push_line(&source),
+                    NativeCellState::Invalid,
+                    "{source}"
+                );
+
+                #[cfg(feature = "tree-sitter")]
+                {
+                    assert!(crate::parse_file(&source).is_err(), "{source}");
+                    assert!(crate::parse_file_recovering(&source).is_err(), "{source}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_quoted_string_preserves_realtime_cells_and_trivia() {
+        let source = "a = 1\nsymbol -- reason\n\"a\"\nb = 2";
+        let parser = NativeRealtimeParser::new(source);
+        assert_eq!(parser.state(), NativeCellState::Invalid);
+        assert_eq!(parser.cells().len(), 3);
+        let cells = parser.cells();
+        assert_eq!(cells[0].state(), NativeCellState::Complete);
+        assert_eq!(cells[1].state(), NativeCellState::Invalid);
+        assert_eq!(cells[2].state(), NativeCellState::Complete);
+        let error = cells[1].parse_error().unwrap();
+        assert_eq!(error.span().text(), Some("\"a\""));
+        assert_eq!(cells[1].tokens().to_string(), "symbol -- reason\n\"a\"");
+    }
+
+    #[test]
+    fn quote_modifiers_continue_to_accept_non_string_tokens() {
+        for modifier in ["symbol", "local", "global", "threadLocal", "threadVariable"] {
+            for token in ["a", "if", "symbol", "+", ";", "(", ")", "1", "1.5"] {
+                let source = format!("{modifier} {token}");
+                assert!(parse_native(&source).is_ok(), "{source}");
+            }
         }
     }
 }

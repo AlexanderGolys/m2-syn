@@ -63,7 +63,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "m2-syn"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "m2-syn-macros",
  "these-macros-should-be-illegal",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "m2-syn-macros"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "proc-macro2",
  "quote",

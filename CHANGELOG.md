@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.1 — 2026-10-24
+
+- Reject ordinary and raw string literals after quote modifiers in the native
+  parser, reporting a syntax error at the literal instead of accepting it as
+  a symbol. Realtime parsing retains the invalid cell and neighboring cells.
+- License `m2-syn` and `m2-syn-macros` under either MIT or Apache-2.0, at
+  the user's option. Include both license texts in each crate package.
+- Update `m2-syn-macros` to 0.6.1 for its dual-license metadata and license
+  files; macro behavior is unchanged.
+
 ## 0.7.0 — 2026-10-23
 
 - Expose `frame_recovering` and `FramedCells` as a stateless API for cell

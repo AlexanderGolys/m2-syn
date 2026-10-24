@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/m2-syn.svg)](https://crates.io/crates/m2-syn)
 [![docs.rs](https://img.shields.io/docsrs/m2-syn)](https://docs.rs/m2-syn)
-[![license](https://img.shields.io/crates/l/m2-syn.svg)](https://github.com/AlexanderGolys/m2-syn/blob/master/LICENSE)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 `m2-syn` is a parser-independent typed syntax graph for Macaulay2. One
 `syntax!` declaration inventories the algebraic graph while its nested
@@ -627,4 +627,8 @@ The schema is expanded by the `syntax!` procedural macro, so changes to
 `src/schema/nodes.rs` are picked up by the next compile; there is no generated source
 to refresh or commit.
 
-`m2-syn` is licensed under the [MIT License](https://github.com/AlexanderGolys/m2-syn/blob/master/LICENSE).
+## License
+
+`m2-syn` and `m2-syn-macros` are licensed under either the
+[MIT License](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE),
+at your option.

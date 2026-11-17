@@ -4,7 +4,7 @@ members = ["m2-syn-macros"]
 
 [package]
 name = "m2-syn"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 description = "Parser, typed CST, traversal and procedural macros for Macaulay2"
 license = "MIT OR Apache-2.0"
@@ -24,10 +24,10 @@ default = ["tree-sitter"]
 tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-macaulay2"]
 
 [dependencies]
-m2-syn-macros = { version = "0.6.1", path = "m2-syn-macros" }
+m2-syn-macros = { version = "0.7.0", path = "m2-syn-macros" }
 tree-sitter = { version = "0.26.12", optional = true }
 tree-sitter-macaulay2 = { version = "6.3.2", optional = true }
-these-macros-should-be-illegal = { version = "0.7.0" }
+these-macros-should-be-illegal = { version = "0.14.2" }
 
 [[example]]
 name = "hierarchy_visit_emit"

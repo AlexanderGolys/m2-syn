@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.8.0 — 2026-11-17
+
+This release reshapes the typed tree and its schema; most code naming nodes
+or trivia needs updating.
+
+- Replace the grammar-shaped nodes with a flat, `syn`-style `Expr` whose
+  variants wrap one struct each: `ExprBinary`, `ExprFunction`, `ExprAssign`,
+  `ExprIf`, `ExprFor`, `ExprQuote`, and so on. Adjacency is an `ExprBinary`
+  whose operator is `Token![SPACE]`. Children are `Box<T>` and `Option<T>`.
+- Declare nodes as ordinary Rust structs and enums with `#[derive(Syntax)]`,
+  and split the old `syntax!` table into `tokens!` (spellings, roles, and
+  binding) and `traversal!` (the visitor, mutable visitor, and fold). The
+  `syntax!` macro is removed.
+- Remove trivia. Comments are found through spans: `Span::comments_before`,
+  `Span::comments_after`, and `Lex::comments`, which returns `Comments` split
+  into outer documentation lines and inner comments. A rewritten tree keeps
+  each comment next to the spans it kept. `CommentTrivia`, `LeadingTrivia`,
+  `TrailingTrivia`, `Trivia`, and `TriviaKind` are removed.
+- Make the positions `BOF`, `EOF`, and `EOC` zero-width marker tokens,
+  `Token![BOF]`, `Token![EOF]`, and `Token![EOC]`.
+- Merge `Delimiter!` into `Token!`. Whitespace inside a spelling is ignored,
+  a delimiter pair names its delimiter, as in `Token![<||>]`, and an empty
+  spelling, `Token![]` or `Token![" "]`, is adjacency.
+- `Symbol` wraps an `IdentToken`, sharing its package and index qualifiers.
+- Reject the `Core$` alias of a construct continuation, as in
+  `if x Core$then y`, in both parsers, as M2 does. `Core$` aliases only words:
+  `Core$+` is the symbol `Core$` followed by `+`.
+- Lex each character of M2's operator blocks (`§`, `©`, `×`, arrows,
+  mathematical operators, …) as a token of its own, with a following `=`:
+  `a§b` is `a § b`. The token is an operator when declared and otherwise a
+  symbol, so `§=` and `≠=` are symbols while `⊠=` is augmented assignment.
+- Give tokens M2's synonyms as further spellings, declared as
+  `["≠"] = [!=]`: `→ ← ⇒ ∧ ∨ ≠ ≤ ≥ ≪ ≫ ⊢ ⊕ ⊗` and `threadVariable` for
+  `threadLocal`. `x → x + 1` is an `ExprFunction` whose `Token![->]` prints
+  `→`. The Tree-sitter parsers read them too; `QuoteKeyword::ThreadVariable`
+  is removed.
+- Update `m2-syn-macros` to 0.7.0 for the new declaration macros.
+
 ## 0.7.1 — 2026-10-24
 
 - Reject ordinary and raw string literals after quote modifiers in the native

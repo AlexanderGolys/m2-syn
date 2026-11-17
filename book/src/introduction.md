@@ -1,45 +1,50 @@
 # Introduction
 
-`m2-syn` is a parser-independent typed syntax graph for Macaulay2. One
-`syntax!` declaration describes the algebraic shape of the graph; generated
-implementations provide construction, traversal, source provenance, and
-conversion from a concrete syntax tree.
+`m2-syn` provides Rust types for Macaulay2 syntax. It can parse source into an
+owned concrete syntax tree, walk or edit that tree, and emit M2 source again.
+The same types serve both the native parser and the optional Tree-sitter
+backend.
 
-The API is experimental and may change while the typed grammar and parser
-adapter interfaces are being established.
+A concrete syntax tree retains syntax that matters when writing code back out:
+operators, delimiters, comma tokens, statement boundaries, and comments. Its
+Rust types distinguish an assignment from a function call or a literal, so a
+transformation can work with those structures directly.
 
-## Project direction
+Add the published crate to your project:
 
-This crate began as the syntax and analysis layer for the Macaulay2 language
-server. It grew into a standalone, `syn`-like foundation for M2: an owned,
-typed representation that can be constructed from source, traversed and
-rewritten, and emitted as code.
+```sh
+cargo add m2-syn
+```
 
-The current priority is the basic source pipeline:
+## Start with a parsed file
 
-1. read M2 source and parse it with Tree-sitter;
-2. reconstruct the complete typed AST;
-3. emit normalized M2 that parses back to the same structure.
+`ParsedFile` owns the typed tree and retains the original input for diagnostics.
+Use the native parser to get started without configuring a backend:
 
-The syntax model follows the grammar published as `tree-sitter-macaulay2`
-`6.0.0`, resolved from the registry like any other dependency. Local builds and
-tests therefore exercise the same grammar downstream users get, rather than
-whatever happens to be checked out beside the repository.
+```rust
+use m2_syn::ParsedFile;
 
-Round-tripping through both the Tree-sitter and native parser backends works
-end to end, and `quote_m2!`/`parse_quote_m2!` are stable enough for everyday
-use (see [Quoting](./quoting.md)). The next steps are a converter from M2's
-own `Core` parser output and a macro-expansion engine built on the typed
-graph; `Core`'s own concrete tree is considerably less structured than either
-parser backend here (no named fields, several statement forms share one flat
-node shape distinguished only by which positional slots are populated), so
-the typed graph and its generated APIs must stay parser-independent rather
-than special-cased around it.
+let file = ParsedFile::from_source_native("answer = 40 + 2")?;
+assert_eq!(file.cst().cells.len(), 1);
+assert_eq!(file.to_source(), "answer = 40 + 2");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
-Longer term, `m2-syn` should support semantic and typechecking walks,
-incremental analysis after referenced code changes, selected node metadata,
-and procedural macros for M2. `Visit`, `VisitMut`, and `Fold` are intended as
-the basic traversal and transformation vocabulary for that work. The guiding
-design rule is to describe as little grammar as possible in `syntax!` and
-generate the repetitive construction, traversal, reconstruction, and printing
-machinery.
+From there, you can [choose a parser](./parsers.md),
+[walk and edit syntax](./generated-api.md), or
+[construct fragments with quoting](./quoting.md). The later chapters explain
+the token pipeline, source locations, and schema used to generate the tree.
+
+## Features and API layout
+
+The default `tree-sitter` Cargo feature enables the alternative parser backend,
+including `parse_file`, `parse_tokens`, `ParsedFile::from_source`, and
+`RealtimeParser`. The native parser, quoting, traversal, source emission, and
+inspection remain available with `default-features = false`.
+
+Concrete syntax types live in `m2_syn::nodes`. Shared types and macros such as
+`ParsedFile`, `TokenStream`, `Span`, `quote_m2!`, and `Token!` are exported from
+the crate root. Traversal lives in `visit`, `visit_mut`, and `fold`.
+
+The API is experimental. This book describes the workspace API; when using a
+published version, consult that version's API reference for exact signatures.

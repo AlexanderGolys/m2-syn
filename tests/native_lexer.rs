@@ -3,7 +3,7 @@
 use std::ops::Bound;
 
 use m2_syn::{
-    DelimiterKind, IdentToken, LexErrorKind, Span, Spanned, TokenStream, TokenTree, lex_str,
+    DelimiterKind, IdentToken, Lex, LexErrorKind, Span, Spanned, TokenStream, TokenTree, lex_str,
     lex_str_recovering,
 };
 
@@ -37,18 +37,18 @@ fn public_string_lexer_returns_a_displayable_token_stream() {
 fn complete_line_comments_coalesce_but_inline_comments_stay_inner() {
     let source = "    -- first\n\t-- second\nvalue -- trailing\nnext";
     let tokens = lexed(source);
-    let mut tokens = tokens.iter();
-    let value = tokens.next().unwrap();
-    let next = tokens.next().unwrap();
+    let comments = tokens.comments();
+    let next = tokens.iter().collect::<Vec<_>>()[1];
 
-    assert_eq!(value.leading_trivia().as_slice().len(), 1);
-    assert_eq!(
-        value.leading_trivia().as_slice()[0].text(),
-        "    -- first\n\t-- second"
-    );
-    assert_eq!(value.trailing_trivia().as_slice().len(), 1);
-    assert_eq!(value.trailing_trivia().as_slice()[0].text(), "-- trailing");
-    assert!(next.leading_trivia().is_empty());
+    let texts = |comments: &[m2_syn::Comment]| {
+        comments
+            .iter()
+            .map(|comment| comment.text().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(texts(comments.outer()), ["-- first\n\t-- second"]);
+    assert_eq!(texts(comments.inner()), ["-- trailing"]);
+    assert!(next.span().comments_before().is_empty());
 }
 
 #[test]

@@ -31,6 +31,13 @@ pub(crate) enum Role {
 }
 
 impl ParseInfo {
+    /// Whether the parser acts on the token itself rather than only finding it
+    /// where a construct expects it: `if` and `and` act, while `then` only
+    /// continues the `if` before it.
+    pub(crate) fn acts(self) -> bool {
+        self.role != Role::Precedence
+    }
+
     pub(crate) fn is_any_operator(self) -> bool {
         matches!(
             self.role,
@@ -91,7 +98,11 @@ impl ParseInfo {
 pub(crate) struct ParseFlags {
     roles: u8,
     pub(crate) augmented: bool,
-    pub(crate) trivia: bool,
+    /// Whether adjacency may also imply the token, with an empty spelling.
+    pub(crate) implicit: bool,
+    /// Whether the token only marks a position: it is never read from source
+    /// nor written, so its spelling stays an ordinary name there.
+    pub(crate) marker: bool,
 }
 
 impl SynParse for ParseFlags {
@@ -121,12 +132,14 @@ impl SynParse for ParseFlags {
                 }
                 "aug" if !flags.augmented => flags.augmented = true,
                 "aug" => return Err(Error::new(name.span(), "duplicate `aug` tag")),
-                "trivia" if !flags.trivia => flags.trivia = true,
-                "trivia" => return Err(Error::new(name.span(), "duplicate `trivia` tag")),
+                "implicit" if !flags.implicit => flags.implicit = true,
+                "implicit" => return Err(Error::new(name.span(), "duplicate `implicit` tag")),
+                "marker" if !flags.marker => flags.marker = true,
+                "marker" => return Err(Error::new(name.span(), "duplicate `marker` tag")),
                 _ => {
                     return Err(Error::new(
                         name.span(),
-                        "expected `bin`, `pref`, `post`, `infix`, `aug`, or `trivia`",
+                        "expected `bin`, `pref`, `post`, `infix`, `aug`, `implicit`, or `marker`",
                     ));
                 }
             }

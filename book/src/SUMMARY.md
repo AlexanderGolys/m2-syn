@@ -2,11 +2,11 @@
 
 [Introduction](./introduction.md)
 
-- [Representation pipeline](./pipeline.md)
-- [The schema](./schema.md)
-- [Generated implementations](./generated-api.md)
-- [Spans](./spans.md)
-- [Native lexer](./lexer.md)
-- [Parser adapters](./parsers.md)
-- [Quoting](./quoting.md)
+- [Parsing source](./parsers.md)
+- [Walking and editing syntax](./generated-api.md)
+- [Quoting and expansion](./quoting.md)
+- [Tokens and cells](./pipeline.md)
+- [Lexing Macaulay2](./lexer.md)
+- [Source locations](./spans.md)
+- [The syntax schema](./schema.md)
 - [Development](./development.md)

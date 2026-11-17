@@ -1,7 +1,7 @@
 //! Compile-time probes for expressing the syntax graph with `strutuct!`.
 
 mod grammar {
-    use m2_syn::nodes::{Adj, BinaryOperator, Expr, PostfixOperator, PrefixOperator, Symbol};
+    use m2_syn::nodes::{BinaryOperator, Expr, PostfixOperator, PrefixOperator, Symbol};
     use m2_syn::{Delimited, Punctuated, Span, Spanned};
     use these_macros_should_be_illegal::strutuct;
 
@@ -10,7 +10,7 @@ mod grammar {
         OperatorExpr
         Adjacent |AdjacentExpr| {
             left_operand: Expr,
-            operator: Adj,
+            operator: m2_syn::Token![SPACE],
             right_operand: Expr,
         }
         Binary |BinaryExpr| {
@@ -52,7 +52,7 @@ mod grammar {
     fn constructs_a_nested_operator_specialization() {
         let left: Expr = Symbol::new("x", Span::for_text("x")).into();
         let right: Expr = Symbol::new("y", Span::for_text("y")).into();
-        let adjacency = Adj::new("", Span::for_text(" "));
+        let adjacency = m2_syn::Token![](Span::for_text(""));
 
         let operator = OperatorExpr!(Adjacent {
             left_operand: left,
@@ -106,63 +106,5 @@ mod grammar {
             panic!("the constructor selected the wrong argument-list specialization");
         };
         assert_eq!(pack.arguments.len(), 2);
-    }
-}
-
-mod generated_atoms {
-    use m2_syn::{Span, Spanned, syntax};
-
-    syntax! {
-        tokens {
-            [=] { infix } (14, R)
-            [+] { pref, bin, aug } (50, L)
-            [.] [.?]
-        }
-
-        #[operator(prefix)]
-        strutuct! {
-            #[derive(Debug, ::m2_syn::Spanned)]
-            PrefixOperator
-        }
-
-        #[operator(binary)]
-        strutuct! {
-            #[derive(Debug, ::m2_syn::Spanned)]
-            BinaryOperator
-        }
-
-        #[operator(augmented)]
-        strutuct! {
-            #[derive(Debug, ::m2_syn::Spanned)]
-            AugmentedOperator
-        }
-
-        #[leaf(qualified)]
-        strutuct! {
-            #[derive(Debug, ::m2_syn::Spanned)]
-            Symbol
-        }
-
-        strutuct! {
-            #[derive(Debug, ::m2_syn::Spanned)]
-            MemberOwner
-            operator: |MemberOperator| {
-                Dot(Token![.])
-                OptionalDot(Token![.?])
-            },
-        }
-    }
-
-    #[test]
-    fn syntax_metadata_augments_explicit_atom_declarations() {
-        let symbol = Symbol::new("x", Span::for_text("x"));
-        assert_eq!(symbol.text(), "x");
-        assert_eq!(symbol.expect_span().text(), Some("x"));
-
-        let prefix = PrefixOperator::Add(m2_syn::Token![+](Span::for_text("+")));
-        assert!(matches!(prefix, PrefixOperator::Add(_)));
-
-        let member = MemberOperator::OptionalDot(m2_syn::Token![.?](Span::for_text(".?")));
-        assert!(matches!(member, MemberOperator::OptionalDot(_)));
     }
 }

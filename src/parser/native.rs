@@ -1,7 +1,7 @@
 //! Direct construction of the typed graph from a flat token stream.
 //!
 //! The native precedence engine owns parsing decisions only. Token storage,
-//! cursor position, trivia skipping, and newline detection belong to
+//! cursor position and newline detection belong to
 //! [`ParseStream`], shared with generated [`Parse`]
 //! implementations.
 
@@ -9,14 +9,14 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use crate::cell_stream::{end_span, ends_with_cell_semicolon, frame_recovering};
-use crate::lexer::canonical_word_spelling;
+use crate::lexer::canonical_spelling;
 use crate::nodes::*;
 use crate::parse::{Lookahead, SignificantToken};
 use crate::{
-    CellStream, CellStreamError, CellTokenStream, CommentTrivia, Delimited, DelimiterKind,
-    DelimiterToken, DelimiterValue, LeadingTrivia, LexError, LexErrorKind, LiteralKind, Parse,
-    ParseStream, Parser, Punctuated, Recovered, Span, Spanned, Terminal, Token, TokenParseError,
-    TokenStream, TokenTree, Tokenize, TrailingTrivia, Trivia, lex_str, lex_str_recovering,
+    CellStream, CellStreamError, CellTokenStream, Delimited, DelimiterKind, DelimiterToken,
+    DelimiterValue, LexError, LexErrorKind, LiteralKind, Parse, ParseStream, Parser, Punctuated,
+    Recovered, Span, Spanned, Token, TokenParseError, TokenStream, TokenTree, Tokenize, lex_str,
+    lex_str_recovering,
 };
 
 /// Tests a raw token against one typed-token spelling.
@@ -665,16 +665,6 @@ struct Components<T> {
 }
 
 impl<T> Components<T> {
-    /// Creates the value from punctuated.
-    fn from_punctuated(values: Punctuated<T>) -> Self {
-        let (pair, rest) = values.into_parts();
-        let (first, punctuation, second) = pair.into_parts();
-        let mut pairs = Vec::with_capacity(rest.len() + 1);
-        pairs.push((punctuation, second));
-        pairs.extend(rest);
-        Self { first, rest: pairs }
-    }
-
     /// Returns whether the value is punctuated.
     fn is_punctuated(&self) -> bool {
         !self.rest.is_empty()
@@ -692,18 +682,6 @@ impl<T> Components<T> {
         }
         Ok(values)
     }
-
-    /// Handles map.
-    fn map<U>(self, mut map: impl FnMut(T) -> Option<U>) -> Option<Components<U>> {
-        Some(Components {
-            first: map(self.first)?,
-            rest: self
-                .rest
-                .into_iter()
-                .map(|(punctuation, value)| Some((punctuation, map(value)?)))
-                .collect::<Option<Vec<_>>>()?,
-        })
-    }
 }
 
 impl Engine {
@@ -720,7 +698,6 @@ impl Engine {
         semicolon: Option<Token![;]>,
         eoc_span: Span,
     ) -> Result<Option<crate::nodes::Cell>, NativeParseError> {
-        self.skip_trivia();
         if matches!(self.peek(), Lookahead::End(_)) {
             return match semicolon {
                 None => Ok(None),
@@ -738,7 +715,7 @@ impl Engine {
             return Err(unexpected!(token.token, "the end of the cell"));
         }
 
-        let eoc = EOC::new("", eoc_span);
+        let eoc = Token![EOC](eoc_span);
         Ok(Some(crate::nodes::Cell::new(
             self.packed_content(components)?,
             semicolon,
@@ -747,9 +724,9 @@ impl Engine {
     }
 
     /// Parses components.
-    fn parse_components(&mut self) -> Result<Components<Component>, NativeParseError> {
+    fn parse_components(&mut self) -> Result<Components<Element>, NativeParseError> {
         let first = if self.at_punctuation(",") {
-            Component::Empty(Empty::new("", empty_span_at(&self.peek().expect_span())))
+            Element::Empty(Empty::new("", empty_span_at(&self.peek().expect_span())))
         } else {
             self.parse_required(PREC_COMMA)?.into()
         };
@@ -757,7 +734,7 @@ impl Engine {
 
         while let Some(comma) = self.take_punctuation(",") {
             let next = if self.at_end() || self.at_punctuation(";") || self.at_punctuation(",") {
-                Component::Empty(Empty::new("", empty_span_at(&self.peek().expect_span())))
+                Element::Empty(Empty::new("", empty_span_at(&self.peek().expect_span())))
             } else {
                 self.parse_required(PREC_COMMA)?.into()
             };
@@ -770,7 +747,7 @@ impl Engine {
     /// Parses optional components.
     fn parse_optional_components(
         &mut self,
-    ) -> Result<Option<Components<Component>>, NativeParseError> {
+    ) -> Result<Option<Components<Element>>, NativeParseError> {
         if self.at_end() || self.at_punctuation(";") {
             Ok(None)
         } else {
@@ -821,17 +798,15 @@ impl Engine {
                 let operand = self.parse_required(level.max(strength))?;
                 let span = token.token.expect_span();
                 let spelling = token.token.description();
-                let operator =
-                    PrefixOperator::from_token_tree_with_trivia(token.token, token.trailing_trivia)
-                        .ok_or({
-                            NativeParseError::Unsupported {
-                                syntax: spelling,
-                                span,
-                            }
-                        })?;
-                Expr!(Op::Prefix {
-                    operator,
-                    operand: Box::new(operand),
+                let operator = PrefixOperator::from_token_tree(token.token).ok_or({
+                    NativeParseError::Unsupported {
+                        syntax: spelling,
+                        span,
+                    }
+                })?;
+                Expr::from(ExprPrefix {
+                    op: operator,
+                    expr: Box::new(operand),
                 })
             }
             UnaryAction::Statement => {
@@ -889,38 +864,22 @@ impl Engine {
                 let Some(quoted_text) = quoted.token.spelling().map(str::to_owned) else {
                     return Err(unexpected!(quoted.token, "a quoted token"));
                 };
-                let quoted = typed_terminal(
-                    Symbol::new(quoted_text, quoted_span),
-                    quoted.trailing_trivia,
-                );
-                if is_token!(&token.token, symbol) {
-                    Expr!(Quote::Symbol {
-                        specifier: typed_token(token),
-                        symbol: quoted,
-                    })
+                let quoted = Symbol::new(quoted_text, quoted_span);
+                let keyword = if is_token!(&token.token, symbol) {
+                    QuoteKeyword::Symbol(typed_token(token))
                 } else if is_token!(&token.token, local) {
-                    Expr!(Quote::Local {
-                        specifier: typed_token(token),
-                        symbol: quoted,
-                    })
+                    QuoteKeyword::Local(typed_token(token))
                 } else if is_token!(&token.token, global) {
-                    Expr!(Quote::Global {
-                        specifier: typed_token(token),
-                        symbol: quoted,
-                    })
-                } else if is_token!(&token.token, threadVariable) {
-                    Expr!(Quote::ThreadVariable {
-                        specifier: typed_token(token),
-                        symbol: quoted,
-                    })
+                    QuoteKeyword::Global(typed_token(token))
                 } else if is_token!(&token.token, threadLocal) {
-                    Expr!(Quote::ThreadLocal {
-                        specifier: typed_token(token),
-                        symbol: quoted,
-                    })
+                    QuoteKeyword::ThreadLocal(typed_token(token))
                 } else {
-                    unreachable!("quote actions are assigned only to quote specifiers")
-                }
+                    unreachable!("quote actions are assigned only to quote keywords")
+                };
+                Expr::from(ExprQuote {
+                    keyword,
+                    symbol: quoted,
+                })
             }
             UnaryAction::Error => {
                 return Err(unexpected!(token.token, "an expression"));
@@ -945,9 +904,9 @@ impl Engine {
                 ))
             })
             .transpose()?;
-        Ok(Expr!(If {
+        Ok(Expr::from(ExprIf {
             if_token: typed_token(keyword),
-            condition: Box::new(condition),
+            cond: Box::new(condition),
             then_clause,
             else_clause,
         }))
@@ -955,117 +914,85 @@ impl Engine {
 
     /// Parses for loop.
     fn parse_for_loop(&mut self, keyword: SignificantToken) -> Result<Expr, NativeParseError> {
-        let variable = self.consume_symbol("a loop variable")?;
-
-        enum Domain {
-            /// The Bare alternative.
-            Bare,
-            /// The Range alternative.
-            Range(Option<RangeBoundFrom>, Option<RangeBoundTo>),
-            /// The In alternative.
-            In(SignificantToken, Box<Expr>),
-        }
-        let domain = if let Some(token) = self.take_exact("in") {
+        let var = self.consume_symbol("a loop variable")?;
+        let iter = if let Some(token) = self.take_exact("in") {
             let collection = self.required_clause_expression(PREC_LOOP_CLAUSE, &token.token)?;
-            Domain::In(token, Box::new(collection))
+            Some(ForIter::In(InClause::new(
+                typed_token(token),
+                Box::new(collection),
+            )))
         } else {
-            let lower_bound = self
+            let from_clause = self
                 .take_exact("from")
                 .map(|token| {
                     let value = self.required_clause_expression(PREC_LOOP_CLAUSE, &token.token)?;
-                    Ok::<_, NativeParseError>(RangeBoundFrom::new(
-                        typed_token(token),
-                        Box::new(value),
-                    ))
+                    Ok::<_, NativeParseError>(FromClause::new(typed_token(token), Box::new(value)))
                 })
                 .transpose()?;
-            let upper_bound = self
+            let to_clause = self
                 .take_exact("to")
                 .map(|token| {
                     let value = self.required_clause_expression(PREC_LOOP_CLAUSE, &token.token)?;
-                    Ok::<_, NativeParseError>(RangeBoundTo::new(
-                        typed_token(token),
-                        Box::new(value),
-                    ))
+                    Ok::<_, NativeParseError>(ToClause::new(typed_token(token), Box::new(value)))
                 })
                 .transpose()?;
-            if lower_bound.is_some() || upper_bound.is_some() {
-                Domain::Range(lower_bound, upper_bound)
-            } else {
-                Domain::Bare
-            }
+            (from_clause.is_some() || to_clause.is_some())
+                .then(|| ForIter::Range(ForRange::new(from_clause, to_clause)))
         };
-
-        let when_condition = if let Some(token) = self.take_exact("when") {
-            let condition = self.required_clause_expression(PREC_LOOP_CLAUSE, &token.token)?;
-            Some(WhenCondition::new(typed_token(token), Box::new(condition)))
-        } else {
-            None
-        };
+        let when_clause = self
+            .take_exact("when")
+            .map(|token| {
+                let condition = self.required_clause_expression(PREC_LOOP_CLAUSE, &token.token)?;
+                Ok::<_, NativeParseError>(WhenClause::new(typed_token(token), Box::new(condition)))
+            })
+            .transpose()?;
         let body = self.parse_loop_body()?;
 
-        Ok(match domain {
-            Domain::Bare => Expr!(For::Bare {
-                for_token: typed_token(keyword),
-                variable,
-                condition: when_condition,
-                body,
-            }),
-            Domain::Range(lower_bound, upper_bound) => Expr!(For::Range {
-                for_token: typed_token(keyword),
-                variable,
-                lower_bound,
-                upper_bound,
-                condition: when_condition,
-                body,
-            }),
-            Domain::In(token, collection) => Expr!(For::In {
-                for_token: typed_token(keyword),
-                variable,
-                in_token: typed_token(token),
-                collection,
-                condition: when_condition,
-                body,
-            }),
-        })
+        Ok(Expr::from(ExprFor {
+            for_token: typed_token(keyword),
+            var,
+            iter,
+            when_clause,
+            body,
+        }))
     }
 
     /// Parses while loop.
     fn parse_while_loop(&mut self, keyword: SignificantToken) -> Result<Expr, NativeParseError> {
         let condition = self.required_clause_expression(PREC_CONTROL, &keyword.token)?;
         let body = self.parse_loop_body()?;
-        Ok(Expr!(While {
+        Ok(Expr::from(ExprWhile {
             while_token: typed_token(keyword),
-            condition: Box::new(condition),
+            cond: Box::new(condition),
             body,
         }))
     }
 
     /// Parses loop body.
     fn parse_loop_body(&mut self) -> Result<LoopBody, NativeParseError> {
-        let (list_step, do_step) = if let Some(token) = self.take_exact("list") {
+        let (list_clause, do_clause) = if let Some(token) = self.take_exact("list") {
             let listed_value = self.required_clause_expression(PREC_CONTROL, &token.token)?;
-            let list_step = Some(ListStep::new(typed_token(token), Box::new(listed_value)));
+            let list_clause = Some(ListClause::new(typed_token(token), Box::new(listed_value)));
             if let Some(token) = self.take_exact("do") {
                 let ignored_value = self.required_clause_expression(PREC_CONTROL, &token.token)?;
                 (
-                    list_step,
-                    Some(DoStep::new(typed_token(token), Box::new(ignored_value))),
+                    list_clause,
+                    Some(DoClause::new(typed_token(token), Box::new(ignored_value))),
                 )
             } else {
-                (list_step, None)
+                (list_clause, None)
             }
         } else if let Some(token) = self.take_exact("do") {
             let ignored_value = self.required_clause_expression(PREC_CONTROL, &token.token)?;
             (
                 None,
-                Some(DoStep::new(typed_token(token), Box::new(ignored_value))),
+                Some(DoClause::new(typed_token(token), Box::new(ignored_value))),
             )
         } else {
             return Err(self.expected_at_lookahead("`list` or `do`"));
         };
 
-        Ok(LoopBody::new(list_step, do_step))
+        Ok(LoopBody::new(list_clause, do_clause))
     }
 
     /// Parses try statement.
@@ -1092,20 +1019,20 @@ impl Engine {
             let exception = self.consume_symbol("an exception symbol")?;
             let do_keyword = self.consume_exact("do")?;
             let value = self.required_clause_expression(PREC_CONTROL, &do_keyword.token)?;
-            Some(TryFallback!(Except {
-                except_token: typed_token(except_keyword),
+            Some(TryFallback::Except(ExceptClause::new(
+                typed_token(except_keyword),
                 exception,
-                do_token: typed_token(do_keyword),
-                value: Box::new(value),
-            }))
+                typed_token(do_keyword),
+                Box::new(value),
+            )))
         } else {
             None
         };
 
-        Ok(Expr!(Try {
+        Ok(Expr::from(ExprTry {
             try_token: typed_token(keyword),
-            value: Box::new(value),
-            on_success: then_clause,
+            expr: Box::new(value),
+            then_clause,
             fallback,
         }))
     }
@@ -1113,24 +1040,24 @@ impl Engine {
     /// Parses new statement.
     fn parse_new_statement(&mut self, keyword: SignificantToken) -> Result<Expr, NativeParseError> {
         let class = self.required_clause_expression(PREC_LOOP_CLAUSE, &keyword.token)?;
-        let parent_class = if let Some(token) = self.take_exact("of") {
+        let of_clause = if let Some(token) = self.take_exact("of") {
             let parent = self.required_clause_expression(PREC_LOOP_CLAUSE, &token.token)?;
-            Some(OfClass::new(typed_token(token), Box::new(parent)))
+            Some(OfClause::new(typed_token(token), Box::new(parent)))
         } else {
             None
         };
-        let instance = if let Some(token) = self.take_exact("from") {
+        let from_clause = if let Some(token) = self.take_exact("from") {
             let instance = self.required_clause_expression(PREC_LOOP_CLAUSE, &token.token)?;
-            Some(FromInstance::new(typed_token(token), Box::new(instance)))
+            Some(FromClause::new(typed_token(token), Box::new(instance)))
         } else {
             None
         };
 
-        Ok(Expr!(New {
+        Ok(Expr::from(ExprNew {
             new_token: typed_token(keyword),
             class: Box::new(class),
-            parent_class,
-            instance,
+            of_clause,
+            from_clause,
         }))
     }
 
@@ -1144,29 +1071,18 @@ impl Engine {
             let value = self
                 .parse_required(PREC_CONTROL)
                 .map_err(|error| error.missing_operand_for(&keyword.token))?;
-            return Ok(match spelling.as_str() {
-                "time" => Expr!(Profile::Time {
-                    modifier: typed_token(keyword),
-                    value: Box::new(value),
-                }),
-                "timing" => Expr!(Profile::Timing {
-                    modifier: typed_token(keyword),
-                    value: Box::new(value),
-                }),
-                "elapsedTime" => Expr!(Profile::ElapsedTime {
-                    modifier: typed_token(keyword),
-                    value: Box::new(value),
-                }),
-                "elapsedTiming" => Expr!(Profile::ElapsedTiming {
-                    modifier: typed_token(keyword),
-                    value: Box::new(value),
-                }),
-                "profile" => Expr!(Profile::Profile {
-                    modifier: typed_token(keyword),
-                    value: Box::new(value),
-                }),
-                _ => unreachable!(),
-            });
+            let keyword = match spelling.as_str() {
+                "time" => TimingKeyword::Time(typed_token(keyword)),
+                "timing" => TimingKeyword::Timing(typed_token(keyword)),
+                "elapsedTime" => TimingKeyword::ElapsedTime(typed_token(keyword)),
+                "elapsedTiming" => TimingKeyword::ElapsedTiming(typed_token(keyword)),
+                "profile" => TimingKeyword::Profile(typed_token(keyword)),
+                _ => unreachable!("timing actions are assigned only to timing keywords"),
+            };
+            return Ok(Expr::from(ExprTiming {
+                keyword,
+                expr: Box::new(value),
+            }));
         }
         let value_is_optional = matches!(spelling.as_str(), "step" | "finish");
         let value = if value_is_optional {
@@ -1178,29 +1094,18 @@ impl Engine {
             )
         };
         let value = value.map(Box::new);
-        Ok(match spelling.as_str() {
-            "step" => Expr!(Debug::Step {
-                keyword: typed_token(keyword),
-                value,
-            }),
-            "finish" => Expr!(Debug::Finish {
-                keyword: typed_token(keyword),
-                value,
-            }),
-            "shield" => Expr!(Debug::Shield {
-                keyword: typed_token(keyword),
-                value,
-            }),
-            "TEST" => Expr!(Debug::Test {
-                keyword: typed_token(keyword),
-                value,
-            }),
-            "breakpoint" => Expr!(Debug::Breakpoint {
-                keyword: typed_token(keyword),
-                value,
-            }),
+        let keyword = match spelling.as_str() {
+            "step" => DebugKeyword::Step(typed_token(keyword)),
+            "finish" => DebugKeyword::Finish(typed_token(keyword)),
+            "shield" => DebugKeyword::Shield(typed_token(keyword)),
+            "TEST" => DebugKeyword::Test(typed_token(keyword)),
+            "breakpoint" => DebugKeyword::Breakpoint(typed_token(keyword)),
             _ => unreachable!("debug actions are assigned only to debug keywords"),
-        })
+        };
+        Ok(Expr::from(ExprDebug {
+            keyword,
+            expr: value,
+        }))
     }
 
     /// Handles required clause expression.
@@ -1227,34 +1132,32 @@ impl Engine {
             {
                 let span = token.token.expect_span();
                 let text = token.token.description();
-                Ok(typed_terminal(
-                    Symbol::new(text, span),
-                    token.trailing_trivia,
-                ))
+                Ok(Symbol::new(text, span))
             }
             Lookahead::Token(token) => Err(unexpected!(token.token, expected)),
             Lookahead::End(span) => Err(NativeParseError::unexpected_end(expected, span)),
         }
     }
 
-    /// Consumes exact.
+    /// Consumes the word a construct continues with, which M2 matches by its
+    /// exact spelling: `Core$then` does not continue an `if`.
     fn consume_exact(
         &mut self,
         spelling: &'static str,
     ) -> Result<SignificantToken, NativeParseError> {
         match self.consume() {
-            Lookahead::Token(token) if parsing_spelling(&token.token) == spelling => Ok(token),
+            Lookahead::Token(token) if token.token.spelling() == Some(spelling) => Ok(token),
             Lookahead::Token(token) => Err(unexpected!(token.token, spelling)),
             Lookahead::End(span) => Err(NativeParseError::unexpected_end(spelling, span)),
         }
     }
 
-    /// Takes exact.
+    /// Takes the word a construct may continue with, matched like
+    /// [`Self::consume_exact`].
     fn take_exact(&mut self, spelling: &'static str) -> Option<SignificantToken> {
         if matches!(
             self.peek(),
-            Lookahead::Token(token)
-                if parsing_spelling(&token.token) == spelling
+            Lookahead::Token(token) if token.token.spelling() == Some(spelling)
         ) {
             let Lookahead::Token(token) = self.consume() else {
                 unreachable!("the token just peeked is consumable")
@@ -1296,15 +1199,7 @@ impl Engine {
                 let right = self
                     .parse_required(PREC_APPLICATION_RIGHT)
                     .map_err(|error| error.missing_operand_for(&operator.token))?;
-                let adjacency = typed_terminal(
-                    Adj::new("", operator.token.expect_span()),
-                    operator.trailing_trivia,
-                );
-                Expr!(Op::Bin::Adj {
-                    left_operand: Box::new(left),
-                    operator: adjacency,
-                    right_operand: Box::new(right),
-                })
+                adjacency(left, typed_token(operator), right)
             } else if let Some(strength) = info.binary_strength {
                 let left = BinaryLeft::prepare(left, &operator.token)?;
                 let right = self
@@ -1314,17 +1209,15 @@ impl Engine {
             } else if info.postfix {
                 let span = operator.token.expect_span();
                 let spelling = operator.token.description();
-                let operator = PostfixOperator::from_token_tree_with_trivia(
-                    operator.token,
-                    operator.trailing_trivia,
-                )
-                .ok_or(NativeParseError::Unsupported {
-                    syntax: spelling,
-                    span,
-                })?;
-                Expr!(Op::Postfix {
-                    operand: Box::new(left),
-                    operator,
+                let operator = PostfixOperator::from_token_tree(operator.token).ok_or(
+                    NativeParseError::Unsupported {
+                        syntax: spelling,
+                        span,
+                    },
+                )?;
+                Expr::from(ExprPostfix {
+                    expr: Box::new(left),
+                    op: operator,
                 })
             } else if !matches!(info.unary, UnaryAction::Error) {
                 if operator.crossed_newline {
@@ -1334,11 +1227,7 @@ impl Engine {
                 }
                 let adjacency_span = operator.token.expect_span().subspan(0, 0);
                 let right = self.parse_consumed(operator, PREC_APPLICATION_RIGHT)?;
-                Expr!(Op::Bin::Adj {
-                    left_operand: Box::new(left),
-                    operator: Adj::new("", adjacency_span),
-                    right_operand: Box::new(right),
-                })
+                adjacency(left, Token![SPACE](adjacency_span), right)
             } else {
                 return Err(unexpected!(operator.token, "an operator"));
             };
@@ -1356,7 +1245,7 @@ impl Engine {
     }
 
     /// Handles only expression.
-    fn only_expression(&self, components: Components<Component>) -> Result<Expr, NativeParseError> {
+    fn only_expression(&self, components: Components<Element>) -> Result<Expr, NativeParseError> {
         if components.is_punctuated() {
             return Err(NativeParseError::Unexpected {
                 found: "a sequence".into(),
@@ -1365,7 +1254,7 @@ impl Engine {
             });
         }
         match components.first {
-            Component::Expr(value) => Ok(*value),
+            Element::Expr(value) => Ok(*value),
             value => Err(NativeParseError::Unexpected {
                 found: "an empty component".into(),
                 expected: "one expression",
@@ -1377,11 +1266,11 @@ impl Engine {
     /// Handles packed content.
     fn packed_content(
         &self,
-        components: Components<Component>,
-    ) -> Result<PackedContent, NativeParseError> {
+        components: Components<Element>,
+    ) -> Result<Elements, NativeParseError> {
         match components.into_punctuated() {
-            Ok(components) => Ok(ExprPack::new(components).into()),
-            Err(Component::Expr(expression)) => Ok((*expression).into()),
+            Ok(components) => Ok(Elements::Pack(ElementsPack::new(components))),
+            Err(Element::Expr(expression)) => Ok((*expression).into()),
             Err(value) => Err(NativeParseError::Unexpected {
                 found: "an empty component".into(),
                 expected: "one expression",
@@ -1398,11 +1287,6 @@ impl Engine {
     /// Handles consume.
     fn consume(&mut self) -> Lookahead {
         self.input.consume_lookahead()
-    }
-
-    /// Skips trivia.
-    fn skip_trivia(&mut self) {
-        self.input.skip_trivia();
     }
 
     /// Handles at end.
@@ -1433,16 +1317,13 @@ impl Engine {
 
 /// Parses delimited.
 fn parse_delimited(token: SignificantToken) -> Result<Expr, NativeParseError> {
-    let group_trailing = token.trailing_trivia;
     let group = match token.token {
         TokenTree::Group(group) => group,
         token => return Err(unexpected!(token, "a delimited group")),
     };
     let kind = group.delim_kind();
     let delimiter_spans = group.delimiter().spans.clone();
-    let mut group_contents = group.into_stream();
-    let opening_trivia = group_contents.take_leading_trivia();
-    let mut contents = Engine::new(group_contents);
+    let mut contents = Engine::new(group.into_stream());
     let mut muted = Vec::new();
     let elements = loop {
         let elements = contents.parse_optional_components()?;
@@ -1452,7 +1333,7 @@ fn parse_delimited(token: SignificantToken) -> Result<Expr, NativeParseError> {
         let Some(elements) = elements else {
             return Err(unexpected!(separator.token, "a statement before `;`"));
         };
-        muted.push(Statement::new(
+        muted.push(Stmt::new(
             contents.packed_content(elements)?,
             typed_token(separator),
         ));
@@ -1466,36 +1347,36 @@ fn parse_delimited(token: SignificantToken) -> Result<Expr, NativeParseError> {
             let elements = elements
                 .map(|elements| contents.packed_content(elements))
                 .transpose()?;
-            let mut value = Array::new(muted, elements);
-            value.delimiter = typed_delimiter(delimiter_spans, opening_trivia, group_trailing);
+            let mut value = ExprArray::new(muted, elements);
+            value.delimiter = DelimiterToken::new(delimiter_spans.clone());
             value.into()
         }
         DelimiterKind::Brace => {
             let elements = elements
                 .map(|elements| contents.packed_content(elements))
                 .transpose()?;
-            let mut value = List::new(muted, elements);
-            value.delimiter = typed_delimiter(delimiter_spans, opening_trivia, group_trailing);
+            let mut value = ExprList::new(muted, elements);
+            value.delimiter = DelimiterToken::new(delimiter_spans.clone());
             value.into()
         }
         DelimiterKind::AngleBar => {
             let elements = elements
                 .map(|elements| contents.packed_content(elements))
                 .transpose()?;
-            let mut value = AngleBarList::new(muted, elements);
-            value.delimiter = typed_delimiter(delimiter_spans, opening_trivia, group_trailing);
+            let mut value = ExprAngleBar::new(muted, elements);
+            value.delimiter = DelimiterToken::new(delimiter_spans.clone());
             value.into()
         }
         DelimiterKind::Parenthesis if muted.is_empty() && elements.is_none() => {
-            let mut value = Sequence::new(Vec::new(), None);
-            value.delimiter = typed_delimiter(delimiter_spans, opening_trivia, group_trailing);
+            let mut value = ExprSequence::new(Vec::new(), None);
+            value.delimiter = DelimiterToken::new(delimiter_spans.clone());
             value.into()
         }
         DelimiterKind::Parenthesis
             if !muted.is_empty() || elements.as_ref().is_some_and(Components::is_punctuated) =>
         {
             let mut value = if elements.as_ref().is_some_and(Components::is_punctuated) {
-                Sequence::new(
+                ExprSequence::new(
                     muted,
                     elements
                         .map(|elements| contents.packed_content(elements))
@@ -1505,70 +1386,58 @@ fn parse_delimited(token: SignificantToken) -> Result<Expr, NativeParseError> {
                 let value = elements
                     .map(|elements| contents.only_expression(elements))
                     .transpose()?;
-                let mut value = Holder::new(muted, value.map(Box::new));
-                value.delimiter = typed_delimiter(delimiter_spans, opening_trivia, group_trailing);
+                let mut value = ExprParen::new(muted, value.map(Box::new));
+                value.delimiter = DelimiterToken::new(delimiter_spans.clone());
                 return Ok(value.into());
             };
-            value.delimiter = typed_delimiter(delimiter_spans, opening_trivia, group_trailing);
+            value.delimiter = DelimiterToken::new(delimiter_spans.clone());
             value.into()
         }
         DelimiterKind::Parenthesis => {
             let value = elements
                 .map(|elements| contents.only_expression(elements))
                 .transpose()?;
-            let mut value = Holder::new(Vec::new(), value.map(Box::new));
-            value.delimiter = typed_delimiter(delimiter_spans, opening_trivia, group_trailing);
+            let mut value = ExprParen::new(Vec::new(), value.map(Box::new));
+            value.delimiter = DelimiterToken::new(delimiter_spans.clone());
             value.into()
         }
     };
     Ok(expression)
 }
 
-/// Handles typed delimiter.
-fn typed_delimiter<D: DelimiterToken>(
-    spans: crate::DoubleSpan,
-    opening_trivia: TrailingTrivia,
-    closing_trivia: TrailingTrivia,
-) -> D {
-    let mut delimiter = D::new(spans);
-    *delimiter.opening_trivia_mut() = opening_trivia;
-    *delimiter.closing_trivia_mut() = closing_trivia;
-    delimiter
-}
-
 /// Lowers prefix statement.
 fn lower_prefix_statement(keyword: SignificantToken, value: Option<Expr>) -> Expr {
     if is_token!(&keyword.token, break) {
-        Expr!(Control::Break {
+        Expr::from(ExprBreak {
             break_token: typed_token(keyword),
-            value: value.map(Box::new),
+            expr: value.map(Box::new),
         })
     } else if is_token!(&keyword.token, continue) {
-        Expr!(Control::Continue {
+        Expr::from(ExprContinue {
             continue_token: typed_token(keyword),
-            value: value.map(Box::new),
+            expr: value.map(Box::new),
         })
     } else if is_token!(&keyword.token, return) {
-        Expr!(Control::Return {
+        Expr::from(ExprReturn {
             return_token: typed_token(keyword),
-            value: value.map(Box::new),
+            expr: value.map(Box::new),
         })
     } else {
         let value = value.expect("catch, throw, and trap require a value");
         if is_token!(&keyword.token, catch) {
-            Expr!(Catch {
+            Expr::from(ExprCatch {
                 catch_token: typed_token(keyword),
-                value: Box::new(value),
+                expr: Box::new(value),
             })
         } else if is_token!(&keyword.token, throw) {
-            Expr!(Throw {
+            Expr::from(ExprThrow {
                 throw_token: typed_token(keyword),
-                value: Box::new(value),
+                expr: Box::new(value),
             })
         } else if is_token!(&keyword.token, trap) {
-            Expr!(Trap {
+            Expr::from(ExprTrap {
                 trap_token: typed_token(keyword),
-                value: Box::new(value),
+                expr: Box::new(value),
             })
         } else {
             unreachable!("statement actions are assigned only to statement keywords")
@@ -1579,29 +1448,15 @@ fn lower_prefix_statement(keyword: SignificantToken, value: Option<Expr>) -> Exp
 /// Lowers atom.
 fn lower_atom(token: SignificantToken) -> Result<Expr, NativeParseError> {
     match token.token {
-        TokenTree::Ident(raw) => Ok(typed_terminal(
-            Symbol::new(raw.text(), raw.expect_span()),
-            token.trailing_trivia,
-        )
-        .into()),
+        TokenTree::Ident(raw) => Ok(Symbol::new(raw.text(), raw.expect_span()).into()),
         TokenTree::Literal(raw) => {
             let span = raw.expect_span();
-            Ok(match raw.kind {
-                LiteralKind::Integer => {
-                    typed_terminal(IntegerLiteral::new(raw.text(), span), token.trailing_trivia)
-                        .into()
-                }
-                LiteralKind::Float => {
-                    typed_terminal(FloatLiteral::new(raw.text(), span), token.trailing_trivia)
-                        .into()
-                }
-                LiteralKind::String => {
-                    lower_string_literal(raw.text(), span, token.trailing_trivia)
-                }
-                LiteralKind::RawString => {
-                    lower_raw_string_literal(raw.text(), span, token.trailing_trivia)
-                }
-            })
+            Ok(Expr::Literal(match raw.kind {
+                LiteralKind::Integer => IntegerLiteral::new(raw.text(), span).into(),
+                LiteralKind::Float => FloatLiteral::new(raw.text(), span).into(),
+                LiteralKind::String => lower_string_literal(raw.text(), span),
+                LiteralKind::RawString => lower_raw_string_literal(raw.text(), span),
+            }))
         }
         token => Err(unexpected!(token, "an expression")),
     }
@@ -1609,72 +1464,28 @@ fn lower_atom(token: SignificantToken) -> Result<Expr, NativeParseError> {
 
 /// A left operand whose operator-specific structural requirements are valid.
 enum BinaryLeft {
-    /// The Expression alternative.
+    /// An operand of an operator without structural requirements.
     Expression(Box<Expr>),
-    /// The Assignment alternative.
-    Assignment {
-        /// The target.
-        target: AssignmentTarget,
-        /// The local.
-        local: bool,
-    },
-    /// The Lambda alternative.
-    Lambda(LambdaArguments),
-}
-
-/// Internal alternatives for LambdaArguments.
-pub(crate) enum LambdaArguments {
-    /// The Variadic alternative.
-    Variadic(Symbol),
-    /// The List alternative.
-    List(Box<Delimited<Option<ArgumentListContent>>>),
+    /// The parameters left of `->`.
+    Function(Box<FunctionParams>),
 }
 
 impl BinaryLeft {
-    /// Handles prepare.
+    /// Validates the left operand against the requirements of `operator`.
     fn prepare(left: Expr, operator: &TokenTree) -> Result<Self, NativeParseError> {
         let span = operator.expect_span();
-        Ok(match operator.spelling() {
-            Some("=") => Self::Assignment {
-                target: AssignmentTarget::parse(left, false, span)?,
-                local: false,
-            },
-            Some(":=") => Self::Assignment {
-                target: AssignmentTarget::parse(left, true, span)?,
-                local: true,
-            },
-            Some("->") => Self::Lambda(
-                lambda_arguments(left).ok_or(NativeParseError::InvalidLambdaArguments { span })?,
-            ),
+        Ok(match Some(parsing_spelling(operator)) {
+            Some("=") if !is_assignment_target(&left, false) => {
+                return Err(NativeParseError::InvalidAssignmentTarget { span });
+            }
+            Some(":=") if !is_assignment_target(&left, true) => {
+                return Err(NativeParseError::InvalidAssignmentTarget { span });
+            }
+            Some("->") => Self::Function(Box::new(
+                function_params(left).ok_or(NativeParseError::InvalidLambdaArguments { span })?,
+            )),
             _ => Self::Expression(Box::new(left)),
         })
-    }
-}
-
-/// A parsed expression that can occur to the left of an assignment operator.
-enum AssignmentTarget {
-    /// The Symbol alternative.
-    Symbol(Symbol),
-    /// The Operator alternative.
-    Operator(ExprOp),
-    /// The New alternative.
-    New(ExprNew),
-    /// The List alternative.
-    List(Box<AssignmentList>),
-}
-
-impl AssignmentTarget {
-    /// Handles parse.
-    fn parse(expression: Expr, local: bool, span: Span) -> Result<Self, NativeParseError> {
-        match expression {
-            Expr::Symbol(variable) => Ok(Self::Symbol(variable)),
-            Expr::Op(expression) => Ok(Self::Operator(expression)),
-            Expr::New(statement) if local => Ok(Self::New(statement)),
-            expression => assignment_list(expression)
-                .map(Box::new)
-                .map(Self::List)
-                .ok_or(NativeParseError::InvalidAssignmentTarget { span }),
-        }
     }
 }
 
@@ -1685,173 +1496,70 @@ fn lower_binary(
     right: Expr,
 ) -> Result<Expr, NativeParseError> {
     let span = operator.token.expect_span();
-    let spelling = operator
-        .token
-        .spelling()
-        .expect("binary actions are assigned only to spelled tokens");
-    match left {
-        BinaryLeft::Assignment { target, local } => {
-            Ok(lower_assignment(target, operator, right, local))
-        }
-        BinaryLeft::Lambda(arguments) => Ok(match arguments {
-            LambdaArguments::Variadic(argument) => Expr!(Lambda::Variadic {
-                argument,
-                operator: typed_token(operator),
+    let spelling = parsing_spelling(&operator.token).to_owned();
+    let left = match left {
+        BinaryLeft::Function(params) => {
+            return Ok(Expr::from(ExprFunction {
+                params: *params,
+                arrow_token: typed_token(operator),
                 body: Box::new(right),
-            }),
-            LambdaArguments::List(arguments) => Expr!(Lambda::List {
-                arguments: *arguments,
-                operator: typed_token(operator),
-                body: Box::new(right),
-            }),
-        }),
-        BinaryLeft::Expression(left) if spelling == "<-" => Ok(Expr!(Assign::Evaluated {
-            evaluated_domain: left,
-            operator: typed_token(operator),
-            value: Box::new(right),
-        })),
-        BinaryLeft::Expression(left) if spelling == "=>" => Ok(Expr!(Option {
-            key: left,
-            operator: typed_token(operator),
-            value: Box::new(right),
-        })),
-        BinaryLeft::Expression(left)
-            if GENERATED_AUGMENTED_OPERATOR_SPELLINGS.contains(&spelling) =>
-        {
-            let operator = AugmentedOperator::from_token_tree_with_trivia(
-                operator.token,
-                operator.trailing_trivia,
-            )
-            .expect("the augmented operator table and category have the same source");
-            Ok(Expr!(Assign::Augmented {
-                target: left,
-                operator,
-                value: Box::new(right),
-            }))
+            }));
         }
-        BinaryLeft::Expression(left) if matches!(spelling, "." | ".?") => Ok(match spelling {
-            "." => Expr!(Op::Bin::Member::Dot {
-                receiver: left,
-                operator: typed_token::<Token![.]>(operator),
-                member: Box::new(right),
-            }),
-            ".?" => Expr!(Op::Bin::Member::Optional {
-                receiver: left,
-                operator: typed_token::<Token![.?]>(operator),
-                member: Box::new(right),
-            }),
-            _ => unreachable!(),
-        }),
-        BinaryLeft::Expression(left) if spelling == "#" => Ok(Expr!(Op::Bin::Index {
-            receiver: left,
-            operator: typed_token(operator),
-            index: Box::new(right),
-        })),
-        BinaryLeft::Expression(left) => {
-            let spelling = spelling.to_owned();
-            let operator = BinaryOperator::from_token_tree_with_trivia(
-                operator.token,
-                operator.trailing_trivia,
-            )
-            .ok_or(NativeParseError::Unsupported {
-                syntax: spelling,
-                span,
-            })?;
-            Ok(Expr!(Op::Bin::Regular {
-                left_operand: left,
-                operator,
-                right_operand: Box::new(right),
-            }))
-        }
-    }
-}
-
-/// Lowers assignment.
-fn lower_assignment(
-    target: AssignmentTarget,
-    operator: SignificantToken,
-    right: Expr,
-    local: bool,
-) -> Expr {
-    match (local, target) {
-        (false, AssignmentTarget::Symbol(variable)) => {
-            Expr!(Assign::Simple::Global {
-                variable,
-                operator: typed_token(operator),
-                value: Box::new(right),
-            })
-        }
-        (true, AssignmentTarget::Symbol(variable)) => {
-            Expr!(Assign::Simple::Local {
-                variable,
-                operator: typed_token(operator),
-                value: Box::new(right),
-            })
-        }
-        (false, AssignmentTarget::Operator(argument_expr)) => {
-            Expr!(Assign::Op {
-                argument_expr,
-                operator: typed_token(operator),
-                value_expr: Box::new(right),
-            })
-        }
-        (true, AssignmentTarget::Operator(ExprOp::Bin(ExprOpBin::Adj(application)))) => {
-            let (typical_value, function) = installation_value(right);
-            Expr!(Assign::Install::Method {
-                method: application.left_operand,
-                operator: application.operator,
-                signature: application.right_operand,
-                assign_op: typed_token(operator),
-                typical_value,
-                function: Box::new(function),
-            })
-        }
-        (true, AssignmentTarget::Operator(domain_expr)) => {
-            let (typical_value, function) = installation_value(right);
-            Expr!(Assign::Install::Op {
-                domain_expr,
-                assign_op: typed_token(operator),
-                typical_value,
-                function: Box::new(function),
-            })
-        }
-        (true, AssignmentTarget::New(new_statement)) => {
-            Expr!(Assign::Install::New {
-                new_statement,
-                operator: typed_token(operator),
-                function: Box::new(right),
-            })
-        }
-        (local, AssignmentTarget::List(argument_list)) => {
-            if local {
-                Expr!(Assign::Parallel::Local {
-                    argument_list,
-                    operator: typed_token(operator),
-                    value: Box::new(right),
-                })
-            } else {
-                Expr!(Assign::Parallel::Global {
-                    argument_list,
-                    operator: typed_token(operator),
-                    value: Box::new(right),
-                })
-            }
-        }
-        (false, AssignmentTarget::New(_)) => {
-            unreachable!("global assignment preparation rejects new statements")
-        }
-    }
-}
-
-/// Handles installation value.
-pub(crate) fn installation_value(value: Expr) -> (Option<TypeAnnotation>, Expr) {
-    match value {
-        Expr::Option(value) => (
-            Some(TypeAnnotation::new(value.key, value.operator)),
-            *value.value,
+        BinaryLeft::Expression(left) => left,
+    };
+    let right = Box::new(right);
+    Ok(match spelling.as_str() {
+        "=" => assign(left, AssignOperator::Global(typed_token(operator)), right),
+        ":=" => assign(left, AssignOperator::Local(typed_token(operator)), right),
+        "<-" => assign(
+            left,
+            AssignOperator::Evaluated(typed_token(operator)),
+            right,
         ),
-        value => (None, value),
-    }
+        "=>" => Expr::from(ExprOption {
+            key: left,
+            fat_arrow_token: typed_token(operator),
+            value: right,
+        }),
+        spelling if GENERATED_AUGMENTED_OPERATOR_SPELLINGS.contains(&spelling) => {
+            let operator = AugmentedOperator::from_token_tree(operator.token)
+                .expect("the augmented operator table and category have the same source");
+            assign(left, AssignOperator::Augmented(operator), right)
+        }
+        "." | ".?" => {
+            let op = if spelling == "." {
+                FieldOperator::Dot(typed_token(operator))
+            } else {
+                FieldOperator::OptionalDot(typed_token(operator))
+            };
+            let Expr::Symbol(member) = *right else {
+                return Err(NativeParseError::Unexpected {
+                    found: "an expression".into(),
+                    expected: "a symbol to the right of `.`",
+                    span: right.expect_span(),
+                });
+            };
+            Expr::from(ExprField {
+                base: left,
+                op,
+                member,
+            })
+        }
+        _ => {
+            let op = BinaryOperator::from_token_tree(operator.token).ok_or(
+                NativeParseError::Unsupported {
+                    syntax: spelling.clone(),
+                    span,
+                },
+            )?;
+            Expr::from(ExprBinary { left, op, right })
+        }
+    })
+}
+
+/// Builds an assignment.
+fn assign(left: Box<Expr>, op: AssignOperator, right: Box<Expr>) -> Expr {
+    Expr::from(ExprAssign { left, op, right })
 }
 
 /// Parses cell stream.
@@ -1859,26 +1567,21 @@ fn parse_cell_stream(cells: CellStream) -> Result<SourceFile, NativeParseError> 
     let mut elements = Vec::new();
     let bof_span = cells.physical_bof();
     let eof_span = cells.physical_eof();
-    // Comments of a comment-only cell lead the next cell that has tokens, or
-    // close the file when no such cell follows.
-    let mut detached = Vec::new();
     let mut cells = cells.into_iter().peekable();
     while let Some(cell) = cells.next() {
-        if cell.is_empty() {
-            detached.extend(CommentTrivia::of(&cell.into_parser_token_stream()).into_trivia());
-            continue;
-        }
         let eoc = cells
             .peek()
             .and_then(cell_start_span)
             .unwrap_or_else(|| end_span(&cell));
-        if let Some(element) = parse_raw_cell_at(cell, eoc, std::mem::take(&mut detached))? {
+        if let Some(element) = parse_raw_cell_at(cell, eoc)? {
             elements.push(element);
         }
     }
-    let mut source_file = SourceFile::new(BOF::new("", bof_span), elements, EOF::new("", eof_span));
-    source_file.set_closing_comments(detached);
-    Ok(source_file)
+    Ok(SourceFile::new(
+        Token![BOF](bof_span),
+        elements,
+        Token![EOF](eof_span),
+    ))
 }
 
 /// Handles tokenize for native parser.
@@ -1902,45 +1605,29 @@ pub(crate) fn parse_raw_cell(
     tokens: CellTokenStream,
 ) -> Result<Option<crate::nodes::Cell>, NativeParseError> {
     let eoc = end_span(&tokens);
-    parse_raw_cell_at(tokens, eoc, Vec::new())
+    parse_raw_cell_at(tokens, eoc)
 }
 
 /// Parses raw cell at.
-///
-/// `detached` comments, which precede the cell outside it, lead the comments
-/// before its first token in the cell's leading trivia.
 fn parse_raw_cell_at(
     tokens: CellTokenStream,
     eoc: Span,
-    mut detached: Vec<Trivia>,
 ) -> Result<Option<crate::nodes::Cell>, NativeParseError> {
     let ends_with_semicolon = ends_with_cell_semicolon(&tokens);
     let mut tokens = tokens.into_parser_token_stream();
-    detached.extend(tokens.take_prefix_trivia().into_vec());
     let semicolon = ends_with_semicolon
         .then(|| tokens.take_final_punctuation(";"))
         .flatten()
-        .map(|(punctuation, trailing_trivia)| {
-            <Token![;] as Token>::from_token_tree_with_trivia(
-                TokenTree::Punct(punctuation),
-                trailing_trivia,
-            )
-            .expect("a semicolon punctuation token lowers to Token![;]")
+        .map(|punctuation| {
+            <Token![;] as Token>::from_token_tree(TokenTree::Punct(punctuation))
+                .expect("a semicolon punctuation token lowers to Token![;]")
         });
-    let mut cell = Engine::new(tokens).parse_cell(semicolon, eoc)?;
-    if let Some(cell) = &mut cell {
-        cell.leading_trivia = LeadingTrivia::new(detached);
-    }
-    Ok(cell)
+    Engine::new(tokens).parse_cell(semicolon, eoc)
 }
 
 /// Handles cell start span.
 fn cell_start_span(tokens: &CellTokenStream) -> Option<Span> {
-    let token = tokens.iter().next()?;
-    let span = token
-        .leading_trivia()
-        .first()
-        .map_or_else(|| token.span(), Spanned::span);
+    let span = tokens.iter().next()?.span();
     span.start().map(|start| span.at(start))
 }
 
@@ -1948,11 +1635,9 @@ impl Parse for Expr {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
         let tokens = input.by_ref().collect::<TokenStream>();
         let mut engine = Engine::new(tokens);
-        engine.skip_trivia();
         let value = engine
             .parse_required(PREC_CLOSER)
             .map_err(token_parse_error)?;
-        engine.skip_trivia();
         match engine.peek() {
             Lookahead::End(_) => Ok(value),
             Lookahead::Token(token) => Err(TokenParseError::TrailingToken {
@@ -1983,20 +1668,14 @@ fn token_parse_error(error: NativeParseError) -> TokenParseError {
 
 /// Handles parsing spelling.
 fn parsing_spelling(token: &TokenTree) -> &str {
-    token.spelling().map_or("", canonical_word_spelling)
+    token.spelling().map_or("", canonical_spelling)
 }
 
 /// Handles typed token.
 fn typed_token<T: Token>(token: SignificantToken) -> T {
     let spelling = token.token.description();
-    T::from_token_tree_with_trivia(token.token, token.trailing_trivia)
+    T::from_token_tree(token.token)
         .unwrap_or_else(|| panic!("`{spelling}` cannot be lowered to `{}`", T::SPELLING))
-}
-
-/// Handles typed terminal.
-fn typed_terminal<T: Terminal>(mut terminal: T, trailing_trivia: TrailingTrivia) -> T {
-    *terminal.trailing_trivia_mut() = trailing_trivia;
-    terminal
 }
 
 /// Handles empty span at.
@@ -2005,7 +1684,7 @@ fn empty_span_at(lookahead: &Span) -> Span {
 }
 
 /// Lowers string literal.
-fn lower_string_literal(text: &str, span: Span, trailing_trivia: TrailingTrivia) -> Expr {
+fn lower_string_literal(text: &str, span: Span) -> Literal {
     let body_end = if text.len() > 1 && text.ends_with('"') {
         text.len() - 1
     } else {
@@ -2022,7 +1701,7 @@ fn lower_string_literal(text: &str, span: Span, trailing_trivia: TrailingTrivia)
             continue;
         }
         if content_start < cursor {
-            elements.push(StringElement::Content(StringContent::new(
+            elements.push(StringFragment::Content(StringContent::new(
                 &body[content_start..cursor],
                 span.subspan(content_start + 1, cursor + 1),
             )));
@@ -2043,7 +1722,7 @@ fn lower_string_literal(text: &str, span: Span, trailing_trivia: TrailingTrivia)
             }
             _ => cursor + 2,
         };
-        elements.push(StringElement::Escape(EscapeSequence::new(
+        elements.push(StringFragment::Escape(EscapeSequence::new(
             &body[cursor..escape_end],
             span.subspan(cursor + 1, escape_end + 1),
         )));
@@ -2051,16 +1730,16 @@ fn lower_string_literal(text: &str, span: Span, trailing_trivia: TrailingTrivia)
         content_start = cursor;
     }
     if content_start < body.len() {
-        elements.push(StringElement::Content(StringContent::new(
+        elements.push(StringFragment::Content(StringContent::new(
             &body[content_start..],
             span.subspan(content_start + 1, body_end),
         )));
     }
-    typed_terminal(StringLiteral::new(elements, span), trailing_trivia).into()
+    StringLiteral::new(elements, span).into()
 }
 
 /// Lowers raw string literal.
-fn lower_raw_string_literal(text: &str, span: Span, trailing_trivia: TrailingTrivia) -> Expr {
+fn lower_raw_string_literal(text: &str, span: Span) -> Literal {
     let body_end = if text.len() >= 6 && text.ends_with("///") {
         text.len() - 3
     } else {
@@ -2077,12 +1756,12 @@ fn lower_raw_string_literal(text: &str, span: Span, trailing_trivia: TrailingTri
             continue;
         }
         if content_start < cursor {
-            elements.push(RawStringElement::Content(RawStringContent::new(
+            elements.push(RawStringFragment::Content(RawStringContent::new(
                 &body[content_start..cursor],
                 span.subspan(content_start + 3, cursor + 3),
             )));
         }
-        elements.push(RawStringElement::Escape(EscapeSequence::new(
+        elements.push(RawStringFragment::Escape(EscapeSequence::new(
             "//",
             span.subspan(cursor + 3, cursor + 5),
         )));
@@ -2090,117 +1769,136 @@ fn lower_raw_string_literal(text: &str, span: Span, trailing_trivia: TrailingTri
         content_start = cursor;
     }
     if content_start < body.len() {
-        elements.push(RawStringElement::Content(RawStringContent::new(
+        elements.push(RawStringFragment::Content(RawStringContent::new(
             &body[content_start..],
             span.subspan(content_start + 3, body_end),
         )));
     }
-    typed_terminal(RawStringLiteral::new(elements, span), trailing_trivia).into()
+    RawStringLiteral::new(elements, span).into()
 }
 
-/// Handles collection contents.
-fn collection_contents(expression: Expr) -> Option<(crate::Delimiter, Option<PackedContent>)> {
+/// The delimiter and elements of a collection without statements.
+fn collection_contents(expression: Expr) -> Option<(crate::Delimiter, Option<Elements>)> {
     match expression {
-        Expr::Collection(ExprCollection::Sequence(value)) if value.statements.is_empty() => {
-            Some((DelimiterValue::delimiter(&value.delimiter), value.elements))
+        Expr::Sequence(value) if value.stmts.is_empty() => {
+            Some((DelimiterValue::delimiter(&value.delimiter), value.elems))
         }
-        Expr::Collection(ExprCollection::List(value)) if value.statements.is_empty() => {
-            Some((DelimiterValue::delimiter(&value.delimiter), value.elements))
+        Expr::List(value) if value.stmts.is_empty() => {
+            Some((DelimiterValue::delimiter(&value.delimiter), value.elems))
         }
-        Expr::Collection(ExprCollection::Array(value)) if value.statements.is_empty() => {
-            Some((DelimiterValue::delimiter(&value.delimiter), value.elements))
+        Expr::Array(value) if value.stmts.is_empty() => {
+            Some((DelimiterValue::delimiter(&value.delimiter), value.elems))
         }
-        Expr::Collection(ExprCollection::AngleBar(value)) if value.statements.is_empty() => {
-            Some((DelimiterValue::delimiter(&value.delimiter), value.elements))
+        Expr::AngleBar(value) if value.stmts.is_empty() => {
+            Some((DelimiterValue::delimiter(&value.delimiter), value.elems))
         }
-        Expr::Holder(value) if value.muted.is_empty() => {
-            let elements = value.value.map(|value| (*value).into());
-            Some((DelimiterValue::delimiter(&value.delimiter), elements))
-        }
+        Expr::Paren(value) if value.stmts.is_empty() => Some((
+            DelimiterValue::delimiter(&value.delimiter),
+            value.expr.map(Elements::Single),
+        )),
         _ => None,
     }
 }
 
-/// Handles assignment list.
-pub(crate) fn assignment_list(expression: Expr) -> Option<AssignmentList> {
-    let (delimiter, elements) = collection_contents(expression)?;
-    let contents = match elements {
-        Some(elements) => {
-            let components = packed_components(elements).map(assignment_argument)?;
-            Some(match components.into_punctuated() {
-                Ok(arguments) => AssignmentListContent!(Pack { arguments }),
-                Err(argument) => argument.into(),
-            })
+/// The elements of a collection without statements; `None` marks an empty slot.
+fn collection_values(expression: &Expr) -> Option<Vec<Option<&Expr>>> {
+    let (stmts, elems) = match expression {
+        Expr::Sequence(value) => (&value.stmts, &value.elems),
+        Expr::List(value) => (&value.stmts, &value.elems),
+        Expr::Array(value) => (&value.stmts, &value.elems),
+        Expr::AngleBar(value) => (&value.stmts, &value.elems),
+        Expr::Paren(value) if value.stmts.is_empty() => {
+            return Some(value.expr.as_deref().into_iter().map(Some).collect());
         }
-        None => None,
+        _ => return None,
     };
-    Some(AssignmentList::new(Delimited::new(delimiter, contents)))
-}
-
-/// Handles assignment argument.
-fn assignment_argument(component: Component) -> Option<AssignmentArgument> {
-    match component {
-        Component::Empty(value) => Some(AssignmentArgument::Empty(value)),
-        Component::Expr(value) => match *value {
-            Expr::Symbol(value) => Some(AssignmentArgument::Symbol(value)),
-            Expr::Op(value) => Some(AssignmentArgument::Op(value)),
-            Expr::Assign(ExprAssign::Evaluated(value)) => {
-                Some(AssignmentArgument::Evaluated(value))
-            }
-            value => assignment_list(value).map(Into::into),
-        },
+    if !stmts.is_empty() {
+        return None;
     }
+    Some(match elems {
+        None => Vec::new(),
+        Some(Elements::Single(value)) => vec![Some(value)],
+        Some(Elements::Pack(pack)) => pack
+            .elems
+            .iter()
+            .map(|element| match element {
+                Element::Expr(value) => Some(&**value),
+                Element::Empty(_) => None,
+            })
+            .collect(),
+    })
 }
 
-/// Handles expr pack symbols.
-fn expr_pack_symbols(elements: ExprPack) -> Option<Punctuated<Symbol>> {
-    elements
-        .pack
-        .try_map(
-            |component| match component {
-                Component::Expr(value) => match *value {
-                    Expr::Symbol(value) => Ok(value),
-                    _ => Err(()),
-                },
-                Component::Empty(_) => Err(()),
-            },
-            Ok,
-        )
-        .ok()
+/// Joins two operands by the `SPACE` operator: `f x`.
+fn adjacency(left: Expr, space: Token![SPACE], right: Expr) -> Expr {
+    Expr::from(ExprBinary {
+        left: Box::new(left),
+        op: BinaryOperator::Space(space),
+        right: Box::new(right),
+    })
 }
 
-/// Handles packed components.
-fn packed_components(content: PackedContent) -> Components<Component> {
-    match content {
-        PackedContent::Expr(expression) => Components {
-            first: Component::Expr(expression),
-            rest: Vec::new(),
-        },
-        PackedContent::Pack(pack) => Components::from_punctuated(pack.pack),
-    }
+/// Whether an operation can receive a value through an installed method.
+fn is_operation(expression: &Expr) -> bool {
+    matches!(
+        expression,
+        Expr::Binary(_) | Expr::Field(_) | Expr::Prefix(_) | Expr::Postfix(_)
+    )
 }
 
-/// Handles lambda arguments.
-pub(crate) fn lambda_arguments(expression: Expr) -> Option<LambdaArguments> {
+/// Whether an expression may stand left of `=`, or of `:=` when `local`.
+pub(crate) fn is_assignment_target(expression: &Expr, local: bool) -> bool {
     match expression {
-        Expr::Symbol(value) => Some(LambdaArguments::Variadic(value)),
-        expression => {
-            let (delimiter, elements) = collection_contents(expression)?;
-            let arguments = match elements {
-                Some(PackedContent::Expr(expression)) => match *expression {
-                    Expr::Symbol(value) => Some(ArgumentListContent::Symbol(value)),
-                    _ => return None,
-                },
-                Some(PackedContent::Pack(pack)) => Some(ArgumentListContent!(Pack {
-                    arguments: expr_pack_symbols(pack)?,
-                })),
-                None => None,
-            };
-            Some(LambdaArguments::List(Box::new(Delimited::new(
-                delimiter, arguments,
-            ))))
-        }
+        Expr::Symbol(_) => true,
+        Expr::New(_) => local,
+        expression => is_operation(expression) || is_parallel_target(expression),
     }
+}
+
+/// Whether an expression is a collection of parallel assignment targets.
+fn is_parallel_target(expression: &Expr) -> bool {
+    collection_values(expression).is_some_and(|values| {
+        values.into_iter().flatten().all(|value| {
+            matches!(value, Expr::Symbol(_))
+                || is_operation(value)
+                || matches!(value, Expr::Assign(value) if matches!(value.op, AssignOperator::Evaluated(_)))
+                || is_parallel_target(value)
+        })
+    })
+}
+
+/// The parameters of a function whose left operand of `->` is `expression`.
+pub(crate) fn function_params(expression: Expr) -> Option<FunctionParams> {
+    if let Expr::Symbol(symbol) = expression {
+        return Some(FunctionParams::Variadic(symbol));
+    }
+    let (delimiter, elements) = collection_contents(expression)?;
+    let params = match elements {
+        None => None,
+        Some(Elements::Single(value)) => match *value {
+            Expr::Symbol(symbol) => Some(Params::Single(symbol)),
+            _ => return None,
+        },
+        Some(Elements::Pack(pack)) => {
+            let symbols = pack
+                .elems
+                .try_map(
+                    |element| match element {
+                        Element::Expr(value) => match *value {
+                            Expr::Symbol(symbol) => Ok(symbol),
+                            _ => Err(()),
+                        },
+                        Element::Empty(_) => Err(()),
+                    },
+                    Ok,
+                )
+                .ok()?;
+            Some(Params::Pack(ParamsPack::new(symbols)))
+        }
+    };
+    Some(FunctionParams::List(ParamList::new(Delimited::new(
+        delimiter, params,
+    ))))
 }
 
 /// The rule declared for a spelling, found in the generated table.
@@ -2218,7 +1916,7 @@ fn keyword_action(spelling: &str) -> Option<UnaryAction> {
         "if" | "while" | "try" | "for" | "new" => UnaryAction::Control,
         "TEST" | "time" | "timing" | "elapsedTime" | "elapsedTiming" | "breakpoint" | "profile"
         | "shield" | "step" | "finish" => UnaryAction::Debug,
-        "symbol" | "global" | "local" | "threadLocal" | "threadVariable" => UnaryAction::Quote,
+        "symbol" | "global" | "local" | "threadLocal" => UnaryAction::Quote,
         _ => return None,
     })
 }
@@ -2366,7 +2064,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_quoted_string_preserves_realtime_cells_and_trivia() {
+    fn invalid_quoted_string_preserves_realtime_cells_and_comments() {
         let source = "a = 1\nsymbol -- reason\n\"a\"\nb = 2";
         let parser = NativeRealtimeParser::new(source);
         assert_eq!(parser.state(), NativeCellState::Invalid);

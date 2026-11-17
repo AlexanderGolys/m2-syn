@@ -1,7 +1,7 @@
 //! Raw and typed delimiter support.
 //!
 //! [`Delimiter`] is stored by raw [`TokenGroup`] token trees. Generated
-//! `Delimiter![..]` atoms implement [`DelimiterToken`] and are stored on typed
+//! `Token![..]` atoms implement [`DelimiterToken`] and are stored on typed
 //! delimited nodes, so flattening can recover the corresponding raw group.
 
 use std::fmt::{Display, Formatter};
@@ -9,7 +9,6 @@ use std::ops::Bound;
 
 use crate::{
     Lex, Parse, ParseStream, Span, Spanned, TokenGroup, TokenParseError, TokenStream, TokenTree,
-    TrailingTrivia,
 };
 use these_macros_should_be_illegal::discriminated_str;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -45,25 +44,9 @@ pub trait DelimiterValue: Spanned + Lex + Sized {
     /// Describes the accepted delimiter family in parse diagnostics.
     fn expected() -> &'static str;
 
-    /// Borrows the non-space trivia following the opening delimiter.
-    fn opening_trivia(&self) -> &TrailingTrivia;
-
-    /// Mutably borrows the non-space trivia following the opening delimiter.
-    fn opening_trivia_mut(&mut self) -> &mut TrailingTrivia;
-
-    /// Borrows the non-space trivia following the closing delimiter.
-    fn closing_trivia(&self) -> &TrailingTrivia;
-
-    /// Mutably borrows the non-space trivia following the closing delimiter.
-    fn closing_trivia_mut(&mut self) -> &mut TrailingTrivia;
-
     /// Emits `contents` surrounded by this delimiter.
     fn surround(&self, output: &mut TokenStream, contents: TokenStream) {
-        let mut grouped = TokenStream::new();
-        self.opening_trivia().to_tokens(&mut grouped);
-        contents.to_tokens(&mut grouped);
-        output.extend([TokenGroup::new(self.delimiter(), grouped)]);
-        self.closing_trivia().to_tokens(output);
+        output.extend([TokenGroup::new(self.delimiter(), contents)]);
     }
 }
 
@@ -163,19 +146,12 @@ pub struct Delimiter {
     pub kind: DelimiterKind,
     /// The opening and closing source spans.
     pub spans: DoubleSpan,
-    opening_trivia: TrailingTrivia,
-    closing_trivia: TrailingTrivia,
 }
 
 impl Delimiter {
     /// Creates type-erased delimiter data.
     pub fn new(kind: DelimiterKind, spans: DoubleSpan) -> Self {
-        Self {
-            kind,
-            spans,
-            opening_trivia: TrailingTrivia::default(),
-            closing_trivia: TrailingTrivia::default(),
-        }
+        Self { kind, spans }
     }
 
     /// Returns the real span of the opening bracket.
@@ -211,22 +187,6 @@ impl DelimiterValue for Delimiter {
 
     fn expected() -> &'static str {
         "a delimited group"
-    }
-
-    fn opening_trivia(&self) -> &TrailingTrivia {
-        &self.opening_trivia
-    }
-
-    fn opening_trivia_mut(&mut self) -> &mut TrailingTrivia {
-        &mut self.opening_trivia
-    }
-
-    fn closing_trivia(&self) -> &TrailingTrivia {
-        &self.closing_trivia
-    }
-
-    fn closing_trivia_mut(&mut self) -> &mut TrailingTrivia {
-        &mut self.closing_trivia
     }
 }
 

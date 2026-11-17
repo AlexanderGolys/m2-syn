@@ -34,17 +34,11 @@ fn every_input_byte_survives_a_parse_and_emit_round_trip() {
 }
 
 #[test]
-fn the_end_of_file_marker_spans_the_layout_after_the_last_token() {
-    for (source, retained) in [
-        ("x = 1\n", "\n"),
-        ("x = 1\n\n\n", "\n\n\n"),
-        ("x = 1   ", "   "),
-        ("x = 1", ""),
-        ("   \n", "   \n"),
-        ("", ""),
-    ] {
+fn the_end_of_file_marker_is_the_physical_end() {
+    for source in ["x = 1\n", "x = 1\n\n\n", "x = 1   ", "x = 1", "   \n", ""] {
         for file in both_parsers(source) {
-            assert_eq!(file.eof.span().text(), Some(retained), "{source:?}");
+            let end = source.len();
+            assert_eq!(file.eof.span().bounds(), Some((end, end)), "{source:?}");
         }
     }
 }
@@ -59,10 +53,10 @@ fn the_source_file_span_covers_the_whole_document() {
 }
 
 #[test]
-fn a_document_of_pure_layout_is_owned_by_the_end_of_file_marker() {
+fn a_document_of_pure_layout_survives_without_cells() {
     for file in both_parsers("   \n") {
         assert!(file.cells.is_empty());
-        assert_eq!(file.eof.span().bounds(), Some((0, 4)));
+        assert_eq!(file.span().bounds(), Some((0, 4)));
         assert_eq!(file.to_m2(), "   \n");
     }
 }

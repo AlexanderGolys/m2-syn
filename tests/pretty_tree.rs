@@ -45,36 +45,11 @@ fn presentation_tree_can_be_rendered_by_a_downstream_crate() {
 }
 
 #[test]
-fn presentation_tree_exposes_structural_comment_ownership() {
-    let syntax = parse_native("-- documentation\nvalue").unwrap();
-    let tree = syntax.pretty_tree();
-    let cell = tree
-        .children()
-        .iter()
-        .find(|edge| edge.node().name() == "Cell")
-        .map(|edge| edge.node())
-        .expect("the source presentation must contain its cell");
-    let comments = cell
-        .children()
-        .iter()
-        .find(|edge| edge.label() == "comments")
-        .map(|edge| edge.node())
-        .expect("the cell presentation must expose comment ownership");
-
-    assert!(comments.children().iter().any(|edge| {
-        edge.label() == "outer[0]"
-            && edge.node().name() == "LineCommentBlock"
-            && edge.node().detail().unwrap().text() == "-- documentation"
-    }));
-}
-
-#[test]
 fn virtual_adjacency_is_presented_as_an_empty_glyph() {
     let syntax = parse_native("x y").unwrap();
     let rendered = format_pretty_tree(&syntax);
 
-    assert!(rendered.contains("∅  operator → Adj"), "{rendered}");
-    assert!(!rendered.contains("Adj  operator → Adj"), "{rendered}");
+    assert!(rendered.contains("└─ ∅  Token![SPACE]"), "{rendered}");
 }
 
 #[test]
@@ -83,38 +58,36 @@ fn storage_containers_are_spliced_into_the_owning_syntax_node() {
     let tree = syntax.pretty_tree();
     let rendered = format_pretty_tree(&syntax);
 
-    assert!(find_named(&tree, "ExprLambdaList").is_some(), "{rendered}");
     assert!(!contains_named(&tree, "Delimited"), "{rendered}");
     assert!(
         !contains_name_starting_with(&tree, "Punctuated"),
         "{rendered}"
     );
 
-    let arguments = find_named(&tree, "ExprLambdaList").unwrap();
+    let function = find_named(&tree, "ExprFunction").expect("function node");
     assert_eq!(
-        arguments
-            .children()
-            .iter()
-            .map(|edge| (edge.label(), edge.node().name()))
-            .collect::<Vec<_>>(),
+        child_edges(function),
         [
-            ("opening", "Delimiter![()]"),
-            ("contents", "ArgumentListContent"),
-            ("closing", "Delimiter![()]"),
-            ("operator", "Token![->]"),
+            ("params", "FunctionParams"),
+            ("arrow_token", "Token![->]"),
             ("body", "Expr"),
         ]
     );
-    assert!(arguments.children().iter().all(|edge| {
-        edge.node().name() != "Delimiter![()]" || edge.node().role() == PrettyNodeRole::Delimiter
-    }));
-    let pack =
-        find_named(&tree, "ArgumentListContentPack").expect("two arguments form an argument pack");
+    let params = find_named(&tree, "ParamList").expect("parameter list node");
     assert_eq!(
-        pack.children()
-            .iter()
-            .map(|edge| (edge.label(), edge.node().name()))
-            .collect::<Vec<_>>(),
+        child_edges(params),
+        [
+            ("opening", "Token![()]"),
+            ("contents", "Params"),
+            ("closing", "Token![()]"),
+        ]
+    );
+    assert!(params.children().iter().all(|edge| {
+        edge.node().name() != "Token![()]" || edge.node().role() == PrettyNodeRole::Delimiter
+    }));
+    let pack = find_named(&tree, "ParamsPack").expect("two parameters form a pack");
+    assert_eq!(
+        child_edges(pack),
         [
             ("[0]", "Symbol"),
             ("punctuation", "Token![,]"),
@@ -124,22 +97,16 @@ fn storage_containers_are_spliced_into_the_owning_syntax_node() {
 }
 
 #[test]
-fn enum_specializations_and_struct_fields_are_distinct() {
+fn every_expression_is_one_category_level_above_its_syntax() {
     let syntax = parse_native("ZZ ZZ := ZZ => (x, y) -> {x y;3}").unwrap();
     let tree = syntax.pretty_tree();
     let rendered = format_pretty_tree(&syntax);
 
     let chains: &[(&[&str], &str)] = &[
-        (
-            &["PackedContent", "Expr", "ExprAssign", "ExprAssignInstall"],
-            "ExprAssignInstallMethod",
-        ),
-        (&["Expr", "ExprCollection"], "List"),
-        (
-            &["PackedContent", "Expr", "ExprOp", "ExprOpBin"],
-            "ExprOpBinAdj",
-        ),
-        (&["PackedContent", "Expr", "ExprLiteral"], "IntegerLiteral"),
+        (&["Elements", "Expr"], "ExprAssign"),
+        (&["Expr"], "ExprList"),
+        (&["Elements", "Expr"], "ExprBinary"),
+        (&["Elements", "Expr", "Literal"], "IntegerLiteral"),
     ];
     for &(categories, concrete) in chains {
         assert!(
@@ -147,25 +114,20 @@ fn enum_specializations_and_struct_fields_are_distinct() {
             "missing category path {categories:?} to {concrete}:\n{rendered}"
         );
     }
-    assert!(
-        find_named(&tree, "ExprCollection")
-            .is_some_and(|node| node.role() == PrettyNodeRole::Category),
-        "{rendered}"
-    );
-    let list = find_named(&tree, "List").expect("list node");
+    let list = find_named(&tree, "ExprList").expect("list node");
     let statement = list
         .children()
         .iter()
-        .find(|edge| edge.node().name() == "Statement")
+        .find(|edge| edge.node().name() == "Stmt")
         .expect("a statement is contained by the list");
     assert_eq!(statement.node().role(), PrettyNodeRole::Syntax);
     assert!(
         statement.node().children().iter().any(|edge| {
-            edge.label() == "content"
-                && edge.node().name() == "PackedContent"
+            edge.label() == "elems"
+                && edge.node().name() == "Elements"
                 && edge.node().role() == PrettyNodeRole::Category
         }),
-        "a statement's content is composition, not a specialization:\n{rendered}"
+        "a statement's elements are composition, not a specialization:\n{rendered}"
     );
     assert_eq!(list.children().first().unwrap().label(), "opening");
     assert_eq!(list.children().last().unwrap().label(), "closing");
@@ -177,11 +139,15 @@ fn single_cell_expression_has_no_expression_pack_node() {
     let tree = syntax.pretty_tree();
     let rendered = format_pretty_tree(&syntax);
 
-    assert!(!contains_named(&tree, "ExprPack"), "{rendered}");
-    let installation = find_named(&tree, "ExprAssignInstallMethod").expect("method installation");
-    assert!(installation.children().iter().any(|edge| {
-        edge.label() == "operator"
-            && edge.node().name() == "Adj"
+    assert!(!contains_named(&tree, "ElementsPack"), "{rendered}");
+    let method = find_named(&tree, "ExprBinary").expect("method and signature");
+    let operator = method
+        .children()
+        .iter()
+        .find(|edge| edge.label() == "op")
+        .expect("a binary operation has an operator");
+    assert!(operator.node().children().iter().any(|edge| {
+        edge.node().name() == "Token![SPACE]"
             && edge
                 .node()
                 .detail()
@@ -191,28 +157,26 @@ fn single_cell_expression_has_no_expression_pack_node() {
 
 #[test]
 fn pack_nodes_require_a_comma() {
-    let single_arguments = parse_native("(x) -> x").unwrap().pretty_tree();
-    assert!(contains_named(&single_arguments, "ExprLambdaList"));
-    assert!(!contains_named(
-        &single_arguments,
-        "ArgumentListContentPack"
-    ));
+    let single_params = parse_native("(x) -> x").unwrap().pretty_tree();
+    assert!(contains_named(&single_params, "ParamList"));
+    assert!(!contains_named(&single_params, "ParamsPack"));
 
-    let packed_arguments = parse_native("(x, y) -> x").unwrap().pretty_tree();
-    assert!(contains_named(&packed_arguments, "ArgumentListContentPack"));
+    let packed_params = parse_native("(x, y) -> x").unwrap().pretty_tree();
+    assert!(contains_named(&packed_params, "ParamsPack"));
 
-    let single_assignment = parse_native("(x) = y").unwrap().pretty_tree();
-    assert!(contains_named(&single_assignment, "AssignmentList"));
-    assert!(!contains_named(
-        &single_assignment,
-        "AssignmentListContentPack"
-    ));
+    let single_target = parse_native("(x) = y").unwrap().pretty_tree();
+    assert!(contains_named(&single_target, "ExprParen"));
+    assert!(!contains_named(&single_target, "ElementsPack"));
 
-    let packed_assignment = parse_native("(x, y) = y").unwrap().pretty_tree();
-    assert!(contains_named(
-        &packed_assignment,
-        "AssignmentListContentPack"
-    ));
+    let packed_targets = parse_native("(x, y) = y").unwrap().pretty_tree();
+    assert!(contains_named(&packed_targets, "ElementsPack"));
+}
+
+fn child_edges(node: &PrettyNode) -> Vec<(&str, &str)> {
+    node.children()
+        .iter()
+        .map(|edge| (edge.label(), edge.node().name()))
+        .collect()
 }
 
 fn find_symbol(node: &PrettyNode) -> Option<&PrettyNode> {
@@ -248,14 +212,15 @@ fn contains_specialization_chain(node: &PrettyNode, categories: &[&str], concret
     if let Some((category, remaining)) = categories.split_first()
         && node.name() == *category
         && node.role() == PrettyNodeRole::Category
-    {
-        return node.children().iter().any(|edge| {
+        && node.children().iter().any(|edge| {
             if remaining.is_empty() {
                 edge.node().name() == concrete && edge.node().role() != PrettyNodeRole::Category
             } else {
                 contains_specialization_chain(edge.node(), remaining, concrete)
             }
-        });
+        })
+    {
+        return true;
     }
     node.children()
         .iter()

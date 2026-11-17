@@ -1,168 +1,72 @@
-#[path = "syntax/grammar.rs"]
-mod grammar;
+#[path = "syntax/derive.rs"]
+mod derive;
 
-use crate::tokens::{OperatorKind, TokenDefinitions};
-use proc_macro2::{Ident, TokenStream};
-use quote::{ToTokens, format_ident, quote};
-use std::collections::{BTreeMap, BTreeSet};
-use syn::parse::{Parse, ParseStream};
-use syn::{Error, Member, Result, parse2};
+use crate::tokens::{OperatorKind, TokenDefinitions, token_type_name};
+use proc_macro2::{Ident, Span, TokenStream};
+use quote::{format_ident, quote};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::{Error, Result, Token, parse2};
 
-struct Syntax {
-    tokens: TokenDefinitions,
-    structs: Vec<StructDefinition>,
-    enums: Vec<EnumDefinition>,
-    declarations: Vec<grammar::ExplicitDeclaration>,
+/// Expands `tokens!`: the token types and parser metadata of the table, the
+/// operator enums its roles define, and the traversal of every token.
+pub(crate) fn tokens(input: TokenStream) -> Result<TokenStream> {
+    let tokens: TokenDefinitions = parse2(input)?;
+    let table = tokens.expand();
+    let operators = OperatorKind::ALL.into_iter().map(|kind| {
+        let name = Ident::new(kind.category_name(), Span::call_site());
+        expand_enum(&EnumDefinition::operator(name, kind, &tokens))
+    });
+    let walkers = tokens
+        .iter()
+        .map(|definition| expand_token_walk(&definition.name));
+    Ok(quote!(#table #(#operators)* #(#walkers)*))
 }
 
-/// Whole-declaration facts, derived once and shared by every expansion stage.
-///
-/// Each fact needs the complete declaration to compute — which spelling a name
-/// resolves to, whether a type is stored inline, how a variant reaches its
-/// enum — so no helper can derive one from the fragment it is expanding.
-/// Passing the context rather than the individual answers is what lets helpers
-/// live in whichever file suits them.
-pub(crate) struct SyntaxContext<'syntax> {
-    tokens: &'syntax TokenDefinitions,
-    /// Types whose declarations request indirection at inline use sites.
-    boxed: BTreeSet<SyntaxTypeName>,
-    /// How each declared name is written in generated code, which is
-    /// `Token![…]` for a spelled token and the bare name otherwise.
-    declarations: BTreeMap<SyntaxTypeName, TokenStream>,
-    /// CST node kinds more than one struct migrates from, where the kind
-    /// alone cannot say which type a node is.
-    shared_kinds: BTreeSet<String>,
-}
-
-impl<'syntax> SyntaxContext<'syntax> {
-    fn new(syntax: &'syntax Syntax) -> Self {
-        let tokens = &syntax.tokens;
-        let declarations = syntax
-            .all_types()
-            .map(|name| (SyntaxTypeName::from(name), type_reference(tokens, name)))
-            .collect();
-        let mut claims: BTreeMap<String, usize> = BTreeMap::new();
-        for definition in &syntax.structs {
-            *claims.entry(definition.cst_kind()).or_default() += 1;
-        }
-        Self {
-            tokens,
-            boxed: syntax
-                .structs
-                .iter()
-                .filter(|definition| definition.boxed)
-                .map(|definition| (&definition.name).into())
-                .chain(
-                    syntax
-                        .enums
-                        .iter()
-                        .filter(|definition| definition.boxed)
-                        .map(|definition| (&definition.name).into()),
-                )
-                .collect(),
-            declarations,
-            shared_kinds: claims
-                .into_iter()
-                .filter(|(_, claimants)| *claimants > 1)
-                .map(|(kind, _)| kind)
-                .collect(),
-        }
-    }
-
-    /// Whether a node's kind is claimed by several structs, so that matching
-    /// has to inspect its children to tell them apart.
-    fn kind_is_shared(&self, kind: &str) -> bool {
-        self.shared_kinds.contains(kind)
-    }
-
-    pub(crate) fn tokens(&self) -> &TokenDefinitions {
-        self.tokens
-    }
-
-    pub(crate) fn is_boxed(&self, name: &Ident) -> bool {
-        self.boxed.contains(&name.into())
-    }
-
-    pub(crate) fn type_reference(&self, name: &Ident) -> TokenStream {
-        type_reference(self.tokens, name)
-    }
-
-    fn declaration(&self, name: &SyntaxTypeName) -> Option<&TokenStream> {
-        self.declarations.get(name)
+/// Expands `#[derive(Syntax)]`: the syntax behaviour of one declared type.
+pub(crate) fn derive_syntax(input: &syn::DeriveInput) -> Result<TokenStream> {
+    match derive::read(input)? {
+        derive::Definition::Struct(definition) => expand_struct(&definition),
+        derive::Definition::Enum(definition) => Ok(expand_enum(&definition)),
     }
 }
 
-fn type_reference(tokens: &TokenDefinitions, name: &Ident) -> TokenStream {
-    if let Some(pattern) = tokens.pattern(name) {
-        quote!(::m2_syn::Token![#pattern])
-    } else {
-        quote!(#name)
-    }
+/// Expands `traversal!`: the `visit`, `visit_mut`, and `fold` modules over the
+/// listed syntax types.
+pub(crate) fn traversal(input: TokenStream) -> Result<TokenStream> {
+    let names = Punctuated::<Ident, Token![,]>::parse_terminated.parse2(input)?;
+    let modules = Traversal::ALL.map(|traversal| traversal.expand(names.iter()));
+    let support = expand_walk_support();
+    Ok(quote!(#support #(#modules)*))
 }
-
-pub(crate) fn generate(input: TokenStream) -> Result<TokenStream> {
-    parse2::<Syntax>(input)?.expand()
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct SyntaxTypeName(String);
-
-impl From<&Ident> for SyntaxTypeName {
-    fn from(value: &Ident) -> Self {
-        Self(value.to_string())
-    }
-}
-
-type ConversionGraph = BTreeMap<(SyntaxTypeName, SyntaxTypeName), Vec<Vec<(Ident, Ident, bool)>>>;
 
 struct StructDefinition {
     name: Ident,
     fields: StructFields,
     wrapper: Option<Wrapper>,
     cst_kind: Option<String>,
-    boxed: bool,
     cell_stream: bool,
-    comments: bool,
-    explicit: bool,
 }
 
 enum StructFields {
     Leaf(LeafKind),
-    Product {
-        fields: Vec<FieldDefinition>,
-        style: ProductStyle,
-    },
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ProductStyle {
-    Named,
-    Tuple,
+    Product(Vec<FieldDefinition>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LeafKind {
-    Ident,
-    QualifiedIdent,
-    Adj,
+    /// Text kept as written: string contents and escapes.
+    Text,
+    /// An identifier with its package and index qualifiers: `Core$x`, `x$1`.
+    Symbol,
     Empty,
-    Eoc,
-    Bof,
-    Eof,
     Float,
     Integer,
 }
 
 struct FieldDefinition {
-    member: Member,
-    binding: Ident,
-    source: FieldSource,
+    name: Ident,
     shape: Shape,
-}
-
-enum FieldSource {
-    Named(String),
-    Positional,
 }
 
 impl StructDefinition {
@@ -187,8 +91,9 @@ enum Wrapper {
     Literal(Literal),
 }
 
+/// A delimiter family: `()`, `[]`, `{}`, or `<||>`.
 #[derive(Clone, Copy)]
-enum Delimiter {
+pub(crate) enum Delimiter {
     Parenthesis,
     Bracket,
     Brace,
@@ -220,13 +125,50 @@ impl Wrapper {
 }
 
 impl Delimiter {
-    fn typed(self) -> TokenStream {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Parenthesis,
+        Self::Bracket,
+        Self::Brace,
+        Self::AngleBar,
+    ];
+
+    /// The family `Token![…]` names when written as a pair, in any spacing.
+    pub(crate) fn named(pattern: &TokenStream) -> Result<Self> {
+        Self::spelled(&crate::tokens::token_spelling(pattern)?)
+            .ok_or_else(|| Error::new_spanned(pattern, "unknown delimiter pair"))
+    }
+
+    pub(crate) fn spelled(spelling: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|family| family.spelling() == spelling)
+    }
+
+    pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::Parenthesis => quote!(::m2_syn::Delimiter![()]),
-            Self::Bracket => quote!(::m2_syn::Delimiter![[]]),
-            Self::Brace => quote!(::m2_syn::Delimiter![{}]),
-            Self::AngleBar => quote!(::m2_syn::Delimiter![<| |>]),
+            Self::Parenthesis => "Parenthesis",
+            Self::Bracket => "Bracket",
+            Self::Brace => "Brace",
+            Self::AngleBar => "AngleBar",
         }
+    }
+
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::Parenthesis => "()",
+            Self::Bracket => "[]",
+            Self::Brace => "{}",
+            Self::AngleBar => "<||>",
+        }
+    }
+
+    pub(crate) fn type_name(self) -> Ident {
+        format_ident!("_{}Delimiter", self.name())
+    }
+
+    fn typed(self) -> TokenStream {
+        let name = self.type_name();
+        quote!(::m2_syn::nodes::#name)
     }
 }
 
@@ -234,8 +176,6 @@ struct EnumDefinition {
     name: Ident,
     variants: Vec<VariantDefinition>,
     operator: Option<OperatorKind>,
-    boxed: bool,
-    explicit: bool,
 }
 
 struct VariantDefinition {
@@ -256,18 +196,12 @@ impl EnumDefinition {
             name,
             variants,
             operator: Some(kind),
-            boxed: false,
-            explicit: false,
         }
     }
 }
 
-/// A field's type as a stack of known functors over one syntax type.
-///
-/// The grammar only ever produces `Base`, `Optional`, `Repeated` and
-/// `Punctuated`; [`Self::stored_shape`] adds `Boxed` where a field would
-/// otherwise make its owner unsized. Both are the same grammar, so one lifting
-/// covers both.
+/// A field's type as a stack of known functors over one syntax type, as in
+/// `Option<Box<Expr>>`, which is `Optional(Boxed(Base(Expr)))`.
 #[derive(Clone)]
 enum Shape {
     Base(TokenStream, Ident),
@@ -275,15 +209,11 @@ enum Shape {
     Delimited(Box<Self>),
     Optional(Box<Self>),
     /// A repetition, carrying the separator it prints between elements.
-    Repeated(Box<Self>, &'static str),
+    Repeated(Box<Self>),
     Punctuated(Box<Self>),
 }
 
 impl Shape {
-    fn base(ident: Ident) -> Self {
-        Self::Base(quote!(#ident), ident)
-    }
-
     fn token(ident: Ident, pattern: &TokenStream) -> Self {
         Self::Base(quote!(::m2_syn::Token![#pattern]), ident)
     }
@@ -294,374 +224,348 @@ impl Shape {
             Self::Boxed(inner)
             | Self::Delimited(inner)
             | Self::Optional(inner)
-            | Self::Repeated(inner, _)
+            | Self::Repeated(inner)
             | Self::Punctuated(inner) => inner.base_ident(),
         }
     }
 }
 
-impl Parse for Syntax {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let tokens: TokenDefinitions = input.parse()?;
-        let (structs, mut enums, declarations) = grammar::parse(input, &tokens)?;
-        complete_operator_categories(&structs, &mut enums, &tokens);
-
-        Ok(Self {
-            tokens,
-            structs,
-            enums,
-            declarations,
-        })
-    }
-}
-
-fn complete_operator_categories(
-    structs: &[StructDefinition],
-    enums: &mut Vec<EnumDefinition>,
-    tokens: &TokenDefinitions,
-) {
-    for kind in OperatorKind::ALL {
-        let category = kind.category_name();
-        if let Some(definition) = enums.iter_mut().find(|node| node.name == category) {
-            if definition.variants.is_empty() && definition.operator.is_none() {
-                *definition = EnumDefinition::operator(definition.name.clone(), kind, tokens);
-            }
-        } else if syntax_references(structs, enums, category) {
-            enums.push(EnumDefinition::operator(
-                Ident::new(category, proc_macro2::Span::call_site()),
-                kind,
-                tokens,
-            ));
-        }
-    }
-}
-
-fn syntax_references(structs: &[StructDefinition], enums: &[EnumDefinition], name: &str) -> bool {
-    structs
-        .iter()
-        .filter_map(|definition| match &definition.fields {
-            StructFields::Leaf(_) => None,
-            StructFields::Product { fields, .. } => Some(fields.iter()),
-        })
-        .flatten()
-        .any(|field| field.shape.base_ident() == name)
-        || enums.iter().any(|definition| {
-            definition
-                .variants
-                .iter()
-                .any(|variant| variant.shape.base_ident() == name)
-        })
-}
-
-impl Syntax {
-    fn expand(&self) -> Result<TokenStream> {
-        let names = self.declared_names()?;
-        self.validate_references(&names)?;
-        let context = SyntaxContext::new(self);
-        let tokens = self.tokens.expand();
-        let declarations = self
-            .declarations
-            .iter()
-            .map(grammar::ExplicitDeclaration::expand);
-        let structs = self
-            .structs
-            .iter()
-            .map(|definition| Self::expand_struct(definition, &context))
-            .collect::<Result<Vec<_>>>()?;
-        let enums = self
-            .enums
-            .iter()
-            .map(|definition| expand_enum(definition, &context))
-            .collect::<Vec<_>>();
-        let conversions = self.expand_conversions(&context);
-        let walk_support = self.expand_walk_support();
-        let visits = self.expand_visit(&context);
-        let visit_muts = self.expand_visit_mut(&context);
-        let folds = self.expand_fold(&context);
-        let token_walkers = self.tokens.iter().map(|definition| {
-            let name = &definition.name;
-            let ty = context.type_reference(name);
-            quote!(::m2_syn::__syntax_token_walk!(#name, #ty);)
-        });
-
-        Ok(quote! {
-            #tokens
-            use ::m2_syn::qf;
-            use ::m2_syn::{Delimited, Punctuated, Token};
-            #(#structs)*
-            #(#enums)*
-            #conversions
-            #walk_support
-            #visits
-            #visit_muts
-            #folds
-            #(#token_walkers)*
-            #(#declarations)*
-        })
-    }
-
-    fn declared_names(&self) -> Result<BTreeSet<SyntaxTypeName>> {
-        let mut names = BTreeSet::new();
-        for name in self
-            .tokens
-            .iter()
-            .map(|definition| &definition.name)
-            .chain(self.structs.iter().map(|definition| &definition.name))
-            .chain(self.enums.iter().map(|definition| &definition.name))
-        {
-            if !names.insert(name.into()) {
-                return Err(Error::new(
-                    name.span(),
-                    format!("duplicate syntax type name: {name}"),
-                ));
-            }
-        }
-        Ok(names)
-    }
-
-    fn validate_references(&self, names: &BTreeSet<SyntaxTypeName>) -> Result<()> {
-        for shape in
-            self.structs
-                .iter()
-                .filter_map(|definition| match &definition.fields {
-                    StructFields::Product { fields, .. } => {
-                        Some(fields.iter().map(|field| &field.shape))
+fn expand_struct(definition: &StructDefinition) -> Result<TokenStream> {
+    let name = &definition.name;
+    let kind = definition.cst_kind();
+    match &definition.fields {
+        StructFields::Leaf(leaf) => {
+            let output = format_ident!("output");
+            let emit = match leaf {
+                LeafKind::Empty => quote! {},
+                LeafKind::Float => quote! {
+                    output.extend([::m2_syn::LiteralToken::from_span(
+                        ::m2_syn::LiteralKind::Float,
+                        ::m2_syn::Spanned::expect_span(self),
+                    )]);
+                },
+                LeafKind::Integer => quote! {
+                    output.extend([::m2_syn::LiteralToken::from_span(
+                        ::m2_syn::LiteralKind::Integer,
+                        ::m2_syn::Spanned::expect_span(self),
+                    )]);
+                },
+                LeafKind::Text => quote! {
+                    output.extend([::m2_syn::IdentToken::from_span(
+                        ::m2_syn::Spanned::expect_span(self),
+                    )]);
+                },
+                LeafKind::Symbol => quote!(output.extend([self.ident.clone()]);),
+            };
+            let pretty_text = if matches!(leaf, LeafKind::Empty) {
+                quote!("∅")
+            } else {
+                quote!(self.text())
+            };
+            let constructor = match leaf {
+                LeafKind::Symbol => quote! {
+                    Self {
+                        ident: ::m2_syn::IdentToken::new(text.as_ref(), span),
                     }
-                    StructFields::Leaf(_) => None,
-                })
-                .flatten()
-                .chain(self.enums.iter().flat_map(|definition| {
-                    definition.variants.iter().map(|variant| &variant.shape)
-                }))
-        {
-            let ident = shape.base_ident();
-            if !names.contains(&ident.into()) {
-                return Err(Error::new(
-                    ident.span(),
-                    "syntax fields must refer to a type declared in the same syntax block",
-                ));
-            }
-        }
-        Ok(())
-    }
+                },
+                LeafKind::Empty => quote! {
+                    let _ = text;
+                    Self { span }
+                },
+                _ => quote! {
+                    let span = span.with_text(text.as_ref());
+                    Self { span }
+                },
+            };
+            let text_api = match leaf {
+                LeafKind::Empty => quote! {},
+                LeafKind::Symbol => quote! {
+                    /// Returns the leaf spelling.
+                    pub fn text(&self) -> &str {
+                        self.ident.text()
+                    }
 
-    fn expand_struct(
-        definition: &StructDefinition,
-        context: &SyntaxContext<'_>,
-    ) -> Result<TokenStream> {
-        let name = &definition.name;
-        let kind = definition.cst_kind();
-        match &definition.fields {
-            StructFields::Leaf(leaf) => {
-                if definition.comments {
-                    return Err(Error::new(
-                        definition.name.span(),
-                        "`#[comments]` requires a named product struct",
-                    ));
+                    /// The identifier token spelling this symbol.
+                    pub fn ident(&self) -> &::m2_syn::IdentToken {
+                        &self.ident
+                    }
+
+                    /// See [`::m2_syn::IdentToken::package_qualifier`].
+                    pub fn package_qualifier(&self) -> Option<&::m2_syn::Span> {
+                        self.ident.package_qualifier()
+                    }
+
+                    /// See [`::m2_syn::IdentToken::index_qualifier`].
+                    pub fn index_qualifier(&self) -> Option<&::m2_syn::Span> {
+                        self.ident.index_qualifier()
+                    }
+
+                    /// Replaces the spelling with a new immutable source snapshot.
+                    pub fn set_text(&mut self, text: impl AsRef<str>) {
+                        let span = ::m2_syn::Spanned::expect_span(&self.ident);
+                        self.ident = ::m2_syn::IdentToken::new(text.as_ref(), span);
+                    }
+                },
+                _ => quote! {
+                    /// Returns the leaf spelling.
+                    pub fn text(&self) -> &str {
+                        self.span.text().expect("textual syntax spans must resolve")
+                    }
+
+                    /// Replaces the spelling with a new immutable source snapshot.
+                    pub fn set_text(&mut self, text: impl AsRef<str>) {
+                        self.span = self.span.clone().with_text(text.as_ref());
+                    }
+                },
+            };
+            let pretty_impl = quote! {
+                impl ::m2_syn::PrettyTree for #name {
+                    fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
+                        ::m2_syn::PrettyNode::token(
+                            stringify!(#name),
+                            #pretty_text,
+                            ::m2_syn::Spanned::expect_span(self),
+                        )
+                    }
                 }
-                let output = format_ident!("output");
-                let emit = match leaf {
-                    LeafKind::Empty => quote! {},
-                    LeafKind::Adj => quote! {
-                        output.extend([::m2_syn::TokenTree::Punct(
-                            ::m2_syn::Punct::from_span(::m2_syn::Spanned::expect_span(self)),
-                        )]);
-                    },
-                    LeafKind::Eoc | LeafKind::Bof | LeafKind::Eof => quote! {},
-                    LeafKind::Float => quote! {
-                        output.extend([::m2_syn::LiteralToken::from_span(
-                            ::m2_syn::LiteralKind::Float,
-                            ::m2_syn::Spanned::expect_span(self),
-                        )]);
-                    },
-                    LeafKind::Integer => quote! {
-                        output.extend([::m2_syn::LiteralToken::from_span(
-                            ::m2_syn::LiteralKind::Integer,
-                            ::m2_syn::Spanned::expect_span(self),
-                        )]);
-                    },
-                    LeafKind::Ident | LeafKind::QualifiedIdent => quote! {
-                        output.extend([::m2_syn::IdentToken::from_span(
-                            ::m2_syn::Spanned::expect_span(self),
-                        )]);
-                    },
-                };
-                let pretty_text = if matches!(leaf, LeafKind::Empty) {
-                    quote!("∅")
-                } else if matches!(
-                    leaf,
-                    LeafKind::Adj | LeafKind::Eoc | LeafKind::Bof | LeafKind::Eof
-                ) {
-                    let marker = match leaf {
-                        LeafKind::Adj => "∅",
-                        LeafKind::Eoc => "EOC",
-                        LeafKind::Bof => "BOF",
-                        LeafKind::Eof => "EOF",
-                        _ => unreachable!(),
-                    };
-                    quote!(#marker)
-                } else {
-                    quote!(self.span.text().expect("textual syntax spans must resolve"))
-                };
-                let qualifier_fields = matches!(leaf, LeafKind::QualifiedIdent).then(|| {
-                    quote! {
-                        /// The package-name portion before the first `$`, when this is a package-qualified symbol.
-                        pub package_qualifier: qf!(Option<::m2_syn::Span>),
-                        /// The decimal index after the final `$`, when this is an indexed symbol.
-                        pub index_qualifier: qf!(Option<::m2_syn::Span>),
-                    }
-                });
-                let constructor = match leaf {
-                    LeafKind::QualifiedIdent => quote! {
-                        let text = text.as_ref();
-                        let span = span.with_text(text);
-                        let (package_qualifier, index_qualifier) =
-                            ::m2_syn::__qualified_identifier_spans(text, &span);
-                        Self {
-                            package_qualifier,
-                            index_qualifier,
-                            span,
-                            leading_trivia: ::m2_syn::LeadingTrivia::default(),
-                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
-                        }
-                    },
-                    LeafKind::Empty
-                    | LeafKind::Adj
-                    | LeafKind::Eoc
-                    | LeafKind::Bof
-                    | LeafKind::Eof => quote! {
-                        let _ = text;
-                        Self {
-                            span,
-                            leading_trivia: ::m2_syn::LeadingTrivia::default(),
-                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
-                        }
-                    },
-                    _ => quote! {
-                        let span = span.with_text(text.as_ref());
-                        Self {
-                            span,
-                            leading_trivia: ::m2_syn::LeadingTrivia::default(),
-                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
-                        }
-                    },
-                };
-                let text_api = match leaf {
-                    LeafKind::Empty
-                    | LeafKind::Adj
-                    | LeafKind::Eoc
-                    | LeafKind::Bof
-                    | LeafKind::Eof => quote! {},
-                    LeafKind::QualifiedIdent => quote! {
-                        /// Returns the leaf spelling.
-                        pub fn text(&self) -> &str {
-                            self.span.text().expect("textual syntax spans must resolve")
-                        }
+            };
+            Ok(quote! {
 
-                        /// Replaces the spelling with a new immutable source snapshot.
-                        pub fn set_text(&mut self, text: impl AsRef<str>) {
-                            let text = text.as_ref();
-                            self.span = self.span.clone().with_text(text);
-                            (self.package_qualifier, self.index_qualifier) =
-                                ::m2_syn::__qualified_identifier_spans(text, &self.span);
-                        }
-                    },
-                    _ => quote! {
-                        /// Returns the leaf spelling.
-                        pub fn text(&self) -> &str {
-                            self.span.text().expect("textual syntax spans must resolve")
-                        }
+            impl #name {
+                /// Creates a leaf from its text and source span.
+                pub fn new(text: impl AsRef<str>, span: ::m2_syn::Span) -> Self {
+                    #constructor
+                }
 
-                        /// Replaces the spelling with a new immutable source snapshot.
-                        pub fn set_text(&mut self, text: impl AsRef<str>) {
-                            self.span = self.span.clone().with_text(text.as_ref());
-                        }
-                    },
-                };
-                let derives = if matches!(
-                    leaf,
-                    LeafKind::Adj | LeafKind::Eoc | LeafKind::Bof | LeafKind::Eof
-                ) {
-                    quote!(Debug, Clone, PartialEq, Eq, Hash)
-                } else {
-                    quote!(Debug, ::m2_syn::Spanned)
-                };
-                let declaration = (!definition.explicit).then(|| {
+                #text_api
+            }
+
+            impl ::m2_syn::Lex for #name {
+                fn to_tokens(&self, #output: &mut ::m2_syn::TokenStream) {
+                    #emit
+                }
+            }
+
+
+            #pretty_impl
+
+            impl<N> ::m2_syn::Migrate<N> for #name
+            where
+                N: ::m2_syn::ExternalCstNode,
+            {
+                fn matches(node: &N) -> bool {
+                    node.identity().matches(#kind, true)
+                }
+
+                fn migrate(node: N) -> Result<Self, ::m2_syn::MigrateError> {
+                    if !<Self as ::m2_syn::Migrate<N>>::matches(&node) {
+                        return Err(::m2_syn::MigrateError::wrong_node(
+                            #kind,
+                            true,
+                            node.identity(),
+                        ));
+                    }
+                    Ok(Self::new(node.text(), node.expect_span()))
+                }
+            }
+
+            })
+        }
+
+        StructFields::Product(fields) => {
+            // A kind spelled explicitly may be shared by several structs, so
+            // the children have to tell them apart.
+            let structural_matches = if definition.cst_kind.is_some() {
+                fields
+                    .iter()
+                    .filter_map(FieldDefinition::required_match)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let typed_delimiter = definition
+                .wrapper
+                .and_then(Wrapper::delimiter)
+                .map(Delimiter::typed);
+            let retains_span = matches!(definition.wrapper, Some(Wrapper::Literal(_)));
+            let mut constructor_arguments = fields
+                .iter()
+                .map(|field| {
+                    let binding = &field.name;
+                    let ty = field.shape.ty();
+                    quote! { #binding: #ty }
+                })
+                .collect::<Vec<_>>();
+            if retains_span {
+                constructor_arguments.push(quote!(span: ::m2_syn::Span));
+            }
+            let constructor_fields = fields.iter().map(|field| &field.name);
+            let constructor_delimiter = typed_delimiter.as_ref().map(|ty| {
+                quote! {
+                    let spans = span.map_or_else(
+                        || ::m2_syn::DoubleSpan::synthetic(
+                            <#ty as ::m2_syn::DelimiterToken>::KIND,
+                        ),
+                        |span| ::m2_syn::DoubleSpan::new(span.clone(), span),
+                    );
+                    let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(spans);
+                }
+            });
+            let delimiter_member = typed_delimiter.as_ref().map(|_| quote!(delimiter,));
+            let retained_span_member = retains_span.then(|| quote!(span,));
+            let constructor = quote!({
+                #constructor_delimiter
+                Self { #(#constructor_fields,)* #delimiter_member #retained_span_member }
+            });
+            let span_fields = fields.iter().map(|field| {
+                let binding = &field.name;
+                quote! { ::m2_syn::Spanned::try_span(&#binding) }
+            });
+            let constructor_span = typed_delimiter
+                .as_ref()
+                .map(|_| quote!(let span = ::m2_syn::Span::join_all([#(#span_fields),*]);));
+            let migrate_fields = fields
+                .iter()
+                .map(|field| {
+                    field.migrate(fields.len() == 1 && matches!(field.shape, Shape::Delimited(_)))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let migrated_fields = fields.iter().map(|field| &field.name);
+            let migrate_span =
+                retains_span.then(|| quote!(let span = ::m2_syn::Spanned::expect_span(&node);));
+            let migrate_delimiter = typed_delimiter.as_ref().map(|ty| {
+                quote! {
+                    let opening = children.required_anonymous(
+                        <#ty as ::m2_syn::DelimiterToken>::KIND.opening(),
+                    )?;
+                    let closing = children.required_anonymous(
+                        <#ty as ::m2_syn::DelimiterToken>::KIND.closing(),
+                    )?;
+                    let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(
+                        ::m2_syn::DoubleSpan::new(
+                            ::m2_syn::Spanned::expect_span(&opening),
+                            ::m2_syn::Spanned::expect_span(&closing),
+                        ),
+                    );
+                }
+            });
+            let migrated =
+                quote!(Self { #(#migrated_fields,)* #delimiter_member #retained_span_member });
+            let field_separator = definition.wrapper.map_or(" ", Wrapper::field_separator);
+            let print_fields = fields
+                .iter()
+                .map(|field| field.to_tokens(field_separator))
+                .collect::<Result<Vec<_>>>()?;
+            let pretty_impl = {
+                let pretty_fields = fields.iter().map(|field| {
+                    let member = &field.name;
+                    let label = member.to_string();
                     quote! {
-                        #[derive(::m2_syn::__SyntaxWalk)]
-                        #[derive(#derives)]
-                        #[doc = concat!("A typed Macaulay2 `", #kind, "` syntax leaf.")]
-                        pub struct #name {
-                            #qualifier_fields
-                            span: ::m2_syn::Span,
-                            leading_trivia: ::m2_syn::LeadingTrivia,
-                            trailing_trivia: ::m2_syn::TrailingTrivia,
+                        node.push(#label, &self.#member);
+                    }
+                });
+                let pretty_opening = typed_delimiter.as_ref().map(|_| {
+                    quote! {
+                        let __m2_syn_delimiter =
+                            ::m2_syn::DelimiterValue::delimiter(&self.delimiter);
+                        node.push_node(
+                            "opening",
+                            ::m2_syn::PrettyNode::delimiter_boundary(
+                                __m2_syn_delimiter.kind,
+                                true,
+                                __m2_syn_delimiter.opening_span(),
+                            ),
+                        );
+                    }
+                });
+                let pretty_closing = typed_delimiter.as_ref().map(|_| {
+                    quote! {
+                        if let Some(__m2_syn_closing) =
+                            __m2_syn_delimiter.closing_span()
+                        {
+                            node.push_node(
+                                "closing",
+                                ::m2_syn::PrettyNode::delimiter_boundary(
+                                    __m2_syn_delimiter.kind,
+                                    false,
+                                    __m2_syn_closing,
+                                ),
+                            );
                         }
                     }
                 });
-                let boundary_spanned = matches!(
-                    leaf,
-                    LeafKind::Adj | LeafKind::Eoc | LeafKind::Bof | LeafKind::Eof
-                )
-                .then(|| {
-                    quote! {
-                        impl ::m2_syn::Spanned for #name {
-                            fn try_span(&self) -> qf!(Option<::m2_syn::Span>) {
-                                Some(self.span.clone())
-                            }
-                        }
-                    }
-                });
-                let pretty_impl = quote! {
+                quote! {
                     impl ::m2_syn::PrettyTree for #name {
                         fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
-                            ::m2_syn::PrettyNode::token(
+                            let mut node = ::m2_syn::PrettyNode::syntax(
                                 stringify!(#name),
-                                #pretty_text,
-                                ::m2_syn::Spanned::expect_span(self),
-                            )
+                                ::m2_syn::Spanned::try_span(self),
+                            );
+                            #pretty_opening
+                            #(#pretty_fields)*
+                            #pretty_closing
+                            node
                         }
                     }
-                };
-                Ok(quote! {
-                #declaration
+                }
+            };
+            let emit_contents = match definition.wrapper {
+                Some(Wrapper::Literal(literal)) => {
+                    let kind = match literal {
+                        Literal::String => quote!(String),
+                        Literal::RawString => quote!(RawString),
+                    };
+                    quote! {
+                        output.extend([::m2_syn::LiteralToken::from_span(
+                            ::m2_syn::LiteralKind::#kind,
+                            ::m2_syn::Spanned::expect_span(self),
+                        )]);
+                    }
+                }
+                Some(_) => quote! {
+                    ::m2_syn::DelimiterValue::surround(
+                        &self.delimiter,
+                        output,
+                        contents,
+                    );
+                },
+                None => quote! {
+                    ::m2_syn::Lex::to_tokens(&contents, output);
+                },
+            };
+            let cell_aware_source = definition.cell_stream.then(|| {
+                quote! {
+                    fn to_m2(&self) -> qf!(String) {
+                        ::m2_syn::Tokenize::to_cell_stream(self)
+                            .expect("typed source-file cells are complete")
+                            .to_string()
+                    }
+
+                    /// Every comment of the file, including those no cell is
+                    /// next to.
+                    fn comments(&self) -> ::m2_syn::Comments {
+                        ::m2_syn::Comments::within(&::m2_syn::Spanned::expect_span(self))
+                    }
+                }
+            });
+            Ok(quote! {
 
                 impl #name {
-                    /// Creates a leaf from its text and source span.
-                    pub fn new(text: impl AsRef<str>, span: ::m2_syn::Span) -> Self {
+                    /// Creates this node from its typed children.
+                    pub fn new(#(#constructor_arguments),*) -> Self {
+                        #constructor_span
                         #constructor
                     }
-
-                    #text_api
                 }
-
                 impl ::m2_syn::Lex for #name {
-                    fn to_tokens(&self, #output: &mut ::m2_syn::TokenStream) {
-                        ::m2_syn::Lex::to_tokens(&self.leading_trivia, #output);
-                        #emit
-                        ::m2_syn::Lex::to_tokens(&self.trailing_trivia, #output);
+                    fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
+                        let mut contents = ::m2_syn::TokenStream::new();
+                        #(#print_fields)*
+                        #emit_contents
                     }
+
+                    #cell_aware_source
                 }
-
-                impl ::m2_syn::Terminal for #name {
-                    fn leading_trivia(&self) -> &::m2_syn::LeadingTrivia {
-                        &self.leading_trivia
-                    }
-
-                    fn leading_trivia_mut(&mut self) -> &mut ::m2_syn::LeadingTrivia {
-                        &mut self.leading_trivia
-                    }
-
-                    fn trailing_trivia(&self) -> &::m2_syn::TrailingTrivia {
-                        &self.trailing_trivia
-                    }
-
-                    fn trailing_trivia_mut(&mut self) -> &mut ::m2_syn::TrailingTrivia {
-                        &mut self.trailing_trivia
-                    }
-                }
-
-                #boundary_spanned
 
                 #pretty_impl
 
@@ -671,6 +575,7 @@ impl Syntax {
                 {
                     fn matches(node: &N) -> bool {
                         node.identity().matches(#kind, true)
+                            #(&& #structural_matches)*
                     }
 
                     fn migrate(node: N) -> Result<Self, ::m2_syn::MigrateError> {
@@ -681,818 +586,442 @@ impl Syntax {
                                 node.identity(),
                             ));
                         }
-                        Ok(Self::new(node.text(), node.expect_span()))
-                    }
-                }
-
-                })
-            }
-
-            StructFields::Product { fields, style } => {
-                if definition.comments && *style != ProductStyle::Named {
-                    return Err(Error::new(
-                        definition.name.span(),
-                        "`#[comments]` requires a named product struct",
-                    ));
-                }
-                let structural_matches = if context.kind_is_shared(&kind) {
-                    fields
-                        .iter()
-                        .filter_map(FieldDefinition::required_match)
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
-                let expanded_fields = fields.iter().map(|field| {
-                    let member = &field.member;
-                    let stored = field.shape.stored_type(context, false);
-                    let member_name = member.to_token_stream().to_string();
-                    let doc = format!("The `{member_name}` child of this syntax node.");
-                    quote! {
-                        #[doc = #doc]
-                        pub #member: #stored
-                    }
-                });
-                let typed_delimiter = definition
-                    .wrapper
-                    .and_then(Wrapper::delimiter)
-                    .map(Delimiter::typed);
-                let delimiter_field = typed_delimiter.as_ref().map(|ty| {
-                    quote!(
-                        /// The paired delimiter surrounding this node.
-                        pub delimiter: #ty,
-                    )
-                });
-                let comments_slot_field = definition.comments.then(|| {
-                    quote! {
-                        /// Comments preceding the first token of this node,
-                        /// including its documentation block.
-                        pub leading_trivia: ::m2_syn::LeadingTrivia,
-                    }
-                });
-                let comments_slot_member = definition
-                    .comments
-                    .then(|| quote!(leading_trivia: ::m2_syn::LeadingTrivia::default(),));
-                let comments_slot_print = definition.comments.then(
-                    || quote!(::m2_syn::Lex::to_tokens(&self.leading_trivia, &mut contents);),
-                );
-                let comments_accessor = definition.comments.then(|| {
-                    quote! {
-                        /// Collects the comments within this node from the
-                        /// trivia of its tokens. Complete-line `--` blocks
-                        /// leading the first token are outer comments.
-                        pub fn comments(&self) -> ::m2_syn::CommentTrivia {
-                            ::m2_syn::CommentTrivia::of(&::m2_syn::Lex::to_token_stream(self))
-                        }
-                    }
-                });
-                let retains_span = matches!(definition.wrapper, Some(Wrapper::Literal(_)));
-                let retained_span_field = retains_span.then(|| {
-                    quote! {
-                        span: ::m2_syn::Span,
-                        leading_trivia: ::m2_syn::LeadingTrivia,
-                        trailing_trivia: ::m2_syn::TrailingTrivia,
-                    }
-                });
-                let struct_definition = match style {
-                    ProductStyle::Named => quote! {
-                        #[doc = concat!("A typed Macaulay2 `", #kind, "` syntax node.")]
-                        pub struct #name {
-                            #comments_slot_field
-                            #(#expanded_fields,)*
-                            #delimiter_field
-                            #retained_span_field
-                        }
-                    },
-                    ProductStyle::Tuple => {
-                        let fields = fields.iter().map(|field| {
-                            let stored = field.shape.stored_type(context, false);
-                            quote!(pub #stored)
-                        });
-                        quote! {
-                            #[doc = concat!("A typed Macaulay2 `", #kind, "` syntax node.")]
-                            pub struct #name(#(#fields,)*);
-                        }
-                    }
-                };
-                let declaration = (!definition.explicit).then(|| {
-                    quote! {
-                        #[derive(::m2_syn::__SyntaxWalk)]
-                        #[derive(Debug, ::m2_syn::Spanned)]
-                        #struct_definition
-                    }
-                });
-                let mut constructor_arguments = fields
-                    .iter()
-                    .map(|field| {
-                        let binding = &field.binding;
-                        let ty = field.shape.ty();
-                        quote! { #binding: #ty }
-                    })
-                    .collect::<Vec<_>>();
-                if retains_span {
-                    constructor_arguments.push(quote!(span: ::m2_syn::Span));
-                }
-                let constructor_conversions = fields
-                    .iter()
-                    .filter_map(|field| {
-                        let binding = &field.binding;
-                        let stored = field.shape.stored_shape(context, false);
-                        if field.shape.conversion_is_identity(&stored) {
-                            None
-                        } else {
-                            let value = field.shape.convert_value(&stored, quote!(#binding));
-                            Some(quote! { let #binding = #value; })
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let constructor_fields = fields.iter().map(|field| &field.binding);
-                let constructor_delimiter = typed_delimiter.as_ref().map(|ty| {
-                    quote! {
-                        let spans = span.map_or_else(
-                            || ::m2_syn::DoubleSpan::synthetic(
-                                <#ty as ::m2_syn::DelimiterToken>::KIND,
-                            ),
-                            |span| ::m2_syn::DoubleSpan::new(span.clone(), span),
-                        );
-                        let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(spans);
-                    }
-                });
-                let delimiter_member = typed_delimiter.as_ref().map(|_| quote!(delimiter,));
-                let retained_span_member = retains_span.then(|| {
-                    quote! {
-                        span,
-                        leading_trivia: ::m2_syn::LeadingTrivia::default(),
-                        trailing_trivia: ::m2_syn::TrailingTrivia::default(),
-                    }
-                });
-                let constructor_value = match style {
-                    ProductStyle::Named if constructor_delimiter.is_some() => quote!({
-                        #constructor_delimiter
-                        Self { #(#constructor_fields,)* #delimiter_member #retained_span_member #comments_slot_member }
-                    }),
-                    ProductStyle::Named => {
-                        quote!(Self { #(#constructor_fields,)* #retained_span_member #comments_slot_member })
-                    }
-                    ProductStyle::Tuple => quote!(Self(#(#constructor_fields,)*)),
-                };
-                let constructor = if constructor_conversions.is_empty() {
-                    constructor_value
-                } else {
-                    quote!({
-                        #(#constructor_conversions)*
-                        #constructor_value
-                    })
-                };
-                let span_fields = fields.iter().map(|field| {
-                    let binding = &field.binding;
-                    quote! { ::m2_syn::Spanned::try_span(&#binding) }
-                });
-                let constructor_span = typed_delimiter
-                    .as_ref()
-                    .map(|_| quote!(let span = ::m2_syn::Span::join_all([#(#span_fields),*]);));
-                let migrate_fields = fields
-                    .iter()
-                    .map(|field| {
-                        field.migrate(
-                            context,
-                            fields.len() == 1 && matches!(field.shape, Shape::Delimited(_)),
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let migrated_fields = fields.iter().map(|field| &field.binding);
-                let migrate_span =
-                    retains_span.then(|| quote!(let span = ::m2_syn::Spanned::expect_span(&node);));
-                let migrate_delimiter = typed_delimiter.as_ref().map(|ty| {
-                    quote! {
-                        let opening = children.required_anonymous(
-                            <#ty as ::m2_syn::DelimiterToken>::KIND.opening(),
-                        )?;
-                        let closing = children.required_anonymous(
-                            <#ty as ::m2_syn::DelimiterToken>::KIND.closing(),
-                        )?;
-                        let delimiter = <#ty as ::m2_syn::DelimiterToken>::new(
-                            ::m2_syn::DoubleSpan::new(
-                                ::m2_syn::Spanned::expect_span(&opening),
-                                ::m2_syn::Spanned::expect_span(&closing),
-                            ),
-                        );
-                    }
-                });
-                let migrated = match style {
-                    ProductStyle::Named if migrate_delimiter.is_some() => {
-                        quote!(Self { #(#migrated_fields,)* #delimiter_member #retained_span_member #comments_slot_member })
-                    }
-                    ProductStyle::Named => {
-                        quote!(Self { #(#migrated_fields,)* #retained_span_member #comments_slot_member })
-                    }
-                    ProductStyle::Tuple => quote!(Self(#(#migrated_fields,)*)),
-                };
-                let field_separator = definition.wrapper.map_or(" ", Wrapper::field_separator);
-                let print_fields = fields
-                    .iter()
-                    .map(|field| field.to_tokens(field_separator, context))
-                    .collect::<Result<Vec<_>>>()?;
-                let pretty_impl = {
-                    let pretty_fields = fields.iter().map(|field| {
-                        let member = &field.member;
-                        let label = member.to_token_stream().to_string();
-                        quote! {
-                            node.push(#label, &self.#member);
-                        }
-                    });
-                    let pretty_opening = typed_delimiter.as_ref().map(|_| {
-                        quote! {
-                            let __m2_syn_delimiter =
-                                ::m2_syn::DelimiterValue::delimiter(&self.delimiter);
-                            node.push_node(
-                                "opening",
-                                ::m2_syn::PrettyNode::delimiter_boundary(
-                                    __m2_syn_delimiter.kind,
-                                    true,
-                                    __m2_syn_delimiter.opening_span(),
-                                ),
-                            );
-                        }
-                    });
-                    let pretty_closing = typed_delimiter.as_ref().map(|_| {
-                        quote! {
-                            if let Some(__m2_syn_closing) =
-                                __m2_syn_delimiter.closing_span()
-                            {
-                                node.push_node(
-                                    "closing",
-                                    ::m2_syn::PrettyNode::delimiter_boundary(
-                                        __m2_syn_delimiter.kind,
-                                        false,
-                                        __m2_syn_closing,
-                                    ),
-                                );
-                            }
-                        }
-                    });
-                    let pretty_comments = definition
-                        .comments
-                        .then(|| quote!(node.push("comments", &self.comments());));
-                    quote! {
-                        impl ::m2_syn::PrettyTree for #name {
-                            fn pretty_tree(&self) -> ::m2_syn::PrettyNode {
-                                let mut node = ::m2_syn::PrettyNode::syntax(
-                                    stringify!(#name),
-                                    ::m2_syn::Spanned::try_span(self),
-                                );
-                                #pretty_opening
-                                #(#pretty_fields)*
-                                #pretty_closing
-                                #pretty_comments
-                                node
-                            }
-                        }
-                    }
-                };
-                let emit_contents = match definition.wrapper {
-                    Some(Wrapper::Literal(Literal::String)) => quote! {
-                        ::m2_syn::Lex::to_tokens(&self.leading_trivia, output);
-                        let span = ::m2_syn::Spanned::expect_span(self);
-                        output.extend([::m2_syn::LiteralToken::from_span(
-                            ::m2_syn::LiteralKind::String,
-                            span,
-                        )]);
-                        ::m2_syn::Lex::to_tokens(&self.trailing_trivia, output);
-                    },
-                    Some(Wrapper::Literal(Literal::RawString)) => quote! {
-                        ::m2_syn::Lex::to_tokens(&self.leading_trivia, output);
-                        let span = ::m2_syn::Spanned::expect_span(self);
-                        output.extend([::m2_syn::LiteralToken::from_span(
-                            ::m2_syn::LiteralKind::RawString,
-                            span,
-                        )]);
-                        ::m2_syn::Lex::to_tokens(&self.trailing_trivia, output);
-                    },
-                    Some(_) => quote! {
-                        ::m2_syn::DelimiterValue::surround(
-                            &self.delimiter,
-                            output,
-                            contents,
-                        );
-                    },
-                    None => quote! {
-                        ::m2_syn::Lex::to_tokens(&contents, output);
-                    },
-                };
-                let terminal_impl = retains_span.then(|| {
-                    quote! {
-                        impl ::m2_syn::Terminal for #name {
-                            fn leading_trivia(&self) -> &::m2_syn::LeadingTrivia {
-                                &self.leading_trivia
-                            }
-
-                            fn leading_trivia_mut(&mut self) -> &mut ::m2_syn::LeadingTrivia {
-                                &mut self.leading_trivia
-                            }
-
-                            fn trailing_trivia(&self) -> &::m2_syn::TrailingTrivia {
-                                &self.trailing_trivia
-                            }
-
-                            fn trailing_trivia_mut(&mut self) -> &mut ::m2_syn::TrailingTrivia {
-                                &mut self.trailing_trivia
-                            }
-                        }
-                    }
-                });
-                let cell_aware_source = definition.cell_stream.then(|| {
-                    quote! {
-                        fn to_m2(&self) -> qf!(String) {
-                            ::m2_syn::Tokenize::to_cell_stream(self)
-                                .expect("typed source-file cells are complete")
-                                .to_string()
-                        }
-                    }
-                });
-                Ok(quote! {
-                    #declaration
-
-                    impl #name {
-                        /// Creates this node from its typed children.
-                        pub fn new(#(#constructor_arguments),*) -> Self {
-                            #constructor_span
-                            #constructor
-                        }
-
-                        #comments_accessor
-                    }
-                    impl ::m2_syn::Lex for #name {
-                        fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-                            let mut contents = ::m2_syn::TokenStream::new();
-                            #comments_slot_print
-                            #(#print_fields)*
-                            #emit_contents
-                        }
-
-                        #cell_aware_source
-                    }
-
-                    #terminal_impl
-
-                    #pretty_impl
-
-                    impl<N> ::m2_syn::Migrate<N> for #name
-                    where
-                        N: ::m2_syn::ExternalCstNode,
-                    {
-                        fn matches(node: &N) -> bool {
-                            node.identity().matches(#kind, true)
-                                #(&& #structural_matches)*
-                        }
-
-                        fn migrate(node: N) -> Result<Self, ::m2_syn::MigrateError> {
-                            if !<Self as ::m2_syn::Migrate<N>>::matches(&node) {
-                                return Err(::m2_syn::MigrateError::wrong_node(
-                                    #kind,
-                                    true,
-                                    node.identity(),
-                                ));
-                            }
-                            #migrate_span
-                            let mut children = ::m2_syn::ChildCursor::new(&node);
-                            #migrate_delimiter
-                            #(#migrate_fields)*
-                            Ok(#migrated)
-                        }
-                    }
-                })
-            }
-        }
-    }
-
-    fn expand_conversions(&self, context: &SyntaxContext<'_>) -> TokenStream {
-        let mut paths = ConversionGraph::new();
-        for definition in &self.enums {
-            for variant in &definition.variants {
-                let source = variant.shape.base_ident().into();
-                paths
-                    .entry((source, (&definition.name).into()))
-                    .or_default()
-                    .push(vec![(
-                        definition.name.clone(),
-                        variant.name.clone(),
-                        matches!(variant.shape.stored_shape(context, false), Shape::Boxed(_)),
-                    )]);
-            }
-        }
-
-        loop {
-            let snapshot = paths.clone();
-            let mut changed = false;
-            for ((source, middle), source_paths) in &snapshot {
-                for ((candidate, target), target_paths) in &snapshot {
-                    if middle != candidate || source == target {
-                        continue;
-                    }
-                    let entry = paths.entry((source.clone(), target.clone())).or_default();
-                    for source_path in source_paths {
-                        for target_path in target_paths {
-                            let combined = source_path
-                                .iter()
-                                .cloned()
-                                .chain(target_path.iter().cloned())
-                                .collect::<Vec<_>>();
-                            if combined.len() > self.enums.len() {
-                                continue;
-                            }
-                            if !entry.contains(&combined) {
-                                entry.push(combined);
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let implementations = paths.into_iter().filter_map(|((source, target), paths)| {
-            if paths.len() != 1 {
-                return None;
-            }
-            let source = context.declaration(&source)?;
-            let target = context.declaration(&target)?;
-            let wrappers = &paths[0];
-            let value = wrappers
-                .iter()
-                .fold(quote!(value), |value, (owner, variant, boxed)| {
-                    let value = if *boxed {
-                        quote!(<qf!(Box<_>)>::new(#value))
-                    } else {
-                        value
-                    };
-                    quote!(#owner::#variant(#value))
-                });
-            Some(quote! {
-                impl From<#source> for #target {
-                    fn from(value: #source) -> Self {
-                        #value
+                        #migrate_span
+                        let mut children = ::m2_syn::ChildCursor::new(&node);
+                        #migrate_delimiter
+                        #(#migrate_fields)*
+                        Ok(#migrated)
                     }
                 }
             })
-        });
-        quote! { #(#implementations)* }
+        }
     }
+}
 
-    fn expand_visit(&self, context: &SyntaxContext<'_>) -> TokenStream {
-        let methods = self.all_types().map(|name| {
-            let method = format_ident!("visit_{}", to_snake_case(&name.to_string()));
-            let ty = context.type_reference(name);
-            quote! {
-                #[doc = concat!("Visits a `", stringify!(#name), "` node.")]
-                fn #method(&mut self, node: &'ast #ty) {
-                    self::#method(self, node);
-                }
-            }
-        });
-        let walkers = self.all_types().map(|name| {
-            let ty = context.type_reference(name);
-            quote!(::m2_syn::__syntax_walk_function!(visit, #name, #ty);)
-        });
-        quote! {
-            /// Shared-reference traversal over the typed graph.
-            pub mod visit {
-                use super::*;
+/// One of the three generated traversals over the typed graph.
+#[derive(Clone, Copy)]
+pub(crate) enum Traversal {
+    Visit,
+    VisitMut,
+    Fold,
+}
 
-                /// Per-node visiting rules, each defaulting to the free walker
-                /// of the same name.
-                pub trait Visit<'ast> {
-                    #(#methods)*
-                }
+impl Traversal {
+    const ALL: [Self; 3] = [Self::Visit, Self::VisitMut, Self::Fold];
 
-                #(#walkers)*
-            }
+    /// The trait method, and free walker, that handles one syntax type.
+    pub(crate) fn method(self, name: &Ident) -> Ident {
+        let snake = to_snake_case(&name.to_string());
+        match self {
+            Self::Visit => format_ident!("visit_{snake}"),
+            Self::VisitMut => format_ident!("visit_{snake}_mut"),
+            Self::Fold => format_ident!("fold_{snake}"),
         }
     }
 
-    fn expand_visit_mut(&self, context: &SyntaxContext<'_>) -> TokenStream {
-        let methods = self.all_types().map(|name| {
-            let method = format_ident!("visit_{}_mut", to_snake_case(&name.to_string()));
-            let ty = context.type_reference(name);
-            quote! {
-                #[doc = concat!("Visits a mutable `", stringify!(#name), "` node.")]
-                fn #method(&mut self, node: &mut #ty) {
-                    self::#method(self, node);
+    fn expand<'a>(self, names: impl Iterator<Item = &'a Ident>) -> TokenStream {
+        let (methods, walkers): (Vec<_>, Vec<_>) = names.map(|name| self.expand_type(name)).unzip();
+        match self {
+            Self::Visit => quote! {
+                /// Shared-reference traversal over the typed graph.
+                pub mod visit {
+                    use super::*;
+
+                    /// Per-node visiting rules, each defaulting to the free walker
+                    /// of the same name.
+                    pub trait Visit<'ast> {
+                        #(#methods)*
+
+                        /// Visits a token, leaf, or literal. The free walker of
+                        /// every such node calls it.
+                        fn visit_terminal(&mut self, _terminal: &'ast dyn ::m2_syn::Spanned) {}
+                    }
+
+                    #(#walkers)*
                 }
-            }
-        });
-        let walkers = self.all_types().map(|name| {
-            let ty = context.type_reference(name);
-            quote!(::m2_syn::__syntax_walk_function!(visit_mut, #name, #ty);)
-        });
-        quote! {
-            /// In-place traversal over the typed graph.
-            pub mod visit_mut {
-                use super::*;
+            },
+            Self::VisitMut => quote! {
+                /// In-place traversal over the typed graph.
+                pub mod visit_mut {
+                    use super::*;
 
-                /// Per-node mutation rules, each defaulting to the free walker
-                /// of the same name.
-                pub trait VisitMut {
-                    #(#methods)*
+                    /// Per-node mutation rules, each defaulting to the free walker
+                    /// of the same name.
+                    pub trait VisitMut {
+                        #(#methods)*
 
-                    /// Visits a token, leaf, or literal that owns its adjacent
-                    /// trivia. The free walker of every such node calls it.
-                    fn visit_terminal_mut(&mut self, _terminal: &mut dyn ::m2_syn::Terminal) {}
+                        /// Visits the delimiter pair of a delimited node. The
+                        /// family must be kept; spans may change.
+                        fn visit_delimiter_mut(&mut self, _delimiter: &mut ::m2_syn::Delimiter) {}
+                    }
 
-                    /// Visits the delimiter pair of a delimited node. The
-                    /// family must be kept; spans and trivia may change.
-                    fn visit_delimiter_mut(&mut self, _delimiter: &mut ::m2_syn::Delimiter) {}
+                    #(#walkers)*
                 }
+            },
+            Self::Fold => quote! {
+                /// Owning rebuild of the typed graph.
+                pub mod fold {
+                    use super::*;
 
-                #(#walkers)*
-            }
+                    /// Per-node rebuilding rules, each defaulting to the free
+                    /// walker of the same name.
+                    pub trait Fold {
+                        #(#methods)*
+                    }
+
+                    #(#walkers)*
+                }
+            },
         }
     }
 
-    fn expand_fold(&self, context: &SyntaxContext<'_>) -> TokenStream {
-        let methods = self.all_types().map(|name| {
-            let method = format_ident!("fold_{}", to_snake_case(&name.to_string()));
-            let ty = context.type_reference(name);
-            quote! {
-                #[doc = concat!("Folds a `", stringify!(#name), "` node.")]
-                fn #method(&mut self, node: #ty) -> #ty {
-                    self::#method(self, node)
-                }
+    fn expand_type(self, name: &Ident) -> (TokenStream, TokenStream) {
+        let method = self.method(name);
+        let doc = format!("Handles a `{name}` node.");
+        let walker_doc = format!("Walks the children of a `{name}` node.");
+        match self {
+            Self::Visit => (
+                quote! {
+                    #[doc = #doc]
+                    fn #method(&mut self, node: &'ast #name) {
+                        self::#method(self, node);
+                    }
+                },
+                quote! {
+                    #[doc = #walker_doc]
+                    pub fn #method<'ast, V: Visit<'ast> + ?Sized>(visitor: &mut V, node: &'ast #name) {
+                        super::__walk::WalkChildren::walk_children(node, visitor);
+                    }
+                },
+            ),
+            Self::VisitMut => (
+                quote! {
+                    #[doc = #doc]
+                    fn #method(&mut self, node: &mut #name) {
+                        self::#method(self, node);
+                    }
+                },
+                quote! {
+                    #[doc = #walker_doc]
+                    pub fn #method<V: VisitMut + ?Sized>(visitor: &mut V, node: &mut #name) {
+                        super::__walk::WalkChildrenMut::walk_children_mut(node, visitor);
+                    }
+                },
+            ),
+            Self::Fold => (
+                quote! {
+                    #[doc = #doc]
+                    fn #method(&mut self, node: #name) -> #name {
+                        self::#method(self, node)
+                    }
+                },
+                quote! {
+                    #[doc = #walker_doc]
+                    pub fn #method<F: Fold + ?Sized>(folder: &mut F, node: #name) -> #name {
+                        super::__walk::FoldChildren::fold_children(node, folder)
+                    }
+                },
+            ),
+        }
+    }
+}
+
+/// Tokens have no children: visiting one reports it as a terminal, and
+/// folding one keeps it.
+fn expand_token_walk(name: &Ident) -> TokenStream {
+    quote! {
+        impl __walk::WalkChildren for #name {
+            fn walk_children<'ast, V>(&'ast self, _visitor: &mut V)
+            where
+                V: visit::Visit<'ast> + ?Sized,
+            {}
+        }
+
+        impl __walk::WalkChildrenMut for #name {
+            fn walk_children_mut<V>(&mut self, _visitor: &mut V)
+            where
+                V: visit_mut::VisitMut + ?Sized,
+            {}
+        }
+
+        impl __walk::FoldChildren for #name {
+            fn fold_children<F>(self, _folder: &mut F) -> Self
+            where
+                F: fold::Fold + ?Sized,
+            {
+                self
             }
-        });
-        let walkers = self.all_types().map(|name| {
-            let ty = context.type_reference(name);
-            quote!(::m2_syn::__syntax_walk_function!(fold, #name, #ty);)
-        });
-        quote! {
-            /// Owning rebuild of the typed graph.
-            pub mod fold {
-                use super::*;
+        }
 
-                /// Per-node rebuilding rules, each defaulting to the free
-                /// walker of the same name.
-                pub trait Fold {
-                    #(#methods)*
-                }
+        impl __walk::VisitValue for #name {
+            fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+            where
+                V: visit::Visit<'ast> + ?Sized,
+            {
+                visitor.visit_terminal(self);
+            }
+        }
 
-                #(#walkers)*
+        impl __walk::VisitValueMut for #name {
+            fn visit_value_mut<V>(&mut self, _visitor: &mut V)
+            where
+                V: visit_mut::VisitMut + ?Sized,
+            {}
+        }
+
+        impl __walk::FoldValue for #name {
+            fn fold_value<F>(self, _folder: &mut F) -> Self
+            where
+                F: fold::Fold + ?Sized,
+            {
+                self
             }
         }
     }
+}
 
-    fn all_types(&self) -> impl Iterator<Item = &Ident> {
-        self.tokens
-            .iter()
-            .map(|definition| &definition.name)
-            .chain(self.structs.iter().map(|definition| &definition.name))
-            .chain(self.enums.iter().map(|definition| &definition.name))
-    }
+fn expand_walk_support() -> TokenStream {
+    quote! {
+        #[doc(hidden)]
+        pub(crate) mod __walk {
+            use super::*;
 
-    fn expand_walk_support(&self) -> TokenStream {
-        quote! {
-            mod __walk {
-                use super::*;
-
-                pub(super) trait VisitValue {
-                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
-                    where
-                        V: super::visit::Visit<'ast> + ?Sized;
-                }
-
-                pub(super) trait VisitValueMut {
-                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
-                    where
-                        V: super::visit_mut::VisitMut + ?Sized;
-                }
-
-                pub(super) trait FoldValue: Sized {
-                    fn fold_value<F>(self, folder: &mut F) -> Self
-                    where
-                        F: super::fold::Fold + ?Sized;
-                }
-
-                pub(super) trait WalkChildren {
-                    fn walk_children<'ast, V>(&'ast self, visitor: &mut V)
-                    where
-                        V: super::visit::Visit<'ast> + ?Sized;
-                }
-
-                pub(super) trait WalkChildrenMut {
-                    fn walk_children_mut<V>(&mut self, visitor: &mut V)
-                    where
-                        V: super::visit_mut::VisitMut + ?Sized;
-                }
-
-                pub(super) trait FoldChildren: Sized {
-                    fn fold_children<F>(self, folder: &mut F) -> Self
-                    where
-                        F: super::fold::Fold + ?Sized;
-                }
-
-                impl<T> VisitValue for Box<T>
+            pub(crate) trait VisitValue {
+                fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
                 where
-                    T: VisitValue + ?Sized,
+                    V: super::visit::Visit<'ast> + ?Sized;
+            }
+
+            pub(crate) trait VisitValueMut {
+                fn visit_value_mut<V>(&mut self, visitor: &mut V)
+                where
+                    V: super::visit_mut::VisitMut + ?Sized;
+            }
+
+            pub(crate) trait FoldValue: Sized {
+                fn fold_value<F>(self, folder: &mut F) -> Self
+                where
+                    F: super::fold::Fold + ?Sized;
+            }
+
+            pub(crate) trait WalkChildren {
+                fn walk_children<'ast, V>(&'ast self, visitor: &mut V)
+                where
+                    V: super::visit::Visit<'ast> + ?Sized;
+            }
+
+            pub(crate) trait WalkChildrenMut {
+                fn walk_children_mut<V>(&mut self, visitor: &mut V)
+                where
+                    V: super::visit_mut::VisitMut + ?Sized;
+            }
+
+            pub(crate) trait FoldChildren: Sized {
+                fn fold_children<F>(self, folder: &mut F) -> Self
+                where
+                    F: super::fold::Fold + ?Sized;
+            }
+
+            impl<T> VisitValue for Box<T>
+            where
+                T: VisitValue + ?Sized,
+            {
+                fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                where
+                    V: super::visit::Visit<'ast> + ?Sized,
                 {
-                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
-                    where
-                        V: super::visit::Visit<'ast> + ?Sized,
-                    {
-                        T::visit_value(self, visitor);
+                    T::visit_value(self, visitor);
+                }
+            }
+
+            impl<T> VisitValueMut for Box<T>
+            where
+                T: VisitValueMut + ?Sized,
+            {
+                fn visit_value_mut<V>(&mut self, visitor: &mut V)
+                where
+                    V: super::visit_mut::VisitMut + ?Sized,
+                {
+                    T::visit_value_mut(self, visitor);
+                }
+            }
+
+            impl<T> FoldValue for Box<T>
+            where
+                T: FoldValue,
+            {
+                fn fold_value<F>(self, folder: &mut F) -> Self
+                where
+                    F: super::fold::Fold + ?Sized,
+                {
+                    Box::new(T::fold_value(*self, folder))
+                }
+            }
+
+            impl<T> VisitValue for Option<T>
+            where
+                T: VisitValue,
+            {
+                fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                where
+                    V: super::visit::Visit<'ast> + ?Sized,
+                {
+                    if let Some(value) = self {
+                        T::visit_value(value, visitor);
                     }
                 }
+            }
 
-                impl<T> VisitValueMut for Box<T>
+            impl<T> VisitValueMut for Option<T>
+            where
+                T: VisitValueMut,
+            {
+                fn visit_value_mut<V>(&mut self, visitor: &mut V)
                 where
-                    T: VisitValueMut + ?Sized,
+                    V: super::visit_mut::VisitMut + ?Sized,
                 {
-                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
-                    where
-                        V: super::visit_mut::VisitMut + ?Sized,
-                    {
-                        T::visit_value_mut(self, visitor);
+                    if let Some(value) = self {
+                        T::visit_value_mut(value, visitor);
                     }
                 }
+            }
 
-                impl<T> FoldValue for Box<T>
+            impl<T> FoldValue for Option<T>
+            where
+                T: FoldValue,
+            {
+                fn fold_value<F>(self, folder: &mut F) -> Self
                 where
-                    T: FoldValue,
+                    F: super::fold::Fold + ?Sized,
                 {
-                    fn fold_value<F>(self, folder: &mut F) -> Self
-                    where
-                        F: super::fold::Fold + ?Sized,
-                    {
-                        Box::new(T::fold_value(*self, folder))
+                    self.map(|value| T::fold_value(value, folder))
+                }
+            }
+
+            impl<T> VisitValue for Vec<T>
+            where
+                T: VisitValue,
+            {
+                fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                where
+                    V: super::visit::Visit<'ast> + ?Sized,
+                {
+                    for value in self {
+                        T::visit_value(value, visitor);
                     }
                 }
+            }
 
-                impl<T> VisitValue for Option<T>
+            impl<T> VisitValueMut for Vec<T>
+            where
+                T: VisitValueMut,
+            {
+                fn visit_value_mut<V>(&mut self, visitor: &mut V)
                 where
-                    T: VisitValue,
+                    V: super::visit_mut::VisitMut + ?Sized,
                 {
-                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
-                    where
-                        V: super::visit::Visit<'ast> + ?Sized,
-                    {
-                        if let Some(value) = self {
-                            T::visit_value(value, visitor);
-                        }
+                    for value in self {
+                        T::visit_value_mut(value, visitor);
                     }
                 }
+            }
 
-                impl<T> VisitValueMut for Option<T>
+            impl<T> FoldValue for Vec<T>
+            where
+                T: FoldValue,
+            {
+                fn fold_value<F>(self, folder: &mut F) -> Self
                 where
-                    T: VisitValueMut,
+                    F: super::fold::Fold + ?Sized,
                 {
-                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
-                    where
-                        V: super::visit_mut::VisitMut + ?Sized,
-                    {
-                        if let Some(value) = self {
-                            T::visit_value_mut(value, visitor);
-                        }
+                    self.into_iter()
+                        .map(|value| T::fold_value(value, folder))
+                        .collect()
+                }
+            }
+
+            impl<T, P> VisitValue for ::m2_syn::Punctuated<T, P>
+            where
+                T: VisitValue,
+            {
+                fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
+                where
+                    V: super::visit::Visit<'ast> + ?Sized,
+                {
+                    for value in self.iter() {
+                        T::visit_value(value, visitor);
                     }
                 }
+            }
 
-                impl<T> FoldValue for Option<T>
+            impl<T, P> VisitValueMut for ::m2_syn::Punctuated<T, P>
+            where
+                T: VisitValueMut,
+                P: VisitValueMut,
+            {
+                fn visit_value_mut<V>(&mut self, visitor: &mut V)
                 where
-                    T: FoldValue,
+                    V: super::visit_mut::VisitMut + ?Sized,
                 {
-                    fn fold_value<F>(self, folder: &mut F) -> Self
-                    where
-                        F: super::fold::Fold + ?Sized,
-                    {
-                        self.map(|value| T::fold_value(value, folder))
+                    T::visit_value_mut(self.first_mut(), visitor);
+                    for (separator, value) in self.pairs_mut() {
+                        P::visit_value_mut(separator, visitor);
+                        T::visit_value_mut(value, visitor);
                     }
                 }
+            }
 
-                impl<T> VisitValue for Vec<T>
+            impl<T, P> FoldValue for ::m2_syn::Punctuated<T, P>
+            where
+                T: FoldValue,
+            {
+                fn fold_value<F>(self, folder: &mut F) -> Self
                 where
-                    T: VisitValue,
+                    F: super::fold::Fold + ?Sized,
                 {
-                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
-                    where
-                        V: super::visit::Visit<'ast> + ?Sized,
-                    {
-                        for value in self {
-                            T::visit_value(value, visitor);
-                        }
-                    }
+                    self.map_values(|value| T::fold_value(value, folder))
                 }
+            }
 
-                impl<T> VisitValueMut for Vec<T>
+            impl<T, D> VisitValue for ::m2_syn::Delimited<T, D>
+            where
+                T: VisitValue,
+            {
+                fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
                 where
-                    T: VisitValueMut,
+                    V: super::visit::Visit<'ast> + ?Sized,
                 {
-                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
-                    where
-                        V: super::visit_mut::VisitMut + ?Sized,
-                    {
-                        for value in self {
-                            T::visit_value_mut(value, visitor);
-                        }
-                    }
+                    T::visit_value(&self.contents, visitor);
                 }
+            }
 
-                impl<T> FoldValue for Vec<T>
+            impl<T, D> VisitValueMut for ::m2_syn::Delimited<T, D>
+            where
+                T: VisitValueMut,
+                D: ::m2_syn::DelimiterValue,
+            {
+                fn visit_value_mut<V>(&mut self, visitor: &mut V)
                 where
-                    T: FoldValue,
+                    V: super::visit_mut::VisitMut + ?Sized,
                 {
-                    fn fold_value<F>(self, folder: &mut F) -> Self
-                    where
-                        F: super::fold::Fold + ?Sized,
-                    {
-                        self.into_iter()
-                            .map(|value| T::fold_value(value, folder))
-                            .collect()
-                    }
+                    let mut delimiter = ::m2_syn::DelimiterValue::delimiter(&self.delimiter);
+                    visitor.visit_delimiter_mut(&mut delimiter);
+                    self.delimiter = ::m2_syn::DelimiterValue::from_delimiter(delimiter)
+                        .expect("a delimiter visitor keeps the delimiter family");
+                    T::visit_value_mut(&mut self.contents, visitor);
                 }
+            }
 
-                impl<T, P> VisitValue for Punctuated<T, P>
+            impl<T, D> FoldValue for ::m2_syn::Delimited<T, D>
+            where
+                T: FoldValue,
+            {
+                fn fold_value<F>(self, folder: &mut F) -> Self
                 where
-                    T: VisitValue,
+                    F: super::fold::Fold + ?Sized,
                 {
-                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
-                    where
-                        V: super::visit::Visit<'ast> + ?Sized,
-                    {
-                        for value in self.iter() {
-                            T::visit_value(value, visitor);
-                        }
-                    }
-                }
-
-                impl<T, P> VisitValueMut for Punctuated<T, P>
-                where
-                    T: VisitValueMut,
-                    P: VisitValueMut,
-                {
-                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
-                    where
-                        V: super::visit_mut::VisitMut + ?Sized,
-                    {
-                        T::visit_value_mut(self.first_mut(), visitor);
-                        for (separator, value) in self.pairs_mut() {
-                            P::visit_value_mut(separator, visitor);
-                            T::visit_value_mut(value, visitor);
-                        }
-                    }
-                }
-
-                impl<T, P> FoldValue for Punctuated<T, P>
-                where
-                    T: FoldValue,
-                {
-                    fn fold_value<F>(self, folder: &mut F) -> Self
-                    where
-                        F: super::fold::Fold + ?Sized,
-                    {
-                        self.map_values(|value| T::fold_value(value, folder))
-                    }
-                }
-
-                impl<T, D> VisitValue for Delimited<T, D>
-                where
-                    T: VisitValue,
-                {
-                    fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
-                    where
-                        V: super::visit::Visit<'ast> + ?Sized,
-                    {
-                        T::visit_value(&self.contents, visitor);
-                    }
-                }
-
-                impl<T, D> VisitValueMut for Delimited<T, D>
-                where
-                    T: VisitValueMut,
-                    D: ::m2_syn::DelimiterValue,
-                {
-                    fn visit_value_mut<V>(&mut self, visitor: &mut V)
-                    where
-                        V: super::visit_mut::VisitMut + ?Sized,
-                    {
-                        let mut delimiter = ::m2_syn::DelimiterValue::delimiter(&self.delimiter);
-                        visitor.visit_delimiter_mut(&mut delimiter);
-                        self.delimiter = ::m2_syn::DelimiterValue::from_delimiter(delimiter)
-                            .expect("a delimiter visitor keeps the delimiter family");
-                        T::visit_value_mut(&mut self.contents, visitor);
-                    }
-                }
-
-                impl<T, D> FoldValue for Delimited<T, D>
-                where
-                    T: FoldValue,
-                {
-                    fn fold_value<F>(self, folder: &mut F) -> Self
-                    where
-                        F: super::fold::Fold + ?Sized,
-                    {
-                        let (delimiter, contents) = self.into_parts();
-                        Delimited::new(delimiter, T::fold_value(contents, folder))
-                    }
+                    let (delimiter, contents) = self.into_parts();
+                    ::m2_syn::Delimited::new(delimiter, T::fold_value(contents, folder))
                 }
             }
         }
@@ -1505,23 +1034,19 @@ impl FieldDefinition {
             return None;
         }
         let ty = self.shape.ty();
-        let field_match = match &self.source {
-            FieldSource::Named(field) => quote!(child.field == Some(#field)),
-            FieldSource::Positional => quote!(child.field.is_none()),
-        };
+        let field = self.name.to_string();
         Some(quote!(node.children().any(|child| {
-            #field_match && <#ty as ::m2_syn::Migrate<N>>::matches(&child.node)
+            child.field == Some(#field) && <#ty as ::m2_syn::Migrate<N>>::matches(&child.node)
         })))
     }
 
-    fn migrate(&self, context: &SyntaxContext<'_>, delimited_newtype: bool) -> Result<TokenStream> {
-        let binding = &self.binding;
+    fn migrate(&self, delimited_newtype: bool) -> Result<TokenStream> {
+        let binding = &self.name;
         if delimited_newtype {
             let Shape::Delimited(contents) = &self.shape else {
                 unreachable!("only delimited newtypes take this migration path")
             };
-            let contents =
-                contents.migrate_from_cursor(quote!(__m2_syn_delimited_children), context)?;
+            let contents = contents.migrate_from_cursor(quote!(__m2_syn_delimited_children))?;
             return Ok(quote! {
                 let mut __m2_syn_delimited_children = ::m2_syn::ChildCursor::new(&node);
                 let __m2_syn_delimiter = __m2_syn_delimited_children.required_delimiter()?;
@@ -1533,27 +1058,13 @@ impl FieldDefinition {
             });
         }
         if let Shape::Delimited(contents) = &self.shape {
-            let (delimiter, cursor) = match &self.source {
-                FieldSource::Named(field) => (
-                    quote! {
-                        let __m2_syn_delimited_node = children.required_field(#field)?;
-                        let mut __m2_syn_delimited_children =
-                            ::m2_syn::ChildCursor::new(&__m2_syn_delimited_node);
-                        let __m2_syn_delimiter =
-                            __m2_syn_delimited_children.required_delimiter()?;
-                    },
-                    quote!(__m2_syn_delimited_children),
-                ),
-                FieldSource::Positional => (
-                    quote! {
-                        let __m2_syn_delimiter = children.required_delimiter()?;
-                    },
-                    quote!(children),
-                ),
-            };
-            let contents = contents.migrate_from_cursor(cursor, context)?;
+            let field = binding.to_string();
+            let contents = contents.migrate_from_cursor(quote!(__m2_syn_delimited_children))?;
             return Ok(quote! {
-                #delimiter
+                let __m2_syn_delimited_node = children.required_field(#field)?;
+                let mut __m2_syn_delimited_children =
+                    ::m2_syn::ChildCursor::new(&__m2_syn_delimited_node);
+                let __m2_syn_delimiter = __m2_syn_delimited_children.required_delimiter()?;
                 let __m2_syn_contents = #contents;
                 let #binding = ::m2_syn::Delimited::new(
                     __m2_syn_delimiter,
@@ -1563,24 +1074,15 @@ impl FieldDefinition {
         }
         let element = self.shape.element()?;
         let base_type = element.ty();
-        let selected = match (&self.source, &self.shape) {
-            (FieldSource::Named(field), Shape::Base(_, _) | Shape::Boxed(_)) => {
-                quote!(children.required_field(#field)?)
-            }
-            (FieldSource::Named(field), Shape::Optional(inner)) if !inner.is_sequence() => {
+        let field = binding.to_string();
+        let selected = match &self.shape {
+            Shape::Base(_, _) | Shape::Boxed(_) => quote!(children.required_field(#field)?),
+            Shape::Optional(inner) if !inner.is_sequence() => {
                 quote!(children.optional_field(#field))
             }
-            (FieldSource::Named(field), _) => quote!(children.repeated_field(#field)),
-            (FieldSource::Positional, Shape::Base(_, _) | Shape::Boxed(_)) => {
-                quote!(children.required_matching::<#base_type>()?)
-            }
-            (FieldSource::Positional, Shape::Optional(inner)) if !inner.is_sequence() => {
-                quote!(children.optional_matching::<#base_type>())
-            }
-            (FieldSource::Positional, _) => quote!(children.repeated_matching::<#base_type>()),
+            _ => quote!(children.repeated_field(#field)),
         };
-        let stored_shape = self.shape.stored_shape(context, false);
-        let stored_element = stored_shape.storage_element();
+        let stored_element = self.shape.storage_element();
         if matches!(self.shape, Shape::Base(_, _) | Shape::Boxed(_)) {
             let value = stored_element.wrap_value(quote!(
                 <#base_type as ::m2_syn::Migrate<N>>::migrate(#selected)?
@@ -1629,58 +1131,43 @@ impl FieldDefinition {
     }
 
     /// Whether this field's token hugs whatever precedes it instead of being
-    /// spaced away from it, which is what `;`, `,`, and zero-width end-of-cell
-    /// markers do.
-    fn is_attached(&self, context: &SyntaxContext<'_>) -> bool {
-        matches!(
-            self.shape.base_ident().to_string().as_str(),
-            "Adj" | "EOC" | "BOF" | "EOF"
-        ) || context
-            .tokens()
-            .spelling(self.shape.base_ident())
-            .is_some_and(|spelling| matches!(spelling, ";" | ","))
+    /// spaced away from it, which is what `;`, `,`, zero-width end-of-cell
+    /// markers, and the usually implied `SPACE` do.
+    fn is_attached(&self) -> bool {
+        [
+            quote!(;),
+            quote!(,),
+            quote!(SPACE),
+            quote!(EOC),
+            quote!(BOF),
+            quote!(EOF),
+        ]
+        .iter()
+        .any(|spelling| {
+            token_type_name(spelling).is_ok_and(|name| name == *self.shape.base_ident())
+        })
     }
 
-    fn to_tokens(
-        &self,
-        field_separator: &'static str,
-        context: &SyntaxContext<'_>,
-    ) -> Result<TokenStream> {
-        let member = &self.member;
+    fn to_tokens(&self, field_separator: &'static str) -> Result<TokenStream> {
+        let member = &self.name;
         self.shape.element()?;
-        let write = if let Shape::Repeated(_, separator) = self.shape {
+        let write = if let Shape::Repeated(_) = self.shape {
             // `Option` and `Punctuated` carry their own `Lex` impls; a bare
-            // `Vec` is the only functor that has to interleave separators here.
-            let separator = if field_separator.is_empty() && separator == " " {
-                ""
-            } else {
-                separator
-            };
-            if separator.is_empty() {
+            // `Vec` is the only functor that has to space its elements here.
+            if field_separator.is_empty() {
                 quote! {
                     for value in &self.#member {
                         ::m2_syn::Lex::to_tokens(value, &mut field_output);
                     }
                 }
             } else {
-                let push_separator = push_source_separator(&quote!(field_output), separator);
-                if separator == "\n" {
-                    quote! {
-                        for (index, value) in self.#member.iter().enumerate() {
-                            if index != 0 && !field_output.ends_with_whitespace() {
-                                #push_separator
-                            }
-                            ::m2_syn::Lex::to_tokens(value, &mut field_output);
+                let push_separator = push_source_separator(&quote!(field_output), " ");
+                quote! {
+                    for (index, value) in self.#member.iter().enumerate() {
+                        if index != 0 {
+                            #push_separator
                         }
-                    }
-                } else {
-                    quote! {
-                        for (index, value) in self.#member.iter().enumerate() {
-                            if index != 0 {
-                                #push_separator
-                            }
-                            ::m2_syn::Lex::to_tokens(value, &mut field_output);
-                        }
+                        ::m2_syn::Lex::to_tokens(value, &mut field_output);
                     }
                 }
             }
@@ -1688,7 +1175,7 @@ impl FieldDefinition {
             quote! { ::m2_syn::Lex::to_tokens(&self.#member, &mut field_output); }
         };
         let separator =
-            (!self.is_attached(context) && !field_separator.is_empty()).then_some(field_separator);
+            (!self.is_attached() && !field_separator.is_empty()).then_some(field_separator);
         let separate = separator.map(|separator| {
             let push_separator = push_source_separator(&quote!(contents), separator);
             if separator == " " {
@@ -1723,7 +1210,7 @@ impl FieldDefinition {
 
 fn push_source_separator(output: &TokenStream, separator: &str) -> TokenStream {
     match separator {
-        "" | " " | "\n" => quote! {},
+        "" | " " => quote! {},
         ", " => quote! {
             #output.extend([::m2_syn::Punct::new(
                 ",",
@@ -1735,105 +1222,6 @@ fn push_source_separator(output: &TokenStream, separator: &str) -> TokenStream {
 }
 
 impl Shape {
-    fn stored_type(&self, context: &SyntaxContext<'_>, indirect: bool) -> TokenStream {
-        self.stored_shape(context, indirect).ty()
-    }
-
-    fn stored_shape(&self, context: &SyntaxContext<'_>, indirect: bool) -> Shape {
-        match self {
-            // Already indirect, so its element needs no box of its own.
-            Self::Boxed(inner) => Shape::Boxed(Box::new(inner.stored_shape(context, true))),
-            Self::Base(path, ident) => {
-                let base = Shape::Base(path.clone(), ident.clone());
-                if !indirect && context.is_boxed(ident) {
-                    Shape::Boxed(Box::new(base))
-                } else {
-                    base
-                }
-            }
-            Self::Delimited(inner) => {
-                Shape::Delimited(Box::new(inner.stored_shape(context, indirect)))
-            }
-            Self::Optional(inner) => {
-                Shape::Optional(Box::new(inner.stored_shape(context, indirect)))
-            }
-            Self::Repeated(inner, separator) => {
-                Shape::Repeated(Box::new(inner.stored_shape(context, true)), separator)
-            }
-            Self::Punctuated(inner) => {
-                // The mandatory first element is stored inline. Unlike `Vec`,
-                // `Punctuated` therefore does not itself break recursive type
-                // cycles; only an already-indirect outer context may do that.
-                Shape::Punctuated(Box::new(inner.stored_shape(context, indirect)))
-            }
-        }
-    }
-
-    fn convert_value(&self, stored: &Shape, value: TokenStream) -> TokenStream {
-        if self.conversion_is_identity(stored) {
-            return value;
-        }
-        match (self, stored) {
-            (Self::Base(_, _), Shape::Boxed(inner))
-                if matches!(inner.as_ref(), Shape::Base(_, _)) =>
-            {
-                quote!(<qf!(Box<_>)>::new(#value))
-            }
-            (Self::Optional(source), Shape::Optional(target)) => {
-                if matches!(
-                    (source.as_ref(), target.as_ref()),
-                    (
-                        Self::Base(_, _),
-                        Shape::Boxed(inner)
-                    ) if matches!(inner.as_ref(), Shape::Base(_, _))
-                ) {
-                    quote!(#value.map(<qf!(Box<_>)>::new))
-                } else {
-                    let converted = source.convert_value(target, quote!(value));
-                    quote!(#value.map(|value| #converted))
-                }
-            }
-            (Self::Delimited(source), Shape::Delimited(target)) => {
-                let converted = source.convert_value(target, quote!(contents));
-                quote!({
-                    let ::m2_syn::Delimited { delimiter, contents } = #value;
-                    ::m2_syn::Delimited::new(delimiter, #converted)
-                })
-            }
-            (Self::Repeated(source, _), Shape::Repeated(target, _)) => {
-                let converted = source.convert_value(target, quote!(value));
-                quote!({
-                    let values = #value;
-                    let mut converted_values = <qf!(Vec<_>)>::with_capacity(values.len());
-                    for value in values {
-                        converted_values.push(#converted);
-                    }
-                    converted_values
-                })
-            }
-            (Self::Punctuated(source), Shape::Punctuated(target)) => {
-                let converted = source.convert_value(target, quote!(value));
-                quote!({
-                    #value.map_values(|value| #converted)
-                })
-            }
-            _ => quote!(#value),
-        }
-    }
-
-    fn conversion_is_identity(&self, stored: &Shape) -> bool {
-        match (self, stored) {
-            (Self::Base(_, _), Shape::Base(_, _)) => true,
-            (Self::Optional(source), Shape::Optional(target))
-            | (Self::Delimited(source), Shape::Delimited(target))
-            | (Self::Repeated(source, _), Shape::Repeated(target, _))
-            | (Self::Punctuated(source), Shape::Punctuated(target)) => {
-                source.conversion_is_identity(target)
-            }
-            _ => false,
-        }
-    }
-
     /// The syntax element held by this field's functor stack.
     fn element(&self) -> Result<&Self> {
         match self {
@@ -1841,14 +1229,14 @@ impl Shape {
             Self::Boxed(inner)
             | Self::Delimited(inner)
             | Self::Optional(inner)
-            | Self::Repeated(inner, _)
+            | Self::Repeated(inner)
             | Self::Punctuated(inner) => inner.element(),
         }
     }
 
     fn is_sequence(&self) -> bool {
         match self {
-            Self::Repeated(_, _) | Self::Punctuated(_) => true,
+            Self::Repeated(_) | Self::Punctuated(_) => true,
             Self::Boxed(inner) | Self::Optional(inner) => inner.is_sequence(),
             Self::Delimited(_) => false,
             Self::Base(_, _) => false,
@@ -1858,7 +1246,7 @@ impl Shape {
     fn storage_element(&self) -> &Self {
         match self {
             Self::Optional(inner)
-            | Self::Repeated(inner, _)
+            | Self::Repeated(inner)
             | Self::Punctuated(inner)
             | Self::Delimited(inner) => inner.storage_element(),
             Self::Base(_, _) | Self::Boxed(_) => self,
@@ -1867,15 +1255,11 @@ impl Shape {
 }
 
 impl Shape {
-    fn migrate_from_cursor(
-        &self,
-        cursor: TokenStream,
-        context: &SyntaxContext<'_>,
-    ) -> Result<TokenStream> {
+    fn migrate_from_cursor(&self, cursor: TokenStream) -> Result<TokenStream> {
         match self {
             Self::Base(_, _) => {
                 let ty = self.ty();
-                let stored = self.stored_shape(context, false);
+                let stored = self.clone();
                 let value = stored.wrap_value(quote!(
                     <#ty as ::m2_syn::Migrate<N>>::migrate(
                         #cursor.required_matching::<#ty>()?
@@ -1884,12 +1268,12 @@ impl Shape {
                 Ok(value)
             }
             Self::Boxed(inner) => {
-                let value = inner.migrate_from_cursor(cursor, context)?;
+                let value = inner.migrate_from_cursor(cursor)?;
                 Ok(quote!(<qf!(Box<_>)>::new(#value)))
             }
             Self::Optional(inner) if matches!(inner.as_ref(), Self::Base(_, _)) => {
                 let ty = inner.ty();
-                let stored = inner.stored_shape(context, false);
+                let stored = inner.clone();
                 let value = stored.wrap_value(quote!(value));
                 Ok(quote!(
                     #cursor.optional_matching::<#ty>()
@@ -1900,9 +1284,9 @@ impl Shape {
                         .transpose()?
                 ))
             }
-            Self::Repeated(inner, _) if matches!(inner.as_ref(), Self::Base(_, _)) => {
+            Self::Repeated(inner) if matches!(inner.as_ref(), Self::Base(_, _)) => {
                 let ty = inner.ty();
-                let stored = inner.stored_shape(context, true);
+                let stored = inner.clone();
                 let value = stored.wrap_value(quote!(value));
                 Ok(quote!(
                     #cursor.repeated_matching::<#ty>()
@@ -1916,7 +1300,7 @@ impl Shape {
             }
             Self::Punctuated(inner) if matches!(inner.as_ref(), Self::Base(_, _)) => {
                 let ty = inner.ty();
-                let stored = inner.stored_shape(context, false);
+                let stored = inner.clone();
                 let first = stored.wrap_value(quote!(
                     <#ty as ::m2_syn::Migrate<N>>::migrate(__m2_syn_first)?
                 ));
@@ -1941,7 +1325,7 @@ impl Shape {
                     ));
                 };
                 let ty = element.ty();
-                let stored = element.stored_shape(context, false);
+                let stored = element.clone();
                 let first = stored.wrap_value(quote!(
                     <#ty as ::m2_syn::Migrate<N>>::migrate(__m2_syn_first)?
                 ));
@@ -1979,7 +1363,7 @@ impl Shape {
                 let inner = inner.ty();
                 quote!(qf!(Option<#inner>))
             }
-            Self::Repeated(inner, _) => {
+            Self::Repeated(inner) => {
                 let inner = inner.ty();
                 quote!(qf!(Vec<#inner>))
             }
@@ -1999,18 +1383,17 @@ impl Shape {
             Self::Base(_, _)
             | Self::Delimited(_)
             | Self::Optional(_)
-            | Self::Repeated(_, _)
+            | Self::Repeated(_)
             | Self::Punctuated(_) => value,
         }
     }
 }
 
-fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> TokenStream {
-    let tokens = context.tokens();
+fn expand_enum(definition: &EnumDefinition) -> TokenStream {
     let name = &definition.name;
     let variants = definition.variants.iter().map(|variant| {
         let name = &variant.name;
-        let ty = variant.shape.stored_type(context, false);
+        let ty = variant.shape.ty();
         let doc = format!("The `{name}` syntax alternative.");
         quote! {
             #[doc = #doc]
@@ -2041,7 +1424,7 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
             .element()
             .expect("syntax enum variants always contain one element")
             .ty();
-        let stored = variant.shape.stored_shape(context, false);
+        let stored = variant.shape.clone();
         let value = stored.wrap_value(quote!(
             <#base as ::m2_syn::Migrate<N>>::migrate(node)?
         ));
@@ -2080,40 +1463,24 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
     let spelling_api = definition.operator.map(|_| {
         let from_token_arms = definition.variants.iter().map(|variant| {
             let variant_name = &variant.name;
-            let ty = variant.shape.stored_type(context, false);
+            let ty = variant.shape.ty();
             quote! {
                 if <#ty as ::m2_syn::Token>::matches_token_tree(&token) {
                     return Some(Self::#variant_name(
-                        <#ty as ::m2_syn::Token>::from_token_tree_with_trivia(
-                            token,
-                            trailing_trivia,
-                        )?
+                        <#ty as ::m2_syn::Token>::from_token_tree(token)?
                     ));
                 }
             }
         });
         let spelling_arms = definition.variants.iter().map(|variant| {
             let variant_name = &variant.name;
-            let spelling = tokens
-                .spelling(variant.shape.base_ident())
-                .expect("operator variants are generated from tokens");
-            quote!(Self::#variant_name(_) => #spelling)
+            let ty = variant.shape.ty();
+            quote!(Self::#variant_name(_) => <#ty as ::m2_syn::Token>::SPELLING)
         });
         quote! {
             impl #name {
                 /// Converts a matching raw operator token into this category.
                 pub fn from_token_tree(token: ::m2_syn::TokenTree) -> qf!(Option<Self>) {
-                    Self::from_token_tree_with_trivia(
-                        token,
-                        ::m2_syn::TrailingTrivia::default(),
-                    )
-                }
-
-                /// Converts a matching raw operator and its following trivia into this category.
-                pub fn from_token_tree_with_trivia(
-                    token: ::m2_syn::TokenTree,
-                    trailing_trivia: ::m2_syn::TrailingTrivia,
-                ) -> qf!(Option<Self>) {
                     #(#from_token_arms)*
                     None
                 }
@@ -2128,7 +1495,7 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
             }
         }
     });
-    let declaration = (!definition.explicit).then(|| {
+    let declaration = definition.operator.map(|_| {
         quote! {
             #[derive(::m2_syn::__SyntaxWalk)]
             #[derive(Debug, ::m2_syn::Spanned)]
@@ -2138,8 +1505,10 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
             }
         }
     });
+    let conversions = expand_conversions(definition);
     quote! {
         #declaration
+        #conversions
 
         impl ::m2_syn::Lex for #name {
             fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
@@ -2170,6 +1539,41 @@ fn expand_enum(definition: &EnumDefinition, context: &SyntaxContext<'_>) -> Toke
     }
 }
 
+/// `From` each variant payload that no other variant shares, wrapping it in
+/// the variant's box when it has one.
+fn expand_conversions(definition: &EnumDefinition) -> TokenStream {
+    let name = &definition.name;
+    let payload = |variant: &VariantDefinition| match &variant.shape {
+        Shape::Base(ty, _) => Some((ty.clone(), quote!(value))),
+        Shape::Boxed(inner) => Some((inner.ty(), quote!(<qf!(Box<_>)>::new(value)))),
+        _ => None,
+    };
+    let payloads = definition
+        .variants
+        .iter()
+        .filter_map(payload)
+        .collect::<Vec<_>>();
+    let unique = |ty: &TokenStream| {
+        payloads
+            .iter()
+            .filter(|(other, _)| other.to_string() == ty.to_string())
+            .count()
+            == 1
+    };
+    let impls = definition.variants.iter().filter_map(|variant| {
+        let (ty, value) = payload(variant).filter(|(ty, _)| unique(ty))?;
+        let variant = &variant.name;
+        Some(quote! {
+            impl From<#ty> for #name {
+                fn from(value: #ty) -> Self {
+                    Self::#variant(#value)
+                }
+            }
+        })
+    });
+    quote!(#(#impls)*)
+}
+
 pub(crate) fn to_snake_case(name: &str) -> String {
     let characters = name.chars().collect::<Vec<_>>();
     let mut result = String::new();
@@ -2186,79 +1590,4 @@ pub(crate) fn to_snake_case(name: &str) -> String {
         result.extend(character.to_lowercase());
     }
     result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use quote::quote;
-    use syn::parse2;
-
-    #[test]
-    fn tokens_feed_one_lookup_macro_and_operator_enums() {
-        let syntax: Syntax = parse2(quote! {
-            tokens {
-                [=] { infix } (14, R)
-                [+] { pref, bin, aug } (50, L)
-                [!] { post } (72)
-                [if] (62, 12)
-                [,]
-            }
-
-            struct Leaf;
-            struct UsesOperators {
-                prefix: PrefixOperator,
-                binary: BinaryOperator,
-                postfix: PostfixOperator,
-                augmented: AugmentedOperator,
-            }
-        })
-        .unwrap();
-        let expansion = syntax.expand().unwrap();
-        parse2::<syn::File>(expansion.clone()).unwrap();
-        let expansion = expansion.to_string();
-
-        // The expansion is items only: `Token!` and `Delimiter!` are written
-        // by hand in `m2-syn/src/schema/macros.rs`, and every other lookup is a plain
-        // function so that rust-analyzer can resolve the call sites.
-        assert_eq!(expansion.matches("macro_rules !").count(), 0);
-        assert_eq!(expansion.matches("TOKEN_PARSE_RULES").count(), 1);
-        assert!(expansion.contains("TokenParseRule :: PrefixBinary"));
-        assert!(expansion.contains("TokenParseRule :: Postfix"));
-        assert!(expansion.contains("pub mod visit"));
-        assert!(expansion.contains("pub mod visit_mut"));
-        assert!(expansion.contains("pub mod fold"));
-        assert!(expansion.contains("PrettyTree"));
-        assert!(expansion.contains("enum PrefixOperator"));
-        assert!(expansion.contains("enum BinaryOperator"));
-        assert!(expansion.contains("enum PostfixOperator"));
-        assert!(expansion.contains("enum AugmentedOperator"));
-        assert!(expansion.contains("AddEql"));
-        assert!(expansion.contains("_If"));
-        assert!(expansion.contains("Cma"));
-    }
-
-    #[test]
-    fn explicit_nodes_expand_after_the_shared_traversal_modules() {
-        let syntax: Syntax = parse2(quote! {
-            tokens { [,] }
-
-            strutuct! {
-                Example
-                child: Token![,],
-            }
-        })
-        .unwrap();
-        let expansion = syntax.expand().unwrap().to_string();
-        let visit = expansion.find("pub mod visit").unwrap();
-        let declaration = expansion
-            .find("these_macros_should_be_illegal :: strutuct !")
-            .unwrap();
-
-        assert!(expansion.contains("pub trait Visit < 'ast >"));
-        assert!(expansion.contains("__syntax_walk_function ! (visit , Example , Example)"));
-        assert!(expansion.contains("derive (:: m2_syn :: __SyntaxWalk)"));
-        assert!(!expansion.contains("VisitValue :: visit_value (& self . child"));
-        assert!(visit < declaration);
-    }
 }

@@ -21,9 +21,9 @@ use std::fmt;
 use std::ops::Range;
 
 use m2_syn::nodes::{
-    AngleBarList, Array, Cell, ExprAssignSimpleGlobal, ExprAssignSimpleLocal, ExprIf,
-    ExprOpBinRegular, ExprOpPrefix, FloatLiteral, Holder, IntegerLiteral, List, PackedContent,
-    RawStringLiteral, Sequence, StringLiteral, Symbol,
+    AssignOperator, Cell, Elements, Expr, ExprAngleBar, ExprArray, ExprAssign, ExprBinary, ExprIf,
+    ExprList, ExprParen, ExprPrefix, ExprSequence, FloatLiteral, IntegerLiteral, RawStringLiteral,
+    StringLiteral, Symbol,
 };
 use m2_syn::visit::{self, Visit};
 use m2_syn::{Lex, Offset, ParseError, Spanned, parse_file};
@@ -172,51 +172,54 @@ impl<'ast> Visit<'ast> for TypeInference {
         }
     }
 
-    fn visit_sequence(&mut self, node: &'ast Sequence) {
-        visit::visit_sequence(self, node);
+    fn visit_expr_sequence(&mut self, node: &'ast ExprSequence) {
+        visit::visit_expr_sequence(self, node);
         self.record(node, M2Class::Sequence);
     }
 
-    fn visit_list(&mut self, node: &'ast List) {
-        visit::visit_list(self, node);
+    fn visit_expr_list(&mut self, node: &'ast ExprList) {
+        visit::visit_expr_list(self, node);
         self.record(node, M2Class::List);
     }
 
-    fn visit_array(&mut self, node: &'ast Array) {
-        visit::visit_array(self, node);
+    fn visit_expr_array(&mut self, node: &'ast ExprArray) {
+        visit::visit_expr_array(self, node);
         self.record(node, M2Class::Array);
     }
 
-    fn visit_angle_bar_list(&mut self, node: &'ast AngleBarList) {
-        visit::visit_angle_bar_list(self, node);
+    fn visit_expr_angle_bar(&mut self, node: &'ast ExprAngleBar) {
+        visit::visit_expr_angle_bar(self, node);
         self.record(node, M2Class::AngleBarList);
     }
 
-    fn visit_holder(&mut self, node: &'ast Holder) {
-        visit::visit_holder(self, node);
-        let held = match &node.value {
+    fn visit_expr_paren(&mut self, node: &'ast ExprParen) {
+        visit::visit_expr_paren(self, node);
+        let held = match &node.expr {
             Some(value) => self.inferred(value.as_ref()),
             // `()` is the empty sequence, while `(f x;)` discards its value.
-            None if node.muted.is_empty() => M2Class::Sequence,
+            None if node.stmts.is_empty() => M2Class::Sequence,
             None => M2Class::Nothing,
         };
         self.record(node, held);
     }
 
-    fn visit_expr_assign_simple_global(&mut self, node: &'ast ExprAssignSimpleGlobal) {
-        visit::visit_expr_assign_simple_global(self, node);
-        self.record(node, self.inferred(node.value.as_ref()));
+    fn visit_expr_assign(&mut self, node: &'ast ExprAssign) {
+        visit::visit_expr_assign(self, node);
+        // Assigning to a symbol evaluates to the assigned value.
+        let assigns_symbol = matches!(node.left.as_ref(), Expr::Symbol(_))
+            && matches!(
+                node.op,
+                AssignOperator::Global(_) | AssignOperator::Local(_)
+            );
+        if assigns_symbol {
+            self.record(node, self.inferred(node.right.as_ref()));
+        }
     }
 
-    fn visit_expr_assign_simple_local(&mut self, node: &'ast ExprAssignSimpleLocal) {
-        visit::visit_expr_assign_simple_local(self, node);
-        self.record(node, self.inferred(node.value.as_ref()));
-    }
-
-    fn visit_expr_op_prefix(&mut self, node: &'ast ExprOpPrefix) {
-        visit::visit_expr_op_prefix(self, node);
-        let operand = self.inferred(node.operand.as_ref());
-        let result = match node.operator.spelling() {
+    fn visit_expr_prefix(&mut self, node: &'ast ExprPrefix) {
+        visit::visit_expr_prefix(self, node);
+        let operand = self.inferred(node.expr.as_ref());
+        let result = match node.op.spelling() {
             "not" => M2Class::Boolean,
             "+" | "-" => operand,
             _ => M2Class::Thing,
@@ -224,11 +227,11 @@ impl<'ast> Visit<'ast> for TypeInference {
         self.record(node, result);
     }
 
-    fn visit_expr_op_bin_regular(&mut self, node: &'ast ExprOpBinRegular) {
-        visit::visit_expr_op_bin_regular(self, node);
-        let left = self.inferred(node.left_operand.as_ref());
-        let right = self.inferred(node.right_operand.as_ref());
-        let result = match node.operator.spelling() {
+    fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {
+        visit::visit_expr_binary(self, node);
+        let left = self.inferred(node.left.as_ref());
+        let right = self.inferred(node.right.as_ref());
+        let result = match node.op.spelling() {
             "==" | "!=" | "===" | "=!=" | "<" | "<=" | ">" | ">=" | "and" | "or" | "xor" => {
                 M2Class::Boolean
             }
@@ -257,13 +260,13 @@ impl<'ast> Visit<'ast> for TypeInference {
 
     fn visit_cell(&mut self, node: &'ast Cell) {
         visit::visit_cell(self, node);
-        let value = if node.semicolon.is_some() {
+        let value = if node.semi_token.is_some() {
             // A trailing `;` suppresses the cell's value.
             M2Class::Nothing
         } else {
-            match &node.content {
-                PackedContent::Expr(expression) => self.inferred(expression.as_ref()),
-                PackedContent::Pack(_) => M2Class::Sequence,
+            match &node.elems {
+                Elements::Single(expression) => self.inferred(expression.as_ref()),
+                Elements::Pack(_) => M2Class::Sequence,
             }
         };
         self.record(node, value);

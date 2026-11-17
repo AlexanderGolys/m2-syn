@@ -4,11 +4,11 @@
 [![docs.rs](https://img.shields.io/docsrs/m2-syn)](https://docs.rs/m2-syn)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-`m2-syn` is a parser-independent typed syntax graph for Macaulay2. One
-`syntax!` declaration inventories the algebraic graph while its nested
-`strutuct!` declarations expand each node independently. Generated
-implementations provide construction, traversal, source provenance, and
-conversion from a concrete syntax tree.
+`m2-syn` is a parser-independent typed syntax graph for Macaulay2. Every
+syntax type is a plain Rust declaration with `#[derive(Syntax)]`, the operators and keywords
+come from one `tokens!` table, and a `traversal!` inventory of the type names
+generates the visitors. Generated implementations provide construction,
+traversal, source provenance, and conversion from a concrete syntax tree.
 
 The API is experimental and may change while the typed grammar and parser
 adapter interfaces are being established.
@@ -57,7 +57,7 @@ Longer term, `m2-syn` should support semantic and typechecking walks,
 incremental analysis after referenced code changes, selected node metadata,
 and procedural macros for M2. `Visit`, `VisitMut`, and `Fold` are intended as
 the basic traversal and transformation vocabulary for that work. The guiding
-design rule is to describe as little grammar as possible in `syntax!` and
+design rule is to describe as little grammar as possible in the schema and
 generate the repetitive construction, traversal, migration, and printing
 machinery.
 
@@ -127,111 +127,101 @@ The ownership boundaries are intentionally narrow:
 | `parser/native.rs` | precedence and typed-node construction |
 | `parser/realtime.rs` | retained native cells and forward reframing |
 | `migration/` | the external-CST migration adapter |
-| `schema/nodes.rs` | the compact grammar and token parser metadata declaration |
+| `schema/tokens.rs` | the token table: spellings, parser roles, and binding strengths |
+| `schema/nodes.rs` | one plain declaration per syntax type |
+| `schema/traversal.rs` | the inventory of types the visitors cover |
 | `m2-syn-macros/src/` | generation of tokens, nodes, traversal, parsing, and emission |
 
-```text
-syntax! {
-    // Structural precedences with no single owning token; every operator
-    // below carries its own precedence inline instead.
-    precedence: {
-        PREC_CONTROL = 12,
-    }
+```rust,ignore
+// src/schema/tokens.rs
+crate::tokens! {
+    [+] [-]     { bin, pref, aug } (50, L)
+    [=]         { infix }          (14, R)
+    [if]
+    [else] [then]                  (12)
+    [,]                            (10)
+}
 
-    tokens {
-        // L/R is the binary associativity. A third slot overrides the
-        // prefix strength when it differs from the precedence.
-        [+] { bin, pref, aug } (50, L)
-        [=] { infix }          (14, R)
-        [if] [then] [else]     (PREC_CONTROL)
-        [,]
-    }
+// src/schema/nodes.rs
+/// A binary operation: `a + b`, `x == y`, `L_0`.
+#[derive(Debug, Spanned, Syntax)]
+pub struct ExprBinary {
+    pub left: Box<Expr>,
+    pub op: BinaryOperator,
+    pub right: Box<Expr>,
+}
 
-    #[operator(prefix)]
-    enum PrefixOperator {}
-    #[operator(binary)]
-    enum BinaryOperator {}
-    #[operator(postfix)]
-    enum PostfixOperator {}
+/// A conditional: `if c then x else y`.
+#[derive(Debug, Spanned, Syntax)]
+pub struct ExprIf {
+    pub if_token: Token![if],
+    pub cond: Box<Expr>,
+    pub then_clause: ThenClause,
+    pub else_clause: Option<ElseClause>,
+}
 
-    struct Symbol;
-
-    struct BinaryExpression {
-        left: Expr,
-        operator: BinaryOperator,
-        right: Expr,
-    }
-
-    enum Expr {
-        BinaryExpression,
-        Symbol,
-    }
+// src/schema/traversal.rs
+crate::traversal! {
+    BinaryOperator, Expr, ExprBinary, ExprIf, ThenClause, ElseClause,
 }
 ```
 
-The canonical declaration lives in `src/schema/nodes.rs`. The outer `syntax!`
-pass reads the unexpanded declarations to build the shared method inventories,
-then re-emits every `strutuct!` invocation. Rust expands those invocations and
-their per-type child walkers separately. The documented `visit`, `visit_mut`,
-and `fold` modules are re-exported at the crate root without placing hundreds
-of free walker functions directly in the root namespace.
+Every type is declared exactly as it is stored, with every field and every
+name written out. `#[derive(Syntax)]` adds the constructor, printing,
+migration, pretty tree, and child walkers from the field types it reads; it
+never adds fields or names. The token table generates
+the token types and the four operator enums. The traversal inventory only
+lists names: it generates the `visit`, `visit_mut`, and `fold` modules, which
+are re-exported at the crate root, and a type left out of it fails to compile.
 
-`Token!` and `Delimiter!` are ordinary source in `src/schema/macros.rs` instead of
-part of that expansion. Neither depends on the schema: `Token!` forwards the
-spelling to the `token!` procedural macro, and the delimiter families are a
-fixed set.
+`Expr` is one flat enum whose variants hold `Expr<Kind>` structs such as
+`ExprBinary`, `ExprField`, and `ExprAssign`. Construct them directly and use
+`Expr::from(node)` to wrap them. No checked-in expansion output is required.
+
+`Token!` is ordinary source in `src/schema/macros.rs` instead of part of that
+expansion. It does not depend on the schema: it forwards the spelling to the
+`token!` procedural macro, which names a token or, for `()`, `[]`, `{}`, and
+`<||>`, a delimiter atom.
 
 ## Declaration model
 
 | Declaration | Syntax role | Generated shape |
 | --- | --- | --- |
-| `PREC_CONTROL = 12` | a structural precedence with no single owning token, consumed directly by the native parser | a crate-visible precedence constant |
 | `[+] { bin, pref, aug } (50, L)` | left-associative binary and prefix binding plus augmented-token generation | token types, parser metadata, and inferred operator-enum membership |
 | `[=] { infix } (14, R)` | right-associative syntax-specific infix binding without generic operator membership | a typed token and parser metadata |
-| `[else] (PREC_CONTROL)` | a keyword and both of its parser strengths | a typed keyword token and parser metadata |
-| `struct Name;` | named text leaf | `String` and `Span` |
-| `#[leaf(qualified)] struct Name;` | one identifier with optional qualification metadata | text plus optional package and decimal-index subspans |
-| `struct Name { left: Expr, ... }` | concrete product node | declared children |
-| `field: Nested { value: Expr }` or `field: Pair(Expr, Symbol)` | a field whose type is declared in place | a hoisted `Nested` or `Pair` declaration plus a field of that type |
-| `enum Name { Expr, ... }` | grouping category; each bare variant names the type it wraps, so the wrapped name doubles as the variant name | one declared alternative per variant |
-| `Variant(Expr, Symbol)` or `Variant { value: Expr }` | an enum alternative whose product type is declared in place | a hoisted product and one alternative wrapping it |
-| `struct Name* ...` or `enum Name* ...` | a declaration whose recursive references require indirection | `Box<Name>` at references to that type |
-| `Token![=]` | literal token field | the type selected by the generated `Token!` macro |
-| `X?`, `Vec<T>`, `Punctuated<T>`, `Delimited<T>` | optional, repeated, nonempty comma-punctuated, or arbitrarily delimited children | the corresponding public wrapper type |
-| `(_)` | a child without a Tree-sitter field name | positional migration from the next matching child |
-| `Lines<T>` | a `Vec<T>` printed one element per line | the separator travels with the functor |
-| `#[cst(kind = assignment)]` | a Rust name whose external CST node has another name | migration from the named CST kind |
-| `#[delimiter(parenthesis)]` | a product enclosed by a delimiter family | a concrete node with its typed delimiter atom |
-| `#[literal(string)]` | a product spelled as a string literal | emission as one literal token, with no delimiter atom |
+| `[else] (12)` | a keyword and its parser strength | a typed keyword token and parser metadata |
+| `["≠"] = [!=]` | another spelling of a declared token, as M2's `findSynonyms` lists them | no new type: `Token![!=]` also matches and keeps `≠` |
+| `[EOF] { marker }` | a position that is never written; its spelling stays an ordinary name in source | a typed zero-width token that emits nothing |
+| `struct Name { left: Box<Expr>, ... }` | concrete product node | declared children |
+| `enum Name { Variant(Box<Expr>), ... }` | a sum of alternatives | one variant per payload, with `From` for each payload no other variant shares |
+| `Token![=]` | literal token field | the type selected by the `Token!` macro |
+| `Box<T>`, `Option<T>`, `Vec<T>`, `Punctuated<T>`, `Delimited<T>` | boxed, optional, repeated, nonempty comma-punctuated, or arbitrarily delimited children | the corresponding public wrapper type |
+| `delimiter: Token![()]` | a product enclosed by a delimiter family | the typed delimiter pair, printed around the other fields |
+| `#[syntax(leaf = text)]` with a `span` field | a terminal retaining its text | text and span; `symbol`, `integer`, `float`, and `empty` select other terminals |
+| `#[syntax(literal = string)]` with a `span` field | a product spelled as a string literal | emission as one literal token, with no delimiter atom |
+| `#[syntax(cst = assignment)]` | a Rust name whose external CST node has another name | migration from the named CST kind |
 
-Every token is declared in `tokens { ... }`; adjacent spellings share the
+Every token is declared in `tokens!`; adjacent spellings share the
 metadata written on their right. A binary role writes `L` or `R`, while a
 literal strength remains available for a non-associative rule. A prefix role
 binds at the token's precedence unless a third slot overrides it, and `post`
-writes no strength at all. The separate `precedence` stage
-only holds names for structural precedences with no single owning operator
-token (delimiter/control-clause stoppers the native parser references
-directly); it is not a shared table operators look their numbers up in, so a
-level used by exactly one token is just written as a literal there and
-nowhere else. The `aug` tag generates the corresponding assignment
+writes no strength at all. The `aug` tag generates the corresponding assignment
 token, which binds exactly like the `=` it abbreviates and so takes its rule
 from that declaration.
 
-Boxing is explicit rather than inferred: put `*` after a declaration name when
-references to that type must be stored through `Box`. Only recursive cycles
-need it; ordinary fields, token types, and nonrecursive categories stay inline.
-Constructors still accept the types written in the declaration and hide the
-storage conversion. Generated signatures consistently refer to literal token
+Boxing is explicit rather than inferred: a `*` after a field type stores it
+through `Box`. Only recursive cycles need it; ordinary fields, token types,
+and nonrecursive categories stay inline. Generated signatures consistently refer to literal token
 types through `Token![...]`; their concrete Rust names are an implementation
 detail of the expansion.
 
 Generated concrete syntax nodes and literal-token structs live under
-`m2_syn::nodes`. Construction and type macros such as `Token!`, `Delimiter!`,
-`paren!`, and `punct!` remain available from the crate root, as do generic
+`m2_syn::nodes`. Construction and type macros such as `Token!`, `paren!`, and
+`punct!` remain available from the crate root, as do generic
 containers such as `Delimited` and `Punctuated`.
 
 `Delimited<T>` retains an arbitrary one of the four paired delimiter families;
-`Delimited<T, Delimiter![()]>` and the other concrete delimiter atoms refine
+`Delimited<T, Token![()]>` and the other concrete delimiter atoms refine
 the family statically. Every delimiter is spelled in source, so both boundary
 spans are read rather than inferred. The convenient type macros construct the
 statically refined forms:
@@ -256,14 +246,8 @@ typed comma and its span. Absence belongs outside it as
 delimiter atom and each wrapper type implements both `Parse` and `Lex`, so they
 can be direct `parse_quote_m2!` targets.
 
-A field normally uses its Rust name as its CST field name. Mark it `(_)`
-when it should consume the next matching unlabelled child instead. The
-schema deliberately permits only named struct fields and bare-type enum
-variants — a variant never spells out a separate name, since it's always
-either the wrapped type's own name or, for a variant wrapping a token, that
-token's capitalized name — keeping both the declaration and generated API
-shaped like ordinary Rust rather than requiring the same fact to be written
-twice.
+A field uses its Rust name as its CST field name, and every variant is named
+in the declaration, so the generated API reads like the declaration itself.
 
 ## Generated implementations
 
@@ -277,12 +261,14 @@ grammar-backed enums themselves; there is no parallel global node-kind enum.
 | token | `Token`, constructor, migration, and a `Token![spelling]` arm |
 | text leaf | text-plus-span constructor and exact CST migration |
 | product struct | concrete-node matching, storage-aware constructor, child migration, and default child walkers |
-| coproduct enum | category matching, alternative migration, default dispatch, and unambiguous direct/transitive `From` conversions |
+| coproduct enum | category matching, alternative migration, default dispatch, and `From` for each unshared payload |
 
 The traversal traits have ordinary, independently addressable modules:
 `visit::Visit`, `visit_mut::VisitMut`, and `fold::Fold`. Their node-specific
-method inventories and free default walkers are generated from the syntax
-declaration, so adding a node cannot leave one traversal API incomplete. An
+method inventories and free default walkers are generated from the inventory
+in `src/schema/traversal.rs`, so adding a node cannot leave one traversal API
+incomplete. Tokens have no methods of their own: `Visit::visit_terminal` sees
+every token, leaf, and literal as a `&dyn Spanned`. An
 override can inspect a node and call its module's free walker to continue into
 its children. `VisitMut` edits the owned typed graph in place. `Fold` consumes
 nodes and returns the migrated graph.
@@ -337,43 +323,57 @@ incremental dependency identity belongs in the semantic layer.
 
 `lex` is the first native-parser layer. It accepts any byte iterator and
 returns the same source-spanned `TokenStream` used by quoting and emission. The only raw token categories
-are `Group`, `Ident`, `Literal`, and `Punct`; comments are retained as trivia
-beside those atoms, while ordinary layout remains recoverable from source
-spans. The lexer does not synthesize typed nodes, adjacency, or cells. After
+are `Group`, `Ident`, `Literal`, and `Punct`. Comments are not tokens and are
+stored nowhere in the stream: like ordinary layout, they are recovered from
+source spans. The lexer does not synthesize typed nodes, adjacency, or cells. After
 greedy token recognition, structural delimiter pairs become recursive `Group`
 trees that retain exact opening and closing spans.
 
 Generated `Token![..]` values are checked typed refinements of these raw atoms,
 not a sixth `TokenTree` variant. A punctuation atom retains its raw `Punct`, and
-a keyword retains its raw `Ident`. Adjacency is different: it is a parser-owned
-empty `Adj` node placed at the right operand's boundary. It is independent of
-physical whitespace (`f(x)` and `f (x)` have the same operator), remains absent
-from `return 1`, and emits no token. The lexer applies context-free maximal
+a keyword retains its raw `Ident`. Adjacency is the binary operator `SPACE`,
+`Token![SPACE]`, also named `Token![]`, so `f x` is an `ExprBinary`. Written out, as in `f SPACE x` or
+`f Core$SPACE x`, it retains its `Ident`; implied, as in `f x`, it is an empty
+atom at the right operand's boundary that emits nothing. It is independent of
+physical whitespace (`f(x)` and `f (x)` have the same operator), and absent
+from `return 1`. The lexer applies context-free maximal
 munch across generated operators, delimiters, and comment openers.
 Consequently `|--1` begins with the `|-` operator rather than a comment, while
 a token beginning with `--` is a line comment. Likewise, `(*)` remains the
 single greedy operator rather than a parenthesized group. Quotation marks are
 part of a single literal token, not delimiter groups.
 
-Consecutive `--` comments occupying complete physical lines coalesce into one
-outer comment block. Every comment is stored where it occurs: before a cell's
-first token it lives in that cell's `leading_trivia`, after an opening
-delimiter in the delimiter's opening trivia, and anywhere else in the trailing
-trivia of the token it follows, so comments after the last token belong to the
-last cell. A file without cells keeps its comments in its own
-`leading_trivia`. `Cell::comments` collects a cell's comments on demand: the
-complete-line `--` block before its first token is the outer documentation
-comment, and every other comment is inner. Token leaves never become the
-accidental owners of cell documentation.
+The lexer records where every comment lies in the `Source`, which keeps the
+index next to its text (a source built some other way indexes itself on first
+use). Any span then answers which comments are next to it: a comment starting
+on the line where an atom ends follows that atom (`Span::comments_after`), and
+every other comment precedes the next atom (`Span::comments_before`).
+
+```text
+x = 1 -- after `1`
+-- before `y`
+y = 2
+```
+
+`Lex::comments` collects the comments of any syntax on demand. Consecutive
+complete-line `--` comments right above its first token coalesce into outer
+documentation blocks; every other comment above it, within it, or after it on
+its last line is inner. A comment on its own line below the last cell belongs
+to no cell, only to `SourceFile::comments`.
 
 `$` remains an identifier-continuation character. `Package$name$12` is one
-`IdentToken` with one overall span; the typed `Symbol` additionally records
-`package_qualifier = Package` and `index_qualifier = 12` as optional subspans.
+`IdentToken` with one overall span, which additionally records
+`package_qualifier = Package` and `index_qualifier = 12` as optional subspans;
+the typed `Symbol` wraps that token.
 Only `package$name`, `name$decimal`, and their combined form are marked, so the
 representation permits at most one qualifier of each kind. This is metadata,
-not grammar-level tokenization. Exact `Core$word` spellings are a separate
-hardcoded renaming hook for declared word tokens: `Core$not` behaves as `not`,
-while `Core$Core$not` remains an ordinary symbol.
+not grammar-level tokenization. Exact `Core$word` spellings of declared word
+tokens behave as the word wherever M2 acts on the word itself: `Core$not` is
+`not` and `Core$if x then y` is an `if`, while `Core$Core$not` remains an
+ordinary symbol. A word that only continues a construct (`then`, `else`, `do`,
+`list`, `from`, `to`, `in`, `when`, `of`, `except`) is matched by its exact
+spelling, so its alias is a syntax error everywhere, as in M2: `if x Core$then y`
+and even `x = Core$then` are rejected.
 
 Decimal real literals retain precision before exponent: `1p53`, `.5p20`, and
 `1.25p53e3` are each one `FloatLiteral`. Once an exponent has been consumed,
@@ -433,7 +433,7 @@ round trip `CellStream -> SourceFile -> CellStream -> SourceFile`. Generated
 concrete token structs are deliberately underscore-prefixed; use `Token![..]`
 to name their types and inspect the underlying `TokenTree` after `Lex`
 when working with a heterogeneous stream. Delimiter structs follow the same
-rule through `Delimiter![..]`.
+rule through `Token![..]`.
 
 The lexer emits one flat `TokenStream`; `Tokenize` splits it into the cells
 evaluated at global scope. A `;`
@@ -443,8 +443,8 @@ region in a delimiter therefore never rewrites its tokens.
 
 ```rust
 # use std::convert::Infallible;
-use m2_syn::nodes::{BOF, EOF, SourceFile};
-use m2_syn::{CellStream, Parser, Span, Tokenize, lex_str, parse_with};
+use m2_syn::nodes::SourceFile;
+use m2_syn::{CellStream, Parser, Span, Token, Tokenize, lex_str, parse_with};
 
 struct EmptyParser;
 
@@ -453,9 +453,9 @@ impl Parser for EmptyParser {
 
     fn parse_cells(&mut self, _cells: CellStream) -> Result<SourceFile, Self::Error> {
         Ok(SourceFile::new(
-            BOF::new("", Span::for_text("")),
+            Token![BOF](Span::for_text("")),
             Vec::new(),
-            EOF::new("", Span::for_text("")),
+            Token![EOF](Span::for_text("")),
         ))
     }
 }
@@ -554,7 +554,8 @@ view rotates primitive sequences into compact horizontal bands: centered token
 text occupies the first row and token type the second, with recursive group
 openings and closings represented as ordinary columns. End-of-cell markers are
 explicit, always end a band, and group delimiters provide the only soft wrapping
-boundaries. Trivia is hidden by default and coalesced when enabled. Source
+boundaries. Comments are hidden by default and adjacent ones coalesce when
+enabled. Source
 ranges can be disabled and ANSI styling can be selected explicitly through
 `PrettyReport`.
 
@@ -565,12 +566,12 @@ cargo run --example inspect
 cargo run --example inspect -- path/to/file.m2
 ```
 
-Both parser adapters place comments by the same rule. The native parser reads
-them from the trivia of the tokens it consumes; the Tree-sitter adapter lexes
-the same source and moves each raw atom's trivia onto the typed terminal or
-delimiter covering exactly the same bytes. Emission writes every comment from
-the slot that stores it, so a typed tree reproduces its comments in place
-without any positional reconstruction.
+Neither parser adapter places comments: both keep the spans of the source
+they parse, so the same comments are next to the same syntax. Emission writes
+the gap between two atoms verbatim when it holds only whitespace and comments,
+and otherwise the comments next to each atom, so a typed tree reproduces its
+comments in place, and an edited tree keeps them beside the syntax they
+annotate.
 
 ## Quoting
 
@@ -623,8 +624,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-The schema is expanded by the `syntax!` procedural macro, so changes to
-`src/schema/nodes.rs` are picked up by the next compile; there is no generated source
+The schema is expanded by the `tokens!` and `traversal!` procedural macros and
+`#[derive(Syntax)]`, so changes to `src/schema/` are picked up by the next compile; there is no generated source
 to refresh or commit.
 
 ## License

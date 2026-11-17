@@ -1,75 +1,171 @@
-# The schema
+# The syntax schema
 
-| Declaration | Syntax role | Generated shape |
-| --- | --- | --- |
-| `PREC_CONTROL = 12` | a structural precedence with no single owning token, consumed directly by the native parser | a crate-visible precedence constant |
-| `[+] { bin, pref, aug } (50, L)` | left-associative binary and prefix binding plus augmented-token generation | token types, parser metadata, and inferred operator-enum membership |
-| `[=] { infix } (14, R)` | right-associative syntax-specific infix binding without generic operator membership | a typed token and parser metadata |
-| `[else] (PREC_CONTROL)` | a keyword and both of its parser strengths | a typed keyword token and parser metadata |
-| `struct Name;` | named text leaf | `String` and `Span` |
-| `#[leaf(qualified)] struct Name;` | one identifier with optional qualification metadata | text plus optional package and decimal-index subspans |
-| `struct Name { left: Expr, ... }` | concrete product node | declared children |
-| `field: Nested { value: Expr }` or `field: Pair(Expr, Symbol)` | a field whose type is declared in place | a hoisted `Nested` or `Pair` declaration plus a field of that type |
-| `enum Name { Expr, ... }` | grouping category; each bare variant names the type it wraps, so the wrapped name doubles as the variant name | one declared alternative per variant |
-| `Variant(Expr, Symbol)` or `Variant { value: Expr }` | an enum alternative whose product type is declared in place | a hoisted product and one alternative wrapping it |
-| `struct Name* ...` or `enum Name* ...` | a declaration whose recursive references require indirection | `Box<Name>` at references to that type |
-| `Token![=]` | literal token field | the type selected by the generated `Token!` macro |
-| `X?`, `Vec<T>`, `Punctuated<T>`, `Delimited<T>` | optional, repeated, nonempty comma-punctuated, or arbitrarily delimited children | the corresponding public wrapper type |
-| `(_)` | a child without a Tree-sitter field name | positional reconstruction from the next matching child |
-| `Lines<T>` | a `Vec<T>` printed one element per line | the separator travels with the functor |
-| `#[cst(kind = assignment)]` | a Rust name whose external CST node has another name | reconstruction from the named CST kind |
-| `#[delimiter(parenthesis)]` | a product enclosed by a delimiter family | a concrete node with its typed delimiter atom |
-| `#[literal(string)]` | a product spelled as a string literal | emission as one literal token, with no delimiter atom |
+The grammar lives in three files under `src/schema/`, each expanded by its
+own macro. There is no checked-in generated source to refresh.
 
-Every token is declared in `tokens { ... }`; adjacent spellings share the
-metadata written on their right. A binary role writes `L` or `R`, while a
-literal strength remains available for a non-associative rule. A prefix role
-binds at the token's precedence unless a third slot overrides it, and `post`
-writes no strength at all. The separate `precedence` stage
-only holds names for structural precedences with no single owning operator
-token (delimiter/control-clause stoppers the native parser references
-directly); it is not a shared table operators look their numbers up in, so a
-level used by exactly one token is just written as a literal there and
-nowhere else. The `aug` tag generates the corresponding assignment
-token, which binds exactly like the `=` it abbreviates and so takes its rule
-from that declaration.
+`tokens.rs`
+: The `tokens!` table: every operator, keyword, and separator with its parser
+  roles and binding strengths.
 
-Boxing is explicit: put `*` after a declaration name when recursive references
-to that type need `Box`. Ordinary fields, token types, and nonrecursive
-categories remain inline. Constructors accept the declared types and hide that
-storage conversion. Generated signatures consistently refer to literal token
-types through `Token![...]`; their concrete Rust names are an implementation
-detail of the expansion.
+`nodes.rs`
+: One plain Rust declaration per syntax type, with `#[derive(Syntax)]`.
 
-`Delimited<T>` retains any of the four paired delimiter families, while a
-second type parameter such as `Delimiter![()]` refines the family statically.
-Both spelled boundary spans are stored. The convenient type macros construct
-the refined forms:
+`traversal.rs`
+: The `traversal!` inventory of the type names the visitors cover.
+
+Most users can work entirely with `m2_syn::nodes`. Read this chapter when
+extending the grammar or understanding how its public types are organized.
+
+## Node declarations
+
+Every type is declared as it is stored: each field, each variant, and each
+name is written out. These are the declarations of a file and of one element
+of a comma pack:
+
+```rust,ignore
+/// A parsed source file: the cells between its start and end markers.
+#[derive(Debug, Spanned, Syntax)]
+#[syntax(cell_stream)]
+pub struct SourceFile {
+    pub bof: Token![BOF],
+    pub cells: Vec<Cell>,
+    pub eof: Token![EOF],
+}
+
+/// One element of a comma-separated pack: `a` or the empty slot in `a, , b`.
+#[derive(Debug, Spanned, Syntax)]
+pub enum Element {
+    Expr(Box<Expr>),
+    Empty(Empty),
+}
+```
+
+`#[derive(Syntax)]` adds the constructor, printing, pretty tree, CST
+migration, and child walkers; it reads the field types and never adds fields.
+`Box`, `Option`, `Vec`, `Punctuated`, `Delimited`, and `Token![..]` keep their
+usual meaning. A few field names are storage rather than children:
+`delimiter: Token![()]` is the pair printed around the other fields, and a
+terminal keeps its own private `span`. Comments are not stored on nodes; they
+are found from spans, see [Lexer](lexer.md#comments).
+
+A new type also needs its name in the `traversal!` inventory. A type left out
+fails to compile, because its child walker calls a visitor method that is
+never declared.
+
+## The shape of expressions
+
+`Expr` is one flat enum with a variant per construction, each holding an
+`Expr<Kind>` struct: `Expr::Binary(ExprBinary)`, `Expr::Field(ExprField)`,
+`Expr::Assign(ExprAssign)`, `Expr::For(ExprFor)`, and so on. A visitor reaches
+the concrete node one step below `Expr`, and overrides it by name:
+`visit_expr_field` sees every `x.y`, `visit_expr_assign` every assignment.
+
+```rust,ignore
+let field = ExprField { base, op: FieldOperator::Dot(dot), member };
+let expression = Expr::from(field);
+```
+
+The syntax decides the node, not the meaning. Every assignment form is
+`ExprAssign { left, op, right }`: `x = 1`, `x := 1`, `x <- 1`, `x += 1`,
+`(a, b) = (1, 2)`, `x#i = v`, and the installations `f ZZ := …`,
+`X + Y := …`, and `new T := …` all share it, and the shape of `left` together
+with `op` tells them apart. A typical value in `f ZZ := ZZ => x -> x` is the
+option expression on the right, exactly as Macaulay2 reads it. `x#i` is an
+ordinary `ExprBinary`, while `x.y` is an `ExprField` because Macaulay2 requires
+a symbol after the dot.
+
+Field names follow a few fixed rules:
+
+`<keyword>_token`
+: A keyword or punctuation token: `if_token`, `semi_token`, `arrow_token`.
+
+`<keyword>_clause`
+: An optional or reusable clause introduced by a keyword, such as
+  `else_clause: Option<ElseClause>` or `from_clause: Option<FromClause>`. Every
+  clause stores its keyword and the expression after it in `expr`.
+
+`op`, `left`, `right`
+: The operator and the operands of a binary construction.
+
+`expr`
+: The single operand of a prefix, postfix, or keyword construction.
+
+`stmts`, `elems`
+: The `;`-terminated statements and the trailing elements of a delimited body,
+  as in `{x = 1; x, y}`.
+
+`keyword`
+: The keyword of a family that shares one shape, such as `ExprTiming`
+  (`time`, `timing`, `elapsedTime`, …) or `ExprQuote` (`symbol`, `local`, …).
+
+The presentation tree uses these same type names and field names.
+
+Leaves retain their text through a source span; `Symbol`, marked by
+`#[syntax(leaf = symbol)]`, wraps the `IdentToken` that spells it. A string literal, `#[syntax(literal = string)]`,
+prints as one literal token while exposing its fragments.
+
+## Tokens and binding
+
+The `tokens!` table declares operator and keyword spellings together with their
+parser roles and binding metadata:
+
+```rust,ignore
+crate::tokens! {
+    [+] [-] { bin, pref, aug } (50, L)
+    [*]     { bin, pref, aug } (58, L)
+    [=]     { infix }          (14, R)
+    [;]                       (8)
+    [,]                       (10)
+}
+```
+
+Adjacent spellings share the metadata on their right. `bin`, `pref`, and `post`
+select operator roles; `infix` supplies syntax-specific infix binding. `L` and
+`R` describe binary associativity. A third binding slot can give a prefix
+operator a different strength. `aug` derives the augmented assignment spelling
+and uses the assignment token's binding rule.
+
+A row `["≠"] = [!=]` gives a declared token another spelling instead of a type
+of its own. M2 has thirteen such synonyms, and `threadVariable` for
+`threadLocal`. `Token![!=]` matches either spelling and prints the one written,
+so `a ≠ b` parses into the same `ExprBinary` as `a != b`.
+
+Use `Token![+]`, `Token![=]`, and other literal spellings in public code. The
+concrete generated token struct names are expansion details. Tokens have no
+visitor methods of their own: `Visit::visit_terminal` sees every token, leaf,
+and literal as a `&dyn Spanned`.
+
+## Delimiters and punctuation
+
+`Delimited<T>` stores a value with its opening and closing boundaries. Its
+second parameter can restrict the delimiter family, as in
+`Delimited<T, Token![()]>`. The `paren!`, `brackets!`, `braces!`, and
+`angle_bars!` macros provide convenient type and construction forms.
 
 ```rust
-use m2_syn::{Lex, Span};
+use m2_syn::{Lex, Source, Span};
 
 type Parenthesized = m2_syn::paren!(m2_syn::Token![+]);
+let span = Span::unlocated(Source::synthetic(""));
 let value: Parenthesized = m2_syn::paren!(
-    m2_syn::Token![+](Span::detached()),
-    Span::detached(),
+    m2_syn::Token![+](&span),
+    &span,
 );
 assert_eq!(value.to_m2(), "(+)");
 ```
 
-`paren!`, `brackets!`, `braces!`, and `angle_bars!` cover the four families.
-`punct!(T)` names a nonempty comma-punctuated sequence; `punct!(value first)`
-and `punct!(pairs first; comma => next)` construct one while retaining every
-typed comma and its span. Use `Option<Punctuated<T>>` when the whole sequence
-may be absent, or put an empty alternative in `T` when components may be empty.
-Every delimiter atom and wrapper implements both `Parse` and `Lex`, so they can
-be direct `parse_quote_m2!` targets.
+`Punctuated<T>` is a nonempty comma-separated sequence that retains the comma
+tokens. `punct!(T)` names this type; the macro also supplies construction forms.
+Use `Option<Punctuated<T>>` when the entire sequence can be absent. An empty
+component belongs in the element type itself.
 
-A field normally uses its Rust name as its CST field name. Mark it `(_)`
-when it should consume the next matching unlabelled child instead. The
-schema deliberately permits only named struct fields and bare-type enum
-variants — a variant never spells out a separate name, since it's always
-either the wrapped type's own name or, for a variant wrapping a token, that
-token's capitalized name — keeping both the declaration and generated API
-shaped like ordinary Rust rather than requiring the same fact to be written
-twice.
+## External CST migration
+
+Migration relates external node kinds and child fields to the typed schema.
+A field matches its Rust name, and `#[syntax(cst = ...)]` selects a different
+external node name.
+
+These rules work for compatible shapes. A parser adapter must explicitly lower
+external structures that do not match the typed graph. The
+[parsing chapter](./parsers.md) describes the `Parser` and `ExternalCstNode`
+boundaries.

@@ -5,7 +5,9 @@ use std::fmt::{Display, Formatter};
 
 use crate::CellStream;
 use crate::fold::{self, Fold};
-use crate::nodes::{Expr, ExprAssignInstallMethod, ExprLambda, ExprLiteral, TypeAnnotation};
+use crate::nodes::{
+    AssignOperator, BinaryOperator, Expr, ExprAssign, ExprBinary, ExprOption, Literal,
+};
 use crate::{CellStreamError, NativeParseError, NativeParser, Parser, Tokenize, parse_quote_m2};
 
 /// A procedural macro over independently parseable Macaulay2 cells.
@@ -83,34 +85,41 @@ impl ProcMacro for LiteralReturnTypes {
 }
 
 impl Fold for LiteralReturnTypes {
-    fn fold_expr_assign_install_method(
-        &mut self,
-        node: ExprAssignInstallMethod,
-    ) -> ExprAssignInstallMethod {
-        let mut node = fold::fold_expr_assign_install_method(self, node);
-        if node.typical_value.is_none() {
-            node.typical_value = literal_return_annotation(&node.function);
+    fn fold_expr_assign(&mut self, node: ExprAssign) -> ExprAssign {
+        let mut node = fold::fold_expr_assign(self, node);
+        let installs_method = matches!(node.op, AssignOperator::Local(_))
+            && matches!(
+                &*node.left,
+                Expr::Binary(ExprBinary {
+                    op: BinaryOperator::Space(_),
+                    ..
+                })
+            );
+        if let Some(typical_value) = installs_method
+            .then(|| literal_return_type(&node.right))
+            .flatten()
+        {
+            node.right = Box::new(Expr::from(ExprOption {
+                key: Box::new(typical_value),
+                fat_arrow_token: parse_quote_m2!(=>),
+                value: node.right,
+            }));
         }
         node
     }
 }
 
-/// Handles literal return annotation.
-fn literal_return_annotation(function: &Expr) -> Option<TypeAnnotation> {
-    let Expr::Lambda(lambda) = function else {
+/// The type of the literal returned by a function, as an M2 class name.
+fn literal_return_type(function: &Expr) -> Option<Expr> {
+    let Expr::Function(function) = function else {
         return None;
     };
-    let body = match lambda {
-        ExprLambda::Variadic(lambda) => lambda.body.as_ref(),
-        ExprLambda::List(lambda) => lambda.body.as_ref(),
-    };
-    let Expr::Literal(literal) = body else {
+    let Expr::Literal(literal) = function.body.as_ref() else {
         return None;
     };
-    let typical_value = match literal {
-        ExprLiteral::Integer(_) => parse_quote_m2!(ZZ),
-        ExprLiteral::Float(_) => parse_quote_m2!(RR),
-        ExprLiteral::String(_) | ExprLiteral::RawString(_) => parse_quote_m2!(String),
-    };
-    Some(TypeAnnotation::new(typical_value, parse_quote_m2!(=>)))
+    Some(match literal {
+        Literal::Integer(_) => parse_quote_m2!(ZZ),
+        Literal::Float(_) => parse_quote_m2!(RR),
+        Literal::String(_) | Literal::RawString(_) => parse_quote_m2!(String),
+    })
 }

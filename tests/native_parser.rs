@@ -1,60 +1,42 @@
 //! Integration tests for native parser.
 
-use m2_syn::nodes::{
-    BinaryOperator, Expr, ExprCollection, ExprControl, ExprDebug, ExprFor, ExprOp, ExprOpBin,
-    ExprQuote, PackedContent, Symbol,
-};
+use m2_syn::nodes::{BinaryOperator, Elements, Expr, ExprDebug, ExprQuote, ForIter, Symbol};
 use m2_syn::{
-    DelimiterToken, Lex, LexErrorKind, LiteralKind, NativeParseError, Span, Spanned, Terminal,
-    TokenTree, Tokenize, lex_str, parse_native, parse_native_recovering, parse_with,
+    DelimiterToken, Lex, LexErrorKind, LiteralKind, NativeParseError, Span, Spanned, TokenTree,
+    Tokenize, lex_str, parse_native, parse_native_recovering, parse_with,
 };
 
 fn expression(source: &str) -> Expr {
     let mut file = parse_native(source).unwrap();
     assert_eq!(file.cells.len(), 1);
     let cell = file.cells.pop().unwrap();
-    let PackedContent::Expr(value) = cell.content else {
+    let Elements::Single(value) = cell.elems else {
         panic!("expected one expression");
     };
     *value
 }
 
 fn adjacent(expression: &Expr) -> (&Expr, &Expr) {
-    let Expr::Op(ExprOp::Bin(ExprOpBin::Adj(expression))) = expression else {
+    let Expr::Binary(expression) = expression else {
         panic!("expected implicit application, found {expression:?}");
     };
-    (&expression.left_operand, &expression.right_operand)
+    assert_eq!(expression.op.spelling(), "SPACE");
+    (&expression.left, &expression.right)
 }
 
 fn binary(expression: &Expr) -> (&Expr, &BinaryOperator, &Expr) {
-    let Expr::Op(ExprOp::Bin(ExprOpBin::Regular(expression))) = expression else {
+    let Expr::Binary(expression) = expression else {
         panic!("expected a binary expression, found {expression:?}");
     };
-    (
-        &expression.left_operand,
-        &expression.operator,
-        &expression.right_operand,
-    )
+    (&expression.left, &expression.op, &expression.right)
 }
 
 fn quoted_symbol(quote: &ExprQuote) -> &Symbol {
-    match quote {
-        ExprQuote::Symbol(quote) => &quote.symbol,
-        ExprQuote::Local(quote) => &quote.symbol,
-        ExprQuote::Global(quote) => &quote.symbol,
-        ExprQuote::ThreadVariable(quote) => &quote.symbol,
-        ExprQuote::ThreadLocal(quote) => &quote.symbol,
-    }
+    &quote.symbol
 }
 
 fn debug_value(debug: &ExprDebug) -> Option<&Expr> {
-    match debug {
-        ExprDebug::Test(debug) => debug.value.as_deref(),
-        ExprDebug::Step(debug) => debug.value.as_deref(),
-        ExprDebug::Finish(debug) => debug.value.as_deref(),
-        ExprDebug::Shield(debug) => debug.value.as_deref(),
-        ExprDebug::Breakpoint(debug) => debug.value.as_deref(),
-    }
+    debug.expr.as_deref()
 }
 
 #[test]
@@ -71,17 +53,41 @@ fn binding_strength_relative_to_precedence_controls_associativity() {
 }
 
 #[test]
+fn synonyms_are_their_declared_operators_in_their_own_spelling() {
+    for (source, written, declared) in [
+        ("a ≠ b", "≠", "!="),
+        ("a ⊢ b", "⊢", "|-"),
+        ("a ∧ b", "∧", "and"),
+    ] {
+        let parsed = expression(source);
+        let operator = binary(&parsed).1;
+        assert_eq!(
+            (operator.spelling(), operator.to_m2().as_str()),
+            (declared, written)
+        );
+    }
+
+    let Expr::Prefix(prefix) = expression("⊢ a") else {
+        panic!("expected prefix expression");
+    };
+    assert_eq!(
+        (prefix.op.spelling(), prefix.op.to_m2().as_str()),
+        ("|-", "⊢")
+    );
+}
+
+#[test]
 fn implicit_application_uses_the_consumed_tokens_unary_handler_at_level_61() {
     let application = expression("b c d");
     let (_, right) = adjacent(&application);
     adjacent(right);
 
     let prefixed = expression("# f x");
-    let Expr::Op(ExprOp::Prefix(prefix)) = prefixed else {
+    let Expr::Prefix(prefix) = prefixed else {
         panic!("expected prefix expression");
     };
-    assert_eq!(prefix.operator.spelling(), "#");
-    adjacent(&prefix.operand);
+    assert_eq!(prefix.op.spelling(), "#");
+    adjacent(&prefix.expr);
 }
 
 #[test]
@@ -89,20 +95,17 @@ fn bracket_precedence_differs_from_parenthesis_precedence() {
     let indexed_quotient = expression("R / I [x]");
     let (left, right) = adjacent(&indexed_quotient);
     assert_eq!(binary(left).1.spelling(), "/");
-    assert!(matches!(right, Expr::Collection(ExprCollection::Array(_))));
+    assert!(matches!(right, Expr::Array(_)));
 
     let bracket = expression("a x []");
     let (left, right) = adjacent(&bracket);
     adjacent(left);
-    assert!(matches!(right, Expr::Collection(ExprCollection::Array(_))));
+    assert!(matches!(right, Expr::Array(_)));
 
     let parenthesis = expression("a x ()");
     let (_, right) = adjacent(&parenthesis);
     let (_, call) = adjacent(right);
-    assert!(
-        matches!(call, Expr::Collection(ExprCollection::Sequence(_))),
-        "{call:#?}"
-    );
+    assert!(matches!(call, Expr::Sequence(_)), "{call:#?}");
 }
 
 #[test]
@@ -110,20 +113,14 @@ fn chained_delimiters_inherit_the_application_floor() {
     let low_then_high = expression("a [] ()");
     let (_, right) = adjacent(&low_then_high);
     let (array, parenthesis) = adjacent(right);
-    assert!(matches!(array, Expr::Collection(ExprCollection::Array(_))));
-    assert!(matches!(
-        parenthesis,
-        Expr::Collection(ExprCollection::Sequence(_))
-    ));
+    assert!(matches!(array, Expr::Array(_)));
+    assert!(matches!(parenthesis, Expr::Sequence(_)));
 
     let high_then_low = expression("a () []");
     let (left, array) = adjacent(&high_then_low);
     let (_, parenthesis) = adjacent(left);
-    assert!(matches!(
-        parenthesis,
-        Expr::Collection(ExprCollection::Sequence(_))
-    ));
-    assert!(matches!(array, Expr::Collection(ExprCollection::Array(_))));
+    assert!(matches!(parenthesis, Expr::Sequence(_)));
+    assert!(matches!(array, Expr::Array(_)));
 }
 
 #[test]
@@ -146,9 +143,9 @@ fn physical_newlines_are_cell_boundaries_but_required_operands_cross_them() {
 fn paired_top_level_semicolons_create_muted_cells() {
     let file = parse_native("2;2;2").unwrap();
     assert_eq!(file.cells.len(), 3);
-    assert!(file.cells[0].semicolon.is_some());
-    assert!(file.cells[1].semicolon.is_some());
-    assert!(file.cells[2].semicolon.is_none());
+    assert!(file.cells[0].semi_token.is_some());
+    assert!(file.cells[1].semi_token.is_some());
+    assert!(file.cells[2].semi_token.is_none());
 }
 
 #[test]
@@ -165,12 +162,11 @@ fn application_is_independent_of_physical_whitespace() {
 }
 
 #[test]
-fn physical_eof_retains_trailing_layout_after_the_final_cell() {
+fn trailing_layout_after_the_final_cell_survives() {
     let file = parse_native("x   ").unwrap();
 
     assert_eq!(file.cells[0].eoc.span().bounds(), Some((1, 1)));
-    assert_eq!(file.eof.span().bounds(), Some((1, 4)));
-    assert_eq!(file.eof.span().text(), Some("   "));
+    assert_eq!(file.eof.span().bounds(), Some((4, 4)));
     assert_eq!(file.span().bounds(), Some((0, 4)));
     assert_eq!(file.to_m2(), "x   ");
 }
@@ -241,23 +237,23 @@ fn typed_strings_emit_literal_tokens_instead_of_delimiter_groups() {
 
 #[test]
 fn prefix_control_statements_respect_optional_values_and_cell_boundaries() {
-    let Expr::Control(ExprControl::Break(statement)) = expression("break") else {
+    let Expr::Break(statement) = expression("break") else {
         panic!("expected a break statement");
     };
-    assert!(statement.value.is_none());
+    assert!(statement.expr.is_none());
 
-    let Expr::Control(ExprControl::Continue(statement)) = expression("continue x") else {
+    let Expr::Continue(statement) = expression("continue x") else {
         panic!("expected a continue statement");
     };
-    assert!(matches!(statement.value.as_deref(), Some(Expr::Symbol(_))));
+    assert!(matches!(statement.expr.as_deref(), Some(Expr::Symbol(_))));
 
-    let Expr::Control(ExprControl::Return(statement)) = expression("return 1 + 2") else {
+    let Expr::Return(statement) = expression("return 1 + 2") else {
         panic!("expected a return statement");
     };
     assert_eq!(
         binary(
             statement
-                .value
+                .expr
                 .as_deref()
                 .expect("return should have a value")
         )
@@ -284,30 +280,31 @@ fn clause_control_forms_build_the_existing_typed_nodes() {
     let Expr::If(statement) = expression("if a > 0 then b else c") else {
         panic!("expected an if statement");
     };
-    assert_eq!(binary(&statement.condition).1.spelling(), ">");
+    assert_eq!(binary(&statement.cond).1.spelling(), ">");
     assert!(statement.else_clause.is_some());
 
-    let Expr::For(ExprFor::Range(statement)) =
-        expression("for i from 0 to 4 when i > 1 list i do print i")
-    else {
+    let Expr::For(statement) = expression("for i from 0 to 4 when i > 1 list i do print i") else {
         panic!("expected a for loop");
     };
-    assert!(statement.lower_bound.is_some());
-    assert!(statement.upper_bound.is_some());
-    assert!(statement.condition.is_some());
-    assert!(statement.body.list_step.is_some());
-    assert!(statement.body.do_step.is_some());
+    let Some(ForIter::Range(range)) = &statement.iter else {
+        panic!("expected a counting loop");
+    };
+    assert!(range.from_clause.is_some());
+    assert!(range.to_clause.is_some());
+    assert!(statement.when_clause.is_some());
+    assert!(statement.body.list_clause.is_some());
+    assert!(statement.body.do_clause.is_some());
 
     let Expr::While(statement) = expression("while x < 10 do x = x + 1") else {
         panic!("expected a while loop");
     };
-    assert_eq!(binary(&statement.condition).1.spelling(), "<");
-    assert!(statement.body.do_step.is_some());
+    assert_eq!(binary(&statement.cond).1.spelling(), "<");
+    assert!(statement.body.do_clause.is_some());
 
     let Expr::Try(statement) = expression("try x then y except err do err") else {
         panic!("expected a try statement");
     };
-    assert!(statement.on_success.is_some());
+    assert!(statement.then_clause.is_some());
     assert!(matches!(
         statement.fallback.as_ref(),
         Some(m2_syn::nodes::TryFallback::Except(_))
@@ -367,16 +364,16 @@ fn new_statement_parses_its_ordered_optional_clauses() {
     assert!(matches!(statement.class.as_ref(), Expr::Symbol(_)));
     assert!(matches!(
         statement
-            .parent_class
+            .of_clause
             .as_ref()
-            .map(|clause| clause.parent.as_ref()),
+            .map(|clause| clause.expr.as_ref()),
         Some(Expr::Symbol(_))
     ));
     assert!(matches!(
         statement
-            .instance
+            .from_clause
             .as_ref()
-            .map(|clause| clause.instance.as_ref()),
+            .map(|clause| clause.expr.as_ref()),
         Some(Expr::Symbol(_))
     ));
 
@@ -423,7 +420,7 @@ fn debug_clauses_distinguish_nullable_and_required_operands() {
         "elapsedTiming x",
         "profile x",
     ] {
-        assert!(matches!(expression(source), Expr::Profile(_)));
+        assert!(matches!(expression(source), Expr::Timing(_)));
     }
 
     for keyword in [
@@ -503,20 +500,20 @@ fn each_quote_specifier_quotes_only_the_token_after_it() {
 
 #[test]
 fn core_keyword_aliases_share_their_unqualified_parse_behavior() {
-    let Expr::If(statement) = expression("Core$if x Core$then y Core$else z") else {
+    let Expr::If(statement) = expression("Core$if x then y else z") else {
         panic!("Core$if should parse as an if statement");
     };
     assert!(statement.else_clause.is_some());
 
-    let Expr::For(_) = expression("Core$for i Core$in L Core$list i") else {
+    let Expr::For(_) = expression("Core$for i in L list i") else {
         panic!("qualified loop keywords should retain their parser behavior");
     };
 
-    let Expr::New(statement) = expression("Core$new A Core$of B Core$from C") else {
+    let Expr::New(statement) = expression("Core$new A of B from C") else {
         panic!("Core$new should parse as a new statement");
     };
-    assert!(statement.parent_class.is_some());
-    assert!(statement.instance.is_some());
+    assert!(statement.of_clause.is_some());
+    assert!(statement.from_clause.is_some());
 
     let Expr::Quote(quote) = expression("Core$symbol if") else {
         panic!("Core$symbol should parse as a quote specifier");
@@ -525,14 +522,31 @@ fn core_keyword_aliases_share_their_unqualified_parse_behavior() {
 }
 
 #[test]
+fn core_aliases_of_construct_continuations_are_syntax_errors() {
+    // M2 v1.26.06 matches a continuation by its exact spelling, so none of
+    // these is accepted, not even alone.
+    for source in [
+        "if x Core$then y",
+        "if x then y Core$else z",
+        "for i Core$in L list i",
+        "for i to 2 Core$do i",
+        "new A Core$of B",
+        "try x Core$except e do y",
+        "x = Core$then",
+    ] {
+        assert!(parse_native(source).is_err(), "{source:?}");
+    }
+}
+
+#[test]
 fn core_word_aliases_apply_exactly_once() {
-    let file = parse_native("Core$if x\nCore$then y").unwrap();
+    let file = parse_native("Core$if x\nthen y").unwrap();
     assert_eq!(file.cells.len(), 1);
 
-    let Expr::Op(ExprOp::Prefix(qualified_not)) = expression("Core$not x") else {
+    let Expr::Prefix(qualified_not) = expression("Core$not x") else {
         panic!("one Core qualifier must retain the hardcoded `not` alias");
     };
-    assert_eq!(qualified_not.operator.spelling(), "not");
+    assert_eq!(qualified_not.op.spelling(), "not");
 
     let conjunction = expression("x Core$and y");
     assert_eq!(binary(&conjunction).1.spelling(), "and");
@@ -551,7 +565,7 @@ fn core_word_aliases_apply_exactly_once() {
     let quoted = quoted_symbol(&quoted);
     assert_eq!(quoted.text(), "Core$not");
     assert_eq!(
-        quoted.package_qualifier.as_ref().and_then(Span::bounds),
+        quoted.package_qualifier().and_then(Span::bounds),
         Some((7, 11))
     );
 }
@@ -563,11 +577,11 @@ fn symbols_retain_optional_package_and_index_qualifier_spans() {
     };
     assert_eq!(symbol.text(), "Package$name$12");
     assert_eq!(
-        symbol.package_qualifier.as_ref().and_then(Span::bounds),
+        symbol.package_qualifier().and_then(Span::bounds),
         Some((0, 7))
     );
     assert_eq!(
-        symbol.index_qualifier.as_ref().and_then(Span::bounds),
+        symbol.index_qualifier().and_then(Span::bounds),
         Some((13, 15))
     );
 
@@ -575,10 +589,10 @@ fn symbols_retain_optional_package_and_index_qualifier_spans() {
         panic!("non-Core qualification must not activate the keyword alias");
     };
     assert_eq!(
-        symbol.package_qualifier.as_ref().and_then(Span::bounds),
+        symbol.package_qualifier().and_then(Span::bounds),
         Some((0, 3))
     );
-    assert_eq!(symbol.index_qualifier, None);
+    assert_eq!(symbol.index_qualifier(), None);
 }
 
 #[test]
@@ -597,16 +611,16 @@ fn recovering_native_parser_keeps_unclosed_collection_contents() {
     assert_eq!(recovered.value.to_m2(), "[x, y");
 
     let mut cells = recovered.value.cells;
-    let PackedContent::Expr(expression) = cells.pop().unwrap().content else {
+    let Elements::Single(expression) = cells.pop().unwrap().elems else {
         panic!("the recovered cell must contain the array expression");
     };
-    let Expr::Collection(ExprCollection::Array(array)) = *expression else {
+    let Expr::Array(array) = *expression else {
         panic!("the recovered expression must retain its array node");
     };
-    let PackedContent::Pack(elements) = array.elements.unwrap() else {
+    let Elements::Pack(elements) = array.elems.unwrap() else {
         panic!("the recovered array must retain its comma pack");
     };
-    assert_eq!(elements.pack.len(), 2);
+    assert_eq!(elements.elems.len(), 2);
     assert!(array.delimiter.spans().close().is_none());
 }
 
@@ -628,24 +642,13 @@ fn documentation_line_blocks_belong_to_the_following_cell() {
     assert!(file.cells[0].comments().inner().is_empty());
     assert_eq!(
         file.cells[0].comments().outer()[0].text(),
-        source.split_once("\n    recordValue").unwrap().0
+        source
+            .split_once("\n    recordValue")
+            .unwrap()
+            .0
+            .trim_start()
     );
     assert_eq!(file.to_m2(), source);
-}
-
-#[test]
-fn cell_owned_documentation_does_not_leak_onto_its_first_leaf() {
-    let file = parse_native("-- documentation\nvalue").unwrap();
-    let PackedContent::Expr(expression) = &file.cells[0].content else {
-        panic!("the cell must contain its documented expression");
-    };
-    let Expr::Symbol(symbol) = expression.as_ref() else {
-        panic!("the documented cell must contain the symbol expression");
-    };
-
-    assert_eq!(file.cells[0].comments().outer().len(), 1);
-    assert!(symbol.leading_trivia().is_empty());
-    assert!(symbol.trailing_trivia().is_empty());
 }
 
 #[test]
@@ -666,8 +669,9 @@ fn comment_only_source_is_owned_by_the_source_file() {
     let file = parse_native(source).unwrap();
 
     assert!(file.cells.is_empty());
-    assert_eq!(file.comments().inner().len(), 1);
-    assert_eq!(file.comments().inner()[0].text(), source);
+    let comments = file.comments();
+    let texts = comments.inner().iter().map(|comment| comment.text());
+    assert_eq!(texts.collect::<Vec<_>>(), ["-- first", "-- second"]);
     assert_eq!(file.to_m2(), source);
 }
 

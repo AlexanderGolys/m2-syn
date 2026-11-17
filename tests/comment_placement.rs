@@ -1,7 +1,7 @@
 //! Integration tests for storing every comment in the slot where it occurs.
 
 use m2_syn::nodes::SourceFile;
-use m2_syn::{CommentTrivia, Lex, parse_file, parse_file_recovering, parse_native};
+use m2_syn::{Comments, Lex, parse_file, parse_file_recovering, parse_native};
 
 /// Sources whose comments sit at each kind of ownership boundary.
 const COMMENT_PLACEMENT_SOURCES: [&str; 14] = [
@@ -22,7 +22,7 @@ const COMMENT_PLACEMENT_SOURCES: [&str; 14] = [
 ];
 
 /// The text of each outer and inner comment, independent of the parse's source.
-fn comment_texts(comments: &CommentTrivia) -> [Vec<&str>; 2] {
+fn comment_texts(comments: &Comments) -> [Vec<&str>; 2] {
     [comments.outer(), comments.inner()]
         .map(|comments| comments.iter().map(|comment| comment.text()).collect())
 }
@@ -76,18 +76,20 @@ fn a_documentation_block_before_a_group_is_the_cells_outer_comment() {
         assert_eq!(comments.outer().len(), 1);
         assert_eq!(comments.outer()[0].text(), "-- doc");
         assert!(comments.inner().is_empty());
-        assert_eq!(file.cells[0].leading_trivia.as_slice().len(), 1);
     }
 }
 
 #[test]
-fn comments_after_the_last_token_belong_to_the_last_cell() {
-    for file in both_parsers("x\n\n-- c\n") {
+fn comments_on_lines_after_the_last_cell_belong_to_the_file_only() {
+    for file in both_parsers("x -- same line\n\n-- c\n") {
         assert_eq!(
             comment_texts(&file.cells[0].comments()),
-            [vec![], vec!["-- c"]]
+            [vec![], vec!["-- same line"]]
         );
-        assert!(file.leading_trivia.is_empty());
+        assert_eq!(
+            comment_texts(&file.comments()),
+            [vec![], vec!["-- same line", "-- c"]]
+        );
     }
 }
 
@@ -95,7 +97,6 @@ fn comments_after_the_last_token_belong_to_the_last_cell() {
 fn a_file_without_cells_owns_its_comments() {
     for file in both_parsers("-- only") {
         assert!(file.cells.is_empty());
-        assert_eq!(file.leading_trivia.as_slice().len(), 1);
         assert_eq!(comment_texts(&file.comments()), [vec![], vec!["-- only"]]);
     }
 }

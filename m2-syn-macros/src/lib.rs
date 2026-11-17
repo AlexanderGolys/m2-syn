@@ -9,33 +9,60 @@ mod syntax;
 mod tokens;
 
 use std::collections::BTreeSet;
+use syntax::Traversal;
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::{ToTokens, format_ident, quote};
-use syn::parse::{Parse, ParseStream};
-use syn::{
-    Data, DeriveInput, Error, Fields, Member, Result, Token, Type, parse_macro_input, parse_quote,
-};
+use syn::{Data, DeriveInput, Error, Fields, Member, Result, Type, parse_macro_input, parse_quote};
 
 fn base_crate() -> TokenStream {
     quote!(::m2_syn)
 }
 
-fn expand_syntax(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let expansion = match syntax::generate(input.into()) {
-        Ok(expansion) => expansion,
-        Err(error) => return error.into_compile_error().into(),
-    };
-    expansion.into()
+fn expand(
+    input: proc_macro::TokenStream,
+    expansion: fn(TokenStream) -> Result<TokenStream>,
+) -> proc_macro::TokenStream {
+    expansion(input.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }
 
-/// Declares typed syntax nodes and token atoms.
+/// Declares the token table: one typed token per spelling, the parser metadata
+/// of each, and the `PrefixOperator`, `BinaryOperator`, `PostfixOperator`, and
+/// `AugmentedOperator` enums that its roles define.
 #[proc_macro]
-pub fn syntax(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    expand_syntax(input)
+pub fn tokens(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    expand(input, syntax::tokens)
 }
 
-/// Resolves a token spelling to the type `syntax!` generates for it.
+/// Derives the syntax behaviour of a type declared in `m2_syn::nodes`: its
+/// constructor, printing, pretty tree, CST migration, and child walkers.
+///
+/// Fields are read by their Rust types; `delimiter`, `span` and a symbol's
+/// qualifiers are storage. `#[syntax(leaf = …)]` marks a terminal,
+/// `#[syntax(literal = …)]` a string literal printed as one token, and
+/// `#[syntax(cell_stream)]` a node parsed from framed cells.
+#[proc_macro_derive(Syntax, attributes(syntax))]
+pub fn derive_syntax(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    syntax::derive_syntax(&input)
+        .map(|syntax| {
+            let walk = expand_syntax_walk(&input);
+            quote!(#walk #syntax)
+        })
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+/// Generates the `visit`, `visit_mut`, and `fold` traversals over the listed
+/// syntax types.
+#[proc_macro]
+pub fn traversal(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    expand(input, syntax::traversal)
+}
+
+/// Resolves a token spelling to the type `tokens!` generates for it.
 ///
 /// This is what `m2_syn::Token![…]` forwards to. The mapping is pure
 /// computation over the concatenated M2 spelling, so whitespace and the
@@ -49,6 +76,7 @@ pub fn token(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         Err(error) => error.into_compile_error().into(),
     }
 }
+
 /// Constructs an M2 token stream with recursive Rust interpolation.
 ///
 /// `$(expression)` emits any value implementing `m2_syn::Lex`.
@@ -89,177 +117,13 @@ pub fn derive_syntax_walk(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     expand_syntax_walk(&input).into()
 }
 
-struct SyntaxTokenWalk {
-    name: syn::Ident,
-    ty: Type,
-}
-
-impl Parse for SyntaxTokenWalk {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let name = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let ty = input.parse()?;
-        Ok(Self { name, ty })
-    }
-}
-
-/// Generates the leaf-walking implementation for one syntax token type.
-#[doc(hidden)]
-#[proc_macro]
-pub fn __syntax_token_walk(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let SyntaxTokenWalk { name, ty } = parse_macro_input!(input as SyntaxTokenWalk);
-    expand_syntax_token_walk(&name, &ty).into()
-}
-
-fn expand_syntax_token_walk(name: &syn::Ident, ty: &Type) -> TokenStream {
-    let snake = syntax::to_snake_case(&name.to_string());
-    let visit_method = format_ident!("visit_{snake}");
-    let visit_mut_method = format_ident!("visit_{snake}_mut");
-    let fold_method = format_ident!("fold_{snake}");
-    quote! {
-        impl __walk::WalkChildren for #ty {
-            fn walk_children<'ast, V>(&'ast self, _visitor: &mut V)
-            where
-                V: visit::Visit<'ast> + ?Sized,
-            {}
-        }
-
-        impl __walk::WalkChildrenMut for #ty {
-            fn walk_children_mut<V>(&mut self, visitor: &mut V)
-            where
-                V: visit_mut::VisitMut + ?Sized,
-            {
-                visitor.visit_terminal_mut(self);
-            }
-        }
-
-        impl __walk::FoldChildren for #ty {
-            fn fold_children<F>(self, _folder: &mut F) -> Self
-            where
-                F: fold::Fold + ?Sized,
-            {
-                self
-            }
-        }
-
-        impl __walk::VisitValue for #ty {
-            fn visit_value<'ast, V>(&'ast self, visitor: &mut V)
-            where
-                V: visit::Visit<'ast> + ?Sized,
-            {
-                visitor.#visit_method(self);
-            }
-        }
-
-        impl __walk::VisitValueMut for #ty {
-            fn visit_value_mut<V>(&mut self, visitor: &mut V)
-            where
-                V: visit_mut::VisitMut + ?Sized,
-            {
-                visitor.#visit_mut_method(self);
-            }
-        }
-
-        impl __walk::FoldValue for #ty {
-            fn fold_value<F>(self, folder: &mut F) -> Self
-            where
-                F: fold::Fold + ?Sized,
-            {
-                folder.#fold_method(self)
-            }
-        }
-
-    }
-}
-
-struct SyntaxWalkFunction {
-    traversal: syn::Ident,
-    name: syn::Ident,
-    ty: Type,
-}
-
-impl Parse for SyntaxWalkFunction {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let traversal = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let name = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let ty = input.parse()?;
-        Ok(Self {
-            traversal,
-            name,
-            ty,
-        })
-    }
-}
-
-/// Generates one free function inside a traversal module.
-#[doc(hidden)]
-#[proc_macro]
-pub fn __syntax_walk_function(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let input = parse_macro_input!(input as SyntaxWalkFunction);
-    expand_syntax_walk_function(&input).into()
-}
-
-fn expand_syntax_walk_function(input: &SyntaxWalkFunction) -> TokenStream {
-    let name = &input.name;
-    let ty = &input.ty;
-    let snake = syntax::to_snake_case(&name.to_string());
-    match input.traversal.to_string().as_str() {
-        "visit" => {
-            let method = format_ident!("visit_{snake}");
-            quote! {
-                #[doc = concat!("Walks the children of a `", stringify!(#name), "` node.")]
-                pub fn #method<'ast, V>(visitor: &mut V, node: &'ast #ty)
-                where
-                    V: Visit<'ast> + ?Sized,
-                {
-                    super::__walk::WalkChildren::walk_children(node, visitor);
-                }
-            }
-        }
-        "visit_mut" => {
-            let method = format_ident!("visit_{snake}_mut");
-            quote! {
-                #[doc = concat!("Walks the mutable children of a `", stringify!(#name), "` node.")]
-                pub fn #method<V>(visitor: &mut V, node: &mut #ty)
-                where
-                    V: VisitMut + ?Sized,
-                {
-                    super::__walk::WalkChildrenMut::walk_children_mut(node, visitor);
-                }
-            }
-        }
-        "fold" => {
-            let method = format_ident!("fold_{snake}");
-            quote! {
-                #[doc = concat!("Folds the children of a `", stringify!(#name), "` node.")]
-                pub fn #method<F>(folder: &mut F, node: #ty) -> #ty
-                where
-                    F: Fold + ?Sized,
-                {
-                    super::__walk::FoldChildren::fold_children(node, folder)
-                }
-            }
-        }
-        _ => Error::new_spanned(&input.traversal, "expected `visit`, `visit_mut`, or `fold`")
-            .to_compile_error(),
-    }
-}
-
 fn is_syntax_storage(member: &Member) -> bool {
     matches!(
         member,
         Member::Named(name)
             if matches!(
                 name.to_string().as_str(),
-                "span"
-                    | "raw"
-                    | "package_qualifier"
-                    | "index_qualifier"
-                    | "leading_trivia"
-                    | "trailing_trivia"
-                    | "delimiter"
+                    "span" | "ident" | "raw" | "delimiter"
             )
     )
 }
@@ -275,28 +139,36 @@ fn walk_struct_fields(fields: &Fields, mutable: bool) -> TokenStream {
                 quote!(__walk::VisitValue::visit_value(&self.#member, visitor);)
             }
         });
-    let storage_hooks = mutable.then(|| walk_trivia_storage_mut(fields));
+    // A node storing its own source is spelled by its own text: a terminal.
+    let storage_hooks = if mutable {
+        walk_delimiter_mut(fields)
+    } else {
+        (has_member(fields, "span") || has_member(fields, "ident"))
+            .then(|| quote!(visitor.visit_terminal(self);))
+            .into_token_stream()
+    };
     quote!(#(#calls)* #storage_hooks)
 }
 
-/// Hands the trivia a node stores itself to the mutable visitor's hooks.
-fn walk_trivia_storage_mut(fields: &Fields) -> TokenStream {
-    let has_member = |name: &str| {
-        fields
-            .members()
-            .any(|member| matches!(&member, Member::Named(ident) if ident == name))
-    };
+fn has_member(fields: &Fields, name: &str) -> bool {
+    fields
+        .members()
+        .any(|member| matches!(&member, Member::Named(ident) if ident == name))
+}
+
+/// Hands a node's delimiter pair to the mutable visitor's hook.
+fn walk_delimiter_mut(fields: &Fields) -> TokenStream {
     let base = base_crate();
-    let terminal = has_member("trailing_trivia").then(|| quote!(visitor.visit_terminal_mut(self);));
-    let delimiter = has_member("delimiter").then(|| {
-        quote! {
-            let mut __m2_syn_delimiter = #base::DelimiterValue::delimiter(&self.delimiter);
-            visitor.visit_delimiter_mut(&mut __m2_syn_delimiter);
-            self.delimiter = #base::DelimiterValue::from_delimiter(__m2_syn_delimiter)
-                .expect("a delimiter visitor keeps the delimiter family");
-        }
-    });
-    quote!(#terminal #delimiter)
+    has_member(fields, "delimiter")
+        .then(|| {
+            quote! {
+                let mut __m2_syn_delimiter = #base::DelimiterValue::delimiter(&self.delimiter);
+                visitor.visit_delimiter_mut(&mut __m2_syn_delimiter);
+                self.delimiter = #base::DelimiterValue::from_delimiter(__m2_syn_delimiter)
+                    .expect("a delimiter visitor keeps the delimiter family");
+            }
+        })
+        .into_token_stream()
 }
 
 fn walk_enum_fields(input: &DeriveInput, mutable: bool) -> TokenStream {
@@ -424,10 +296,9 @@ fn expand_syntax_walk(input: &DeriveInput) -> TokenStream {
         return Error::new_spanned(input, "syntax walking requires a concrete syntax type")
             .to_compile_error();
     }
-    let snake = syntax::to_snake_case(&name.to_string());
-    let visit_method = format_ident!("visit_{snake}");
-    let visit_mut_method = format_ident!("visit_{snake}_mut");
-    let fold_method = format_ident!("fold_{snake}");
+    let [visit_method, visit_mut_method, fold_method] =
+        [Traversal::Visit, Traversal::VisitMut, Traversal::Fold]
+            .map(|traversal| traversal.method(name));
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     let visit = match &input.data {
         Data::Struct(data) => walk_struct_fields(&data.fields, false),

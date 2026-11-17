@@ -8,8 +8,8 @@ use std::fmt::{Display, Formatter, Result as FmtResult, Write as FmtWrite};
 use std::io::{self, IsTerminal as _, Write as IoWrite};
 
 use crate::{
-    CellTokenStream, CommentTrivia, DelimiterKind, DoubleSpan, Punctuated, Span, Spanned,
-    TokenStream, TokenTree, Trivia, TriviaKind, token_stream::delim::Delimiter,
+    CellTokenStream, Comment, CommentKind, Comments, DelimiterKind, DoubleSpan, Punctuated, Span,
+    Spanned, TokenStream, TokenTree, token_stream::delim::Delimiter,
 };
 
 /// The RESET constant.
@@ -218,10 +218,10 @@ impl PrettyNode {
     #[doc(hidden)]
     pub fn delimiter_boundary(kind: DelimiterKind, opening: bool, span: Span) -> Self {
         let name = match kind {
-            DelimiterKind::Parenthesis => "Delimiter![()]",
-            DelimiterKind::Bracket => "Delimiter![[]]",
-            DelimiterKind::Brace => "Delimiter![{}]",
-            DelimiterKind::AngleBar => "Delimiter![<| |>]",
+            DelimiterKind::Parenthesis => "Token![()]",
+            DelimiterKind::Bracket => "Token![[]]",
+            DelimiterKind::Brace => "Token![{}]",
+            DelimiterKind::AngleBar => "Token![<||>]",
         };
         let spelling = if opening {
             kind.opening()
@@ -360,17 +360,17 @@ impl<T: PrettyTree + Spanned> PrettyTree for Vec<T> {
     }
 }
 
-impl PrettyTree for Trivia {
+impl PrettyTree for Comment {
     fn pretty_tree(&self) -> PrettyNode {
         let name = match self.kind() {
-            TriviaKind::LineComment => "LineCommentBlock",
-            TriviaKind::BlockComment => "BlockComment",
+            CommentKind::Line => "LineComment",
+            CommentKind::Block => "BlockComment",
         };
         PrettyNode::token(name, self.text(), self.span())
     }
 }
 
-impl PrettyTree for CommentTrivia {
+impl PrettyTree for Comments {
     fn pretty_tree(&self) -> PrettyNode {
         let count = self.outer().len() + self.inner().len();
         let mut node = PrettyNode::group(item_count("Comments", count), self.try_span());
@@ -414,8 +414,8 @@ pub struct PrettyOptions {
     pub color: bool,
     /// Whether to display source spans.
     pub spans: bool,
-    /// Whether to include trivia in raw token views.
-    pub trivia: bool,
+    /// Whether to include comments in raw token views.
+    pub comments: bool,
     /// The preferred output width.
     pub width: usize,
 }
@@ -425,7 +425,7 @@ impl PrettyOptions {
     pub const PLAIN: Self = Self {
         color: false,
         spans: true,
-        trivia: false,
+        comments: false,
         width: 150,
     };
 
@@ -433,7 +433,7 @@ impl PrettyOptions {
     pub const ANSI: Self = Self {
         color: true,
         spans: true,
-        trivia: false,
+        comments: false,
         width: 150,
     };
 }
@@ -485,9 +485,9 @@ impl<'source> PrettyReport<'source> {
         self
     }
 
-    /// Includes or hides coalesced trivia in the flat token view.
-    pub fn trivia(mut self, enabled: bool) -> Self {
-        self.options.trivia = enabled;
+    /// Includes or hides comments in the flat token view.
+    pub fn comments(mut self, enabled: bool) -> Self {
+        self.options.comments = enabled;
         self
     }
 
@@ -664,8 +664,8 @@ enum FlatKind {
     Literal,
     /// The Punct alternative.
     Punct,
-    /// The Trivia alternative.
-    Trivia,
+    /// A comment.
+    Comment,
 }
 
 #[derive(Clone)]
@@ -718,8 +718,8 @@ fn write_flat(
     mut flat: Vec<FlatToken>,
     options: PrettyOptions,
 ) -> FmtResult {
-    if !options.trivia {
-        flat.retain(|token| !matches!(token.kind, FlatKind::Trivia));
+    if !options.comments {
+        flat.retain(|token| !matches!(token.kind, FlatKind::Comment));
     }
     if flat.is_empty() {
         return writeln!(output, "{}", paint(DIM, "∅", options));
@@ -832,9 +832,13 @@ fn clipped(text: &str, width: usize) -> String {
 
 /// Handles flatten.
 fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
-    flatten_trivia(tokens.prefix_trivia(), depth, output);
     for token in tokens.iter() {
-        flatten_trivia(token.leading_trivia().as_slice(), depth, output);
+        // Implied adjacency sits where its right operand starts and has no
+        // comments of its own.
+        let spelled = !matches!(token, TokenTree::Punct(punct) if punct.text().is_empty());
+        if spelled {
+            flatten_comments(token.span().comments_before(), depth, output);
+        }
         match token {
             TokenTree::Group(group) => {
                 let kind = group.delim_kind();
@@ -849,6 +853,7 @@ fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
                 );
                 flatten(group.stream(), depth + 1, output);
                 if let Some(closing) = group.delimiter().closing_span() {
+                    flatten_comments(closing.comments_before(), depth + 1, output);
                     push_flat(
                         output,
                         FlatToken {
@@ -896,21 +901,22 @@ fn flatten(tokens: &TokenStream, depth: usize, output: &mut Vec<FlatToken>) {
                 },
             ),
         }
-        flatten_trivia(token.trailing_trivia().as_slice(), depth, output);
+        if spelled {
+            flatten_comments(token.span().comments_after(), depth, output);
+        }
     }
-    flatten_trivia(tokens.suffix_trivia(), depth, output);
 }
 
-/// Handles flatten trivia.
-fn flatten_trivia(trivia: &[crate::Trivia], depth: usize, output: &mut Vec<FlatToken>) {
-    for token in trivia {
+/// Flattens comments, each a token of its own.
+fn flatten_comments(comments: Vec<Comment>, depth: usize, output: &mut Vec<FlatToken>) {
+    for comment in comments {
         push_flat(
             output,
             FlatToken {
                 depth,
-                kind: FlatKind::Trivia,
-                text: token.text().into(),
-                span: token.expect_span(),
+                kind: FlatKind::Comment,
+                text: comment.text().into(),
+                span: comment.span(),
             },
         );
     }
@@ -918,9 +924,9 @@ fn flatten_trivia(trivia: &[crate::Trivia], depth: usize, output: &mut Vec<FlatT
 
 /// Pushes flat.
 fn push_flat(output: &mut Vec<FlatToken>, token: FlatToken) {
-    if matches!(token.kind, FlatKind::Trivia)
+    if matches!(token.kind, FlatKind::Comment)
         && let Some(previous) = output.last_mut()
-        && matches!(previous.kind, FlatKind::Trivia)
+        && matches!(previous.kind, FlatKind::Comment)
         && previous.depth == token.depth
     {
         previous.text.push_str(&token.text);
@@ -943,7 +949,7 @@ fn flat_kind(kind: FlatKind) -> &'static str {
         FlatKind::Ident => "IDENT",
         FlatKind::Literal => "LITERAL",
         FlatKind::Punct => "PUNCT",
-        FlatKind::Trivia => "TRIVIA",
+        FlatKind::Comment => "COMMENT",
     }
 }
 
@@ -956,7 +962,7 @@ fn token_color(kind: FlatKind) -> &'static str {
         FlatKind::Ident => CYAN,
         FlatKind::Literal => YELLOW,
         FlatKind::Punct => GREEN,
-        FlatKind::Trivia => RED,
+        FlatKind::Comment => RED,
     }
 }
 
@@ -1101,20 +1107,20 @@ mod tests {
     use crate::lex_str;
 
     #[test]
-    fn adjacent_trivia_is_hidden_or_rendered_as_one_token() {
-        let source = "-- note";
+    fn adjacent_comments_are_hidden_or_rendered_as_one_token() {
+        let source = "x -- one\n-* two *- y";
         let tokens = lex_str(source).unwrap();
 
         let hidden = format_tokens(&tokens, PrettyOptions::PLAIN);
-        assert!(!hidden.contains("TRIVIA"));
+        assert!(!hidden.contains("COMMENT"));
         let shown = format_tokens(
             &tokens,
             PrettyOptions {
-                trivia: true,
+                comments: true,
                 ..PrettyOptions::PLAIN
             },
         );
-        assert_eq!(shown.matches("TRIVIA").count(), 1);
+        assert_eq!(shown.matches("COMMENT").count(), 1);
     }
 
     #[test]
@@ -1128,7 +1134,7 @@ mod tests {
         let colored = format_tokens(
             &tokens,
             PrettyOptions {
-                trivia: true,
+                comments: true,
                 ..PrettyOptions::ANSI
             },
         );
@@ -1196,7 +1202,7 @@ mod tests {
         assert_eq!(delimiter.role, PrettyNodeRole::Collection);
         assert_eq!(delimiter.name, "(…) · 2 tokens");
         assert!(delimiter.children.iter().all(|edge| {
-            edge.node.name == "Delimiter![()]" && edge.node.role == PrettyNodeRole::Delimiter
+            edge.node.name == "Token![()]" && edge.node.role == PrettyNodeRole::Delimiter
         }));
     }
 

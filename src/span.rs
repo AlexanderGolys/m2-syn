@@ -212,6 +212,11 @@ pub struct Source {
     text: Arc<str>,
     /// The line starts.
     line_starts: OnceLock<Box<[Offset]>>,
+    /// Where each comment lies, in order.
+    pub(crate) comments: OnceLock<Box<[crate::comment::CommentRange]>>,
+    /// The span whose text this source spells anew, as when a symbol is
+    /// renamed; comments next to that span stay next to the new spelling.
+    pub(crate) respells: Option<Span>,
 }
 
 impl Source {
@@ -233,6 +238,8 @@ impl Source {
             file,
             text,
             line_starts: OnceLock::new(),
+            comments: OnceLock::new(),
+            respells: None,
         })
     }
 
@@ -399,8 +406,15 @@ impl Span {
         if self.text() == Some(text.as_ref()) {
             return self;
         }
-        let source = Source::with_file(self.file(), text);
-        Self::ranged(Arc::clone(&source), 0..source.text().len())
+        let len = text.len();
+        let source = Arc::new(Source {
+            file: self.file(),
+            text,
+            line_starts: OnceLock::new(),
+            comments: OnceLock::new(),
+            respells: self.range.is_some().then_some(self),
+        });
+        Self::ranged(source, 0..len)
     }
 
     /// Returns the exact source text covered by this span.

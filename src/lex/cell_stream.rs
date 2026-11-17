@@ -42,12 +42,11 @@ use std::slice::Iter;
 use std::sync::Arc;
 use std::vec::IntoIter;
 
-use crate::lexer::{canonical_word_spelling, is_quote_specifier, newline_ends_cell};
-use crate::token_stream::TokenStreamParts;
+use crate::lexer::{canonical_spelling, is_quote_specifier, newline_ends_cell};
+use crate::token_stream::{layout_between, write_gap, write_stream};
 use crate::{
-    Delimiter, DelimiterKind, IdentToken, LeadingTrivia, Lex, LiteralToken, Punct, Source, Span,
-    Spanned, TOKEN_PARSE_RULES, Terminal, TokenGroup, TokenParseRule, TokenStream, TokenTree,
-    TrailingTrivia, Trivia,
+    Delimiter, DelimiterKind, IdentToken, Lex, LiteralToken, Punct, Source, Span, Spanned,
+    TOKEN_PARSE_RULES, TokenGroup, TokenParseRule, TokenStream, TokenTree,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -55,10 +54,6 @@ use crate::{
 struct CellTokenStreamData {
     /// The trees.
     trees: Vec<CellTokenTree>,
-    /// The prefix.
-    prefix: TrailingTrivia,
-    /// The suffix.
-    suffix: LeadingTrivia,
     /// The source.
     source: Option<Arc<Source>>,
 }
@@ -66,8 +61,6 @@ struct CellTokenStreamData {
 impl PartialEq for CellTokenStreamData {
     fn eq(&self, other: &Self) -> bool {
         self.trees == other.trees
-            && self.prefix == other.prefix
-            && self.suffix == other.suffix
             && match (&self.source, &other.source) {
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
                 (None, None) => true,
@@ -106,28 +99,6 @@ impl CellTokenTree {
             Self::Punct(token) => Some(token.text()),
             Self::Ident(token) => Some(token.text()),
             Self::Adj(_) => Some(""),
-        }
-    }
-
-    /// Returns comments attached before this cell token.
-    pub fn leading_trivia(&self) -> &[Trivia] {
-        match self {
-            Self::Group(token) => token.leading_trivia().as_slice(),
-            Self::Literal(token) => token.leading_trivia().as_slice(),
-            Self::Punct(token) => token.leading_trivia().as_slice(),
-            Self::Ident(token) => token.leading_trivia().as_slice(),
-            Self::Adj(_) => &[],
-        }
-    }
-
-    /// Returns comments attached after this cell token.
-    pub fn trailing_trivia(&self) -> &[Trivia] {
-        match self {
-            Self::Group(token) => token.trailing_trivia().as_slice(),
-            Self::Literal(token) => token.trailing_trivia().as_slice(),
-            Self::Punct(token) => token.trailing_trivia().as_slice(),
-            Self::Ident(token) => token.trailing_trivia().as_slice(),
-            Self::Adj(_) => &[],
         }
     }
 
@@ -184,10 +155,6 @@ pub struct CellTokenGroup {
     delimiter: Delimiter,
     /// The stream.
     stream: CellTokenStream,
-    /// The leading trivia.
-    leading_trivia: LeadingTrivia,
-    /// The trailing trivia.
-    trailing_trivia: TrailingTrivia,
 }
 
 impl CellTokenGroup {
@@ -213,57 +180,27 @@ impl CellTokenGroup {
 
     /// Creates the value from augmented.
     fn from_augmented(group: TokenGroup) -> Self {
-        let (delimiter, stream, leading_trivia, trailing_trivia) = group.into_parts();
+        let (delimiter, stream) = group.into_parts();
         Self {
             delimiter,
             stream: CellTokenStream::from_augmented(stream),
-            leading_trivia,
-            trailing_trivia,
         }
     }
 
     /// Converts the value into lexical.
     fn into_lexical(self) -> TokenGroup {
-        TokenGroup::from_parts(
-            self.delimiter,
-            self.stream.into_token_stream(),
-            self.leading_trivia,
-            self.trailing_trivia,
-        )
+        TokenGroup::new(self.delimiter, self.stream.into_token_stream())
     }
 
     /// Converts the value into parser group.
     fn into_parser_group(self) -> TokenGroup {
-        TokenGroup::from_parts(
-            self.delimiter,
-            self.stream.into_parser_token_stream(),
-            self.leading_trivia,
-            self.trailing_trivia,
-        )
+        TokenGroup::new(self.delimiter, self.stream.into_parser_token_stream())
     }
 }
 
 impl Spanned for CellTokenGroup {
     fn try_span(&self) -> Option<Span> {
         self.delimiter.try_span()
-    }
-}
-
-impl Terminal for CellTokenGroup {
-    fn leading_trivia(&self) -> &LeadingTrivia {
-        &self.leading_trivia
-    }
-
-    fn leading_trivia_mut(&mut self) -> &mut LeadingTrivia {
-        &mut self.leading_trivia
-    }
-
-    fn trailing_trivia(&self) -> &TrailingTrivia {
-        &self.trailing_trivia
-    }
-
-    fn trailing_trivia_mut(&mut self) -> &mut TrailingTrivia {
-        &mut self.trailing_trivia
     }
 }
 
@@ -290,24 +227,12 @@ impl CellTokenStream {
 
     /// Consumes this framed cell and returns its lexical token representation.
     ///
-    /// Inferred adjacency is removed recursively. Comments, delimiter groups,
-    /// source spans, and physical spellings are preserved.
+    /// Inferred adjacency is removed recursively. Delimiter groups, source
+    /// spans, and physical spellings are preserved.
     pub fn into_token_stream(self) -> TokenStream {
-        let CellTokenStreamData {
-            trees,
-            prefix,
-            suffix,
-            source,
-        } = self.into_data();
-        TokenStream::from_parts(TokenStreamParts {
-            trees: trees
-                .into_iter()
-                .filter_map(CellTokenTree::into_lexical)
-                .collect(),
-            prefix,
-            suffix,
-            source,
-        })
+        let CellTokenStreamData { trees, source } = self.into_data();
+        let trees = trees.into_iter().filter_map(CellTokenTree::into_lexical);
+        TokenStream::from_parts(trees.collect(), source)
     }
 
     /// Returns this framed cell's lexical token representation.
@@ -329,19 +254,12 @@ impl CellTokenStream {
 
     /// Creates the value from augmented.
     pub(crate) fn from_augmented(tokens: TokenStream) -> Self {
-        let TokenStreamParts {
-            trees,
-            prefix,
-            suffix,
-            source,
-        } = tokens.into_parts();
+        let (trees, source) = tokens.into_parts();
         Self(Arc::new(CellTokenStreamData {
             trees: trees
                 .into_iter()
                 .map(CellTokenTree::from_augmented)
                 .collect(),
-            prefix,
-            suffix,
             source,
         }))
     }
@@ -361,27 +279,10 @@ impl CellTokenStream {
     }
 
     /// Converts the value into parser token stream.
-    ///
-    /// Comments are settled onto the tokens they follow, so a parser finds
-    /// them in trailing trivia and in the stream prefix only.
     pub(crate) fn into_parser_token_stream(self) -> TokenStream {
-        let CellTokenStreamData {
-            trees,
-            prefix,
-            suffix,
-            source,
-        } = self.into_data();
-        let mut tokens = TokenStream::from_parts(TokenStreamParts {
-            trees: trees
-                .into_iter()
-                .map(CellTokenTree::into_parser_token)
-                .collect(),
-            prefix,
-            suffix,
-            source,
-        });
-        tokens.settle_trivia();
-        tokens
+        let CellTokenStreamData { trees, source } = self.into_data();
+        let trees = trees.into_iter().map(CellTokenTree::into_parser_token);
+        TokenStream::from_parts(trees.collect(), source)
     }
 
     /// Creates the value from framed cells.
@@ -410,14 +311,7 @@ impl AsRef<[CellTokenTree]> for CellTokenStream {
 
 impl Spanned for CellTokenStream {
     fn try_span(&self) -> Option<Span> {
-        Span::join_all(
-            self.data()
-                .prefix
-                .try_span()
-                .into_iter()
-                .chain(self.iter().filter_map(Spanned::try_span))
-                .chain(self.data().suffix.try_span()),
-        )
+        Span::join_all(self.iter().filter_map(Spanned::try_span))
     }
 }
 
@@ -449,9 +343,9 @@ impl<'syntax> IntoIterator for &'syntax CellTokenStream {
 struct CellStreamData {
     cells: Vec<CellTokenStream>,
     source: Option<Arc<Source>>,
-    /// The span of the layout that precedes the first cell.
+    /// The physical start of the source.
     bof: Option<Span>,
-    /// The span of the layout that follows the final cell.
+    /// The physical end of the source.
     eof: Option<Span>,
 }
 
@@ -507,8 +401,8 @@ impl CellStream {
     /// Use [`frame_recovering`] to retain completed cells alongside that tail.
     pub fn new(tokens: TokenStream) -> Result<Self, CellStreamError> {
         let source = tokens.source();
-        let bof = leading_layout_span(source.as_ref());
-        let eof = trailing_layout_span(source.as_ref());
+        let bof = source.as_ref().map(source_start);
+        let eof = source.as_ref().map(source_end);
         let FramedCells { cells, incomplete } = frame_recovering(tokens);
         match incomplete {
             Some(tokens) => Err(CellStreamError {
@@ -539,8 +433,8 @@ impl CellStream {
     ) -> Self {
         Self(Arc::new(CellStreamData {
             cells: cells.into_iter().collect(),
-            bof: leading_layout_span(source.as_ref()),
-            eof: trailing_layout_span(source.as_ref()),
+            bof: source.as_ref().map(source_start),
+            eof: source.as_ref().map(source_end),
             source,
         }))
     }
@@ -605,22 +499,16 @@ impl CellStream {
                 return None;
             }
         }
-        source.text()[cursor..]
-            .bytes()
-            .all(|byte| byte.is_ascii_whitespace())
+        source
+            .is_layout(cursor..source.text().len())
             .then(|| Arc::clone(source))
     }
 
-    /// Handles physical beginning-of-file.
-    ///
-    /// The span covers the layout before the first significant byte, so the
-    /// beginning-of-file marker built from it retains input that no cell owns.
-    /// For a stream whose cells do not cover one shared source snapshot it is
-    /// the empty span where the first cell starts.
+    /// Where the source starts, or, for cells that do not cover one shared
+    /// source snapshot, where the first cell starts.
     pub(crate) fn physical_bof(&self) -> Span {
         if let Some(source) = self.complete_source() {
-            let leading = source.leading_whitespace();
-            return Span::ranged(Arc::clone(&source), leading);
+            return source_start(&source);
         }
         self.first()
             .and_then(cell_first_span)
@@ -628,44 +516,22 @@ impl CellStream {
             .unwrap_or_else(|| Span::for_text(""))
     }
 
-    /// Handles physical end-of-file.
-    ///
-    /// The span covers the layout between the last significant byte and the
-    /// physical end, so the end-of-file marker built from it retains input that
-    /// no cell owns. It stays empty for a stream whose cells do not cover one
-    /// shared source snapshot.
+    /// Where the source ends, or, for cells that do not cover one shared
+    /// source snapshot, where the last cell ends.
     pub(crate) fn physical_eof(&self) -> Span {
         if let Some(source) = self.complete_source() {
-            let trailing = source.trailing_whitespace();
-            return Span::ranged(Arc::clone(&source), trailing);
+            return source_end(&source);
         }
         self.last().map_or_else(|| Span::for_text(""), end_span)
     }
 
     /// Creates the value from source file.
     pub(crate) fn from_source_file(source_file: &crate::SourceFile) -> Self {
-        let mut cells = source_file
-            .cells
-            .iter()
-            .map(Lex::to_token_stream)
-            .collect::<Vec<_>>();
-        for (index, comments) in [
-            (0, &source_file.leading_trivia),
-            (cells.len(), source_file.eof.leading_trivia()),
-        ]
-        .into_iter()
-        .rev()
-        {
-            if !comments.is_empty() {
-                let mut comment_cell = TokenStream::new();
-                comment_cell.extend(comments.as_slice().iter().cloned());
-                cells.insert(index, comment_cell);
-            }
-        }
         Self(Arc::new(CellStreamData {
-            cells: cells
-                .into_iter()
-                .map(CellTokenStream::from_augmented)
+            cells: source_file
+                .cells
+                .iter()
+                .map(|cell| CellTokenStream::from_augmented(cell.to_token_stream()))
                 .collect(),
             source: None,
             bof: source_file.bof.try_span(),
@@ -676,17 +542,7 @@ impl CellStream {
 
 /// Returns whether the value covers stream.
 fn covers_stream(stream: &CellTokenStream, source: &Arc<Source>, cursor: &mut usize) -> bool {
-    for trivia in stream.data().prefix.as_slice() {
-        if !covers_span(trivia.span(), source, cursor) {
-            return false;
-        }
-    }
     for token in stream.iter() {
-        for trivia in token.leading_trivia() {
-            if !covers_span(trivia.span(), source, cursor) {
-                return false;
-            }
-        }
         let covered = match token {
             CellTokenTree::Group(group) => {
                 covers_span(group.delimiter().opening_span(), source, cursor)
@@ -701,18 +557,8 @@ fn covers_stream(stream: &CellTokenStream, source: &Arc<Source>, cursor: &mut us
         if !covered {
             return false;
         }
-        for trivia in token.trailing_trivia() {
-            if !covers_span(trivia.span(), source, cursor) {
-                return false;
-            }
-        }
     }
-    stream
-        .data()
-        .suffix
-        .as_slice()
-        .iter()
-        .all(|trivia| covers_span(trivia.span(), source, cursor))
+    true
 }
 
 /// Returns whether the value covers span.
@@ -726,11 +572,7 @@ fn covers_span(span: Span, source: &Arc<Source>, cursor: &mut usize) -> bool {
     if start == end {
         return start >= *cursor;
     }
-    if start < *cursor
-        || !source.text()[*cursor..start]
-            .bytes()
-            .all(|byte| byte.is_ascii_whitespace())
-    {
+    if start < *cursor || !source.is_layout(*cursor..start) {
         return false;
     }
     *cursor = end;
@@ -739,137 +581,71 @@ fn covers_span(span: Span, source: &Arc<Source>, cursor: &mut usize) -> bool {
 
 impl Display for CellStream {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
-        write_leading_layout(
-            formatter,
-            self.data().bof.as_ref(),
-            self.first().and_then(cell_first_span).as_ref(),
-        )?;
+        let (bof, eof) = (self.data().bof.as_ref(), self.data().eof.as_ref());
+        let first = self.first().and_then(cell_first_span);
+        if let (Some(bof), Some(first)) = (bof, &first)
+            && let Some(layout) = layout_between(bof, first)
+        {
+            formatter.write_str(layout)?;
+        }
         let mut previous: Option<Span> = None;
-        for (index, cell) in self.iter().enumerate() {
-            if index != 0 {
-                let next = cell_first_span(cell);
-                let mut recovered = false;
-                if let Some((left, right)) = previous.as_ref().zip(next.as_ref())
-                    && left.shares_source(right)
-                    && let (Some(end), Some(start)) = (left.end(), right.start())
-                    && end <= start
-                {
-                    let gap = &left.source().text()[end..start];
-                    // Synthetic text is assembled without layout, so cells
-                    // touching there were never written on one line.
-                    let written = !gap.is_empty() || !left.source().file().is_synthetic();
-                    if written && gap.bytes().all(|byte| byte.is_ascii_whitespace()) {
-                        formatter.write_str(gap)?;
-                        recovered = true;
-                    }
-                }
-                if !recovered {
-                    formatter.write_str("\n")?;
-                }
+        for cell in self.iter() {
+            let next = cell_first_span(cell);
+            if let Some(left) = &previous {
+                write_cell_boundary(formatter, left, next.as_ref())?;
             }
-            cell.fmt(formatter)?;
+            write_stream(formatter, &cell.to_token_stream(), None)?;
             previous = cell_last_span(cell);
         }
-        write_trailing_layout(formatter, self.data().eof.as_ref(), previous.as_ref())
-    }
-}
-
-/// Spans the layout opening a source snapshot the cells were framed from.
-fn leading_layout_span(source: Option<&Arc<Source>>) -> Option<Span> {
-    source.map(|source| Span::ranged(Arc::clone(source), source.leading_whitespace()))
-}
-
-/// Writes the layout the beginning-of-file span retains before the first cell.
-///
-/// The prefix is emitted only when it is the whitespace physically preceding
-/// the first cell, so a marker left before an edited or reassembled stream
-/// contributes nothing rather than stale text. Without cells, the
-/// end-of-file marker owns all layout.
-fn write_leading_layout(
-    formatter: &mut Formatter<'_>,
-    bof: Option<&Span>,
-    first_cell: Option<&Span>,
-) -> FmtResult {
-    let (Some(bof), Some(first)) = (bof, first_cell) else {
-        return Ok(());
-    };
-    if !first.shares_source(bof) {
-        return Ok(());
-    }
-    let Some((start, stop)) = bof.start().zip(first.start()) else {
-        return Ok(());
-    };
-    match bof.source().text().get(start..stop) {
-        Some(prefix) if prefix.bytes().all(|byte| byte.is_ascii_whitespace()) => {
-            formatter.write_str(prefix)
+        let Some(eof) = eof else {
+            return Ok(());
+        };
+        let resume = previous.as_ref().or(bof).unwrap_or(eof);
+        match layout_between(resume, eof) {
+            Some(layout) => formatter.write_str(layout),
+            None => write_gap(formatter, Some(resume), None).map(drop),
         }
-        _ => Ok(()),
     }
 }
 
-/// Spans the layout closing a source snapshot the cells were framed from.
-fn trailing_layout_span(source: Option<&Arc<Source>>) -> Option<Span> {
-    source.map(|source| Span::ranged(Arc::clone(source), source.trailing_whitespace()))
-}
-
-/// Writes the layout the end-of-file span retains after the final cell.
-///
-/// The suffix is emitted only when it is the whitespace physically following
-/// the last cell, so a marker left behind by an edited or reassembled stream
-/// contributes nothing rather than stale text.
-fn write_trailing_layout(
+/// Writes the layout between two cells: the source between them when it is
+/// only layout, otherwise their comments with a line break between.
+fn write_cell_boundary(
     formatter: &mut Formatter<'_>,
-    eof: Option<&Span>,
-    last_cell: Option<&Span>,
+    left: &Span,
+    right: Option<&Span>,
 ) -> FmtResult {
-    let Some(eof) = eof else {
-        return Ok(());
-    };
-    let resume = match last_cell {
-        Some(last) if last.shares_source(eof) => last.end(),
-        Some(_) => return Ok(()),
-        None => eof.start(),
-    };
-    let Some((resume, stop)) = resume.zip(eof.end()) else {
-        return Ok(());
-    };
-    match eof.source().text().get(resume..stop) {
-        Some(suffix) if suffix.bytes().all(|byte| byte.is_ascii_whitespace()) => {
-            formatter.write_str(suffix)
-        }
-        _ => Ok(()),
+    // Synthetic text is assembled without layout, so cells touching there
+    // were never written on one line.
+    let touching_synthetic = left.source().file().is_synthetic()
+        && right.is_some_and(|right| left.end() == right.start());
+    if let Some(layout) = right.and_then(|right| layout_between(left, right))
+        && !touching_synthetic
+    {
+        return formatter.write_str(layout);
     }
+    write_gap(formatter, Some(left), None)?;
+    formatter.write_str("\n")?;
+    write_gap(formatter, None, right).map(drop)
+}
+
+fn source_start(source: &Arc<Source>) -> Span {
+    Span::ranged(Arc::clone(source), 0..0)
+}
+
+fn source_end(source: &Arc<Source>) -> Span {
+    let end = source.text().len();
+    Span::ranged(Arc::clone(source), end..end)
 }
 
 /// Handles cell first span.
 fn cell_first_span(tokens: &CellTokenStream) -> Option<Span> {
-    tokens
-        .data()
-        .prefix
-        .as_slice()
-        .first()
-        .map(Spanned::span)
-        .or_else(|| {
-            tokens.iter().next().map(|token| {
-                token
-                    .leading_trivia()
-                    .first()
-                    .map_or_else(|| token.span(), Spanned::span)
-            })
-        })
-        .or_else(|| tokens.data().suffix.as_slice().first().map(Spanned::span))
+    tokens.iter().next().map(Spanned::span)
 }
 
 /// Handles cell last span.
 fn cell_last_span(tokens: &CellTokenStream) -> Option<Span> {
-    tokens
-        .data()
-        .suffix
-        .as_slice()
-        .last()
-        .map(Spanned::span)
-        .or_else(|| tokens.iter().next_back().map(token_end_span))
-        .or_else(|| tokens.data().prefix.as_slice().last().map(Spanned::span))
+    tokens.iter().next_back().map(token_end_span)
 }
 
 impl IntoIterator for CellStream {
@@ -990,18 +766,6 @@ impl Tokenize for TokenStream {
     }
 }
 
-impl crate::SourceFile {
-    /// Places comments that follow every cell: on the end-of-file marker, or
-    /// on the file itself when it has no cells for them to follow.
-    pub(crate) fn set_closing_comments(&mut self, comments: Vec<Trivia>) {
-        if self.cells.is_empty() {
-            self.leading_trivia = LeadingTrivia::new(comments);
-        } else {
-            self.eof.set_leading_trivia(comments);
-        }
-    }
-}
-
 impl Tokenize for crate::SourceFile {
     fn tokenize(&self, output: &mut CellStream) -> Result<(), CellStreamError> {
         let tokenized = CellStream::from_source_file(self).into_data();
@@ -1033,10 +797,9 @@ impl<T: Tokenize + ?Sized> Tokenize for &T {
 /// Only the final source prefix can be incomplete: every confirmed boundary
 /// before it is retained in [`Self::cells`]. This lets realtime and recovering
 /// parsers reuse completed work while continuing to accumulate the tail.
-/// Both parts retain their original source spans and trivia, accessible through
+/// Both parts retain their original source spans, accessible through
 /// [`Spanned`] and [`CellTokenStream::to_token_stream`]. A cell's span covers
-/// its tokens; attached comments retain their own spans and can be collected
-/// with [`crate::CommentTrivia::of`].
+/// its tokens; its comments can be collected with [`crate::Lex::comments`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FramedCells {
     /// Complete cells in their original source order.
@@ -1052,7 +815,7 @@ pub struct FramedCells {
 /// operator/clause state can end there. At end of input, a nonempty tail is
 /// complete under the same rule unless its final delimiter group is unclosed;
 /// otherwise the tail is returned through [`FramedCells::incomplete`]. Empty
-/// or trivia-only input never becomes an incomplete cell.
+/// or comment-only input never becomes an incomplete cell.
 ///
 /// The pass does not parse expressions or reject malformed grammar. It retains
 /// comments and physical source spans, observes quote specifiers so their next
@@ -1079,20 +842,12 @@ pub struct FramedCells {
 /// # }
 /// ```
 pub fn frame_recovering(tokens: TokenStream) -> FramedCells {
-    let mut tokens = tokens;
-    // Stream-level trivia must follow the first/last framed cell instead of
-    // being lost when the significant tokens are distributed between cells.
-    let prefix_trivia = tokens.take_prefix_trivia();
-    let suffix_trivia = tokens.take_suffix_trivia();
     let mut cells = Vec::new();
     let mut current = TokenStream::new();
-    current.extend(prefix_trivia.into_vec());
     let mut pending_boundary = false;
     let mut quote_next = false;
 
     for token in tokens {
-        // Delay a semicolon boundary until the next token so any stream-level
-        // suffix trivia discovered at EOF remains owned by that final cell.
         if pending_boundary {
             cells.push(insert_adjacency(take(&mut current)));
             pending_boundary = false;
@@ -1109,7 +864,7 @@ pub fn frame_recovering(tokens: TokenStream) -> FramedCells {
         let quoted = take(&mut quote_next);
         let quotes_next = !quoted
             && matches!(&token, TokenTree::Ident(identifier)
-                if is_quote_specifier(canonical_word_spelling(identifier.text())));
+                if is_quote_specifier(canonical_spelling(identifier.text())));
         let semicolon = !quoted && token.spelling() == Some(";");
 
         current.extend([token]);
@@ -1121,8 +876,6 @@ pub fn frame_recovering(tokens: TokenStream) -> FramedCells {
         }
     }
 
-    current.extend(suffix_trivia.into_vec());
-
     // A final semicolon confirms the current cell independently of its other
     // operator or delimiter state.
     if pending_boundary {
@@ -1133,12 +886,8 @@ pub fn frame_recovering(tokens: TokenStream) -> FramedCells {
         };
     }
 
-    // Comments without syntax are complete retained input, not a request for
-    // another line of source.
-    if !has_syntax(&current) {
-        if current.has_trivia() {
-            cells.push(CellTokenStream::from_augmented(current));
-        }
+    // Input without syntax, such as only comments, needs no further line.
+    if current.is_empty() {
         return FramedCells {
             cells,
             incomplete: None,
@@ -1164,15 +913,12 @@ pub fn frame_recovering(tokens: TokenStream) -> FramedCells {
 /// Handles end span.
 pub(crate) fn end_span(tokens: &CellTokenStream) -> Span {
     let ends_with_semicolon = ends_with_cell_semicolon(tokens);
-    let span = tokens
-        .iter()
-        .next_back()
-        .map(token_end_span)
-        .or_else(|| tokens.data().suffix.as_slice().last().map(Spanned::span))
-        .or_else(|| tokens.data().prefix.as_slice().last().map(Spanned::span));
-    let Some(span) = span else {
+    let Some(span) = tokens.iter().next_back().map(token_end_span) else {
         return Span::for_text("");
     };
+    // A line comment after the last token runs to the line break that ends
+    // the cell.
+    let span = span.comments_after().last().map_or(span, Spanned::span);
     let Some(end) = span.end() else {
         return Span::unlocated(Arc::clone(span.source()));
     };
@@ -1184,25 +930,11 @@ pub(crate) fn end_span(tokens: &CellTokenStream) -> Span {
 
 /// Handles token end span.
 fn token_end_span(token: &CellTokenTree) -> Span {
-    if let Some(trivia) = token.trailing_trivia().last() {
-        return trivia.span();
-    }
     if let CellTokenTree::Group(group) = token
         && !group.delimiter().is_closed()
+        && let Some(inner) = group.stream().iter().next_back()
     {
-        let contents = group.stream();
-        if let Some(inner) = contents.iter().next_back() {
-            return token_end_span(inner);
-        }
-        if let Some(trivia) = contents
-            .data()
-            .suffix
-            .as_slice()
-            .last()
-            .or_else(|| contents.data().prefix.as_slice().last())
-        {
-            return trivia.span();
-        }
+        return token_end_span(inner);
     }
     token.span()
 }
@@ -1216,14 +948,9 @@ pub(crate) fn ends_with_cell_semicolon(tokens: &CellTokenStream) -> bool {
         final_semicolon = !quoted && token.spelling() == Some(";");
         quote_next = !quoted
             && matches!(token, CellTokenTree::Ident(identifier)
-                if is_quote_specifier(canonical_word_spelling(identifier.text())));
+                if is_quote_specifier(canonical_spelling(identifier.text())));
     }
     final_semicolon
-}
-
-/// Returns whether the value has syntax.
-fn has_syntax(stream: &TokenStream) -> bool {
-    !stream.is_empty()
 }
 
 /// Returns whether the value ends in incomplete group.
@@ -1232,11 +959,8 @@ fn ends_in_incomplete_group(stream: &TokenStream) -> bool {
 }
 
 /// Inserts adjacency.
-fn insert_adjacency(mut tokens: TokenStream) -> CellTokenStream {
-    let prefix = tokens.take_prefix_trivia();
-    let suffix = tokens.take_suffix_trivia();
+fn insert_adjacency(tokens: TokenStream) -> CellTokenStream {
     let mut output = TokenStream::new();
-    output.extend(prefix.into_vec());
     let mut left_can_end = false;
     let mut quote_next = false;
 
@@ -1257,13 +981,10 @@ fn insert_adjacency(mut tokens: TokenStream) -> CellTokenStream {
 
         let quotes_next = !quoted
             && matches!(&token, TokenTree::Ident(identifier)
-                if is_quote_specifier(canonical_word_spelling(identifier.text())));
+                if is_quote_specifier(canonical_spelling(identifier.text())));
         left_can_end = quoted || can_end_operand(&token);
         quote_next = quotes_next;
         output.extend([token]);
-    }
-    for trivia in suffix.into_vec() {
-        output.push_leading_trivia(trivia);
     }
     CellTokenStream::from_augmented(output)
 }
@@ -1283,7 +1004,7 @@ fn tokens_cross_line_break(left: &TokenTree, right: &TokenTree) -> bool {
 
 /// Handles token parse rule.
 fn token_parse_rule(token: &TokenTree) -> Option<TokenParseRule> {
-    let spelling = token.spelling().map(canonical_word_spelling)?;
+    let spelling = token.spelling().map(canonical_spelling)?;
     TOKEN_PARSE_RULES
         .binary_search_by_key(&spelling, |(declared, _)| *declared)
         .ok()
@@ -1318,8 +1039,7 @@ fn can_end_operand(token: &TokenTree) -> bool {
 mod tests {
     use super::{Arc, CellStream, frame_recovering};
     use crate::{
-        CellTokenTree, CommentTrivia, Spanned, TokenTree, Tokenize, TriviaKind, lex_str,
-        lex_str_recovering,
+        CellTokenTree, CommentKind, Lex, Spanned, TokenTree, Tokenize, lex_str, lex_str_recovering,
     };
 
     #[test]
@@ -1347,15 +1067,13 @@ mod tests {
         let tail = framed.incomplete.unwrap();
 
         let comments = |cell: &super::CellTokenStream| {
-            let comments = CommentTrivia::of(&cell.to_token_stream());
-            comments
-                .outer()
-                .iter()
-                .chain(comments.inner())
-                .map(|trivia| {
-                    assert_eq!(trivia.span().text(), Some(trivia.text()));
-                    assert!(trivia.span().shares_source(&cell.span()));
-                    trivia.text().to_owned()
+            cell.to_token_stream()
+                .comments()
+                .into_iter()
+                .map(|comment| {
+                    assert_eq!(comment.span().text(), Some(comment.text()));
+                    assert!(comment.span().shares_source(&cell.span()));
+                    comment.text().to_owned()
                 })
                 .collect::<Vec<_>>()
         };
@@ -1366,12 +1084,12 @@ mod tests {
     }
 
     #[test]
-    fn recovering_framing_handles_complete_empty_and_trivia_only_input() {
+    fn recovering_framing_handles_complete_empty_and_comment_only_input() {
         for (source, expected) in [
             ("a = 1; b = 2", vec!["a = 1;", "b = 2"]),
             ("", vec![]),
             (" \n ", vec![]),
-            ("-- comment", vec!["-- comment"]),
+            ("-- comment", vec![]),
         ] {
             let framed = frame_recovering(lex_str(source).unwrap());
             assert!(framed.incomplete.is_none(), "{source:?}");
@@ -1446,20 +1164,22 @@ mod tests {
     fn line_comment_blocks_begin_the_cell_on_their_right() {
         let cells = CellStream::new(lex_str("x\n-- first\n-- second\ny").unwrap()).unwrap();
         assert_eq!(cells.len(), 2);
-        let comments = cells[1].iter().next().unwrap().leading_trivia();
-        assert_eq!(comments.len(), 1);
-        assert_eq!(comments[0].kind(), TriviaKind::LineComment);
-        assert_eq!(comments[0].text(), "-- first\n-- second");
+        let comments = cells[1].to_token_stream().comments();
+        let outer = comments.outer();
+        assert_eq!(outer.len(), 1);
+        assert_eq!(outer[0].kind(), CommentKind::Line);
+        assert_eq!(outer[0].text(), "-- first\n-- second");
     }
 
     #[test]
     fn a_blank_line_separates_outer_comment_blocks() {
         let cells = CellStream::new(lex_str("-- first\n\n-- second\ny").unwrap()).unwrap();
-        let comments = cells[0].iter().next().unwrap().leading_trivia();
+        let comments = cells[0].to_token_stream().comments();
+        let outer = comments.outer();
 
-        assert_eq!(comments.len(), 2);
-        assert_eq!(comments[0].text(), "-- first");
-        assert_eq!(comments[1].text(), "-- second");
+        assert_eq!(outer.len(), 2);
+        assert_eq!(outer[0].text(), "-- first");
+        assert_eq!(outer[1].text(), "-- second");
     }
 
     #[test]
@@ -1468,9 +1188,10 @@ mod tests {
         assert_eq!(cells.len(), 1);
         assert!(cells[0].iter().any(|token| {
             token
-                .trailing_trivia()
+                .span()
+                .comments_after()
                 .iter()
-                .any(|trivia| trivia.kind() == TriviaKind::LineComment)
+                .any(|comment| comment.kind() == CommentKind::Line)
         }));
     }
 

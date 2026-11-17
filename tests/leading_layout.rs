@@ -31,10 +31,10 @@ fn layout_before_the_first_cell_survives_a_parse_and_emit_round_trip() {
 }
 
 #[test]
-fn the_beginning_of_file_marker_spans_the_layout_before_the_first_byte() {
-    for (source, retained) in [("\n  x = 1", "\n  "), ("x = 1", ""), ("   \n", "")] {
+fn the_beginning_of_file_marker_is_the_physical_start() {
+    for source in ["\n  x = 1", "x = 1", "   \n"] {
         for file in both_parsers(source) {
-            assert_eq!(file.bof.span().text(), Some(retained), "{source:?}");
+            assert_eq!(file.bof.span().bounds(), Some((0, 0)), "{source:?}");
         }
     }
 }

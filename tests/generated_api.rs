@@ -1,8 +1,6 @@
 //! Integration tests for generated api.
 
-use m2_syn::nodes::{
-    Array, BinaryOperator, Expr, ExprOp, ExprOpBin, ExprOpBinRegular, PrefixOperator, Symbol,
-};
+use m2_syn::nodes::{BinaryOperator, Expr, ExprArray, ExprBinary, PrefixOperator, Symbol};
 use m2_syn::{
     DelimiterKind, DelimiterToken, Lex, LiteralKind, Source, Span, Spanned, TokenParseError,
     TokenTree, fold::Fold, parse_quote_m2, parse_tokens, parse2, quote_m2, visit::Visit,
@@ -35,24 +33,13 @@ fn token_macro_normalizes_spacing_and_string_fragments() {
     assert_eq!(expected, std::any::TypeId::of::<m2_syn::Token!["!" "="]>());
 }
 
-fn assignment() -> Expr {
-    ExprOpBinRegular::new(
+fn product() -> Expr {
+    ExprBinary::new(
         Box::new(symbol("left", 0).into()),
         multiply(5).into(),
         Box::new(symbol("right", 7).into()),
     )
     .into()
-}
-
-#[test]
-fn constructors_hide_recursive_storage_and_preserve_public_categories() {
-    let node = assignment();
-    assert!(matches!(
-        &node,
-        Expr::Op(ExprOp::Bin(ExprOpBin::Regular(_)))
-    ));
-    assert_eq!(node.span().start().unwrap(), 0);
-    assert_eq!(node.span().end().unwrap(), 12);
 }
 
 struct SymbolCollector(Vec<String>);
@@ -65,7 +52,7 @@ impl<'ast> Visit<'ast> for SymbolCollector {
 
 #[test]
 fn visit_uses_generated_default_walkers() {
-    let node = assignment();
+    let node = product();
     let mut collector = SymbolCollector(Vec::new());
 
     collector.visit_expr(&node);
@@ -84,7 +71,7 @@ impl VisitMut for Rename {
 
 #[test]
 fn visit_mut_changes_nodes_in_place() {
-    let mut node = assignment();
+    let mut node = product();
     Rename.visit_expr_mut(&mut node);
     let mut collector = SymbolCollector(Vec::new());
 
@@ -103,7 +90,7 @@ impl Fold for Uppercase {
 
 #[test]
 fn fold_migrates_the_owned_tree() {
-    let node = Uppercase.fold_expr(assignment());
+    let node = Uppercase.fold_expr(product());
     let mut collector = SymbolCollector(Vec::new());
 
     collector.visit_expr(&node);
@@ -113,7 +100,7 @@ fn fold_migrates_the_owned_tree() {
 
 #[test]
 fn default_walkers_are_public_functions() {
-    let mut node = assignment();
+    let mut node = product();
     let mut collector = SymbolCollector(Vec::new());
 
     m2_syn::visit::visit_expr(&mut collector, &node);
@@ -177,10 +164,10 @@ fn token_constructor_accepts_any_supported_span_source() {
 #[test]
 fn delimiter_macro_names_generated_typed_delimiter_atoms() {
     let group_span = span(0, 3);
-    let delimiter: m2_syn::Delimiter![()] = m2_syn::Delimiter![()](&group_span);
+    let delimiter: m2_syn::Token![()] = m2_syn::Token![()](&group_span);
 
     assert_eq!(
-        <m2_syn::Delimiter![()] as DelimiterToken>::KIND,
+        <m2_syn::Token![()] as DelimiterToken>::KIND,
         DelimiterKind::Parenthesis
     );
     assert_eq!(delimiter.span(), group_span);
@@ -188,9 +175,9 @@ fn delimiter_macro_names_generated_typed_delimiter_atoms() {
 
 #[test]
 fn delimited_nodes_store_typed_delimiters_and_flatten_to_raw_groups() {
-    let array = Array::new(Vec::new(), None);
+    let array = ExprArray::new(Vec::new(), None);
     assert_eq!(
-        <m2_syn::Delimiter![[]] as DelimiterToken>::KIND,
+        <m2_syn::Token![[]] as DelimiterToken>::KIND,
         DelimiterKind::Bracket
     );
     assert_eq!(array.delimiter.span().text(), Some("[]"));

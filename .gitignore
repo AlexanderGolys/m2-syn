@@ -6,3 +6,5 @@
 /codex-session-*.md
 .claude/settings.local.json
 /examples/zz_*.rs
+/AST_TREE.local.md
+/rustc-ice-*.txt

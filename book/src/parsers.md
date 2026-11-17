@@ -1,160 +1,101 @@
-# Parser adapters
+# Parsing source
 
-Generated migration depends only on `ExternalCstNode`.
-`TreeSitterNode` adapts Tree-sitter identity, field names, source text, extras,
-and ranges to that interface for schema-compatible leaves, operators, and
-tokens. Complete-file `TreeSitterParser` lowers Tree-sitter's `muted`, pack,
-delimiter, operator, assignment, and control nodes directly into the cleaned
-typed graph; it does not re-lex the source or call the native parser. The
-external node view ends at the adapter and is never stored in a typed node.
+Choose the entry point that matches the input you have:
 
-`Parser<T>` is the parser-backend boundary. It receives a `CellStream` and
-returns a generated syntax target. `T` defaults to
-`SourceFile`, while parsers may implement the trait again for more specific
-targets such as `Expr`. Both built-in backends implement this same cell-stream
-API. A parser with its own CST can implement `ExternalCstNode` and call `migrate`;
-a parser whose native model already matches the generated graph can construct
-the target directly.
+| Input and purpose | Entry point | Required feature |
+| --- | --- | --- |
+| Source with an owned tree and convenient output | `ParsedFile::from_source_native` | none |
+| Source to a typed `nodes::SourceFile` | `parse_native` | none |
+| Source through Tree-sitter | `parse_file` or `ParsedFile::from_source` | `tree-sitter` |
+| Quoted tokens through Tree-sitter | `parse_tokens` | `tree-sitter` |
+| A typed fragment from tokens | `parse2::<T>` | none |
+| A typed fragment from source | `parse_fragment_str::<T>` | none |
+| Framed cells with an explicit backend | `parse_with` | depends on backend |
 
-The target-owned `Parse` trait is the dual of `Lex`: `parse2::<T>` consumes
-one complete `TokenStream` as `T`. Generated `Token![..]` atoms, raw token
-categories, token streams, boxes, delimiters, comma-punctuated collections, and
-terminated bodies implement it. `ParseStream` shares immutable token storage
-through the persistent `TokenStream` handle; end-of-input is cursor state rather
-than a synthetic token. A `fork` has an independent index and `advance_to`
-explicitly commits successful speculation.
-`parse_quote_m2!` composes quoting with type-inferred parsing.
+## Whole files
 
-`Lex::to_token_stream` is the lexical projection, while `Tokenize` produces
-framed cells. The native parser supports the normalized round trip
-`CellStream -> SourceFile -> CellStream -> SourceFile`. Generated concrete token
-structs are deliberately underscore-prefixed; use `Token![..]`
-to name their types and inspect the underlying `TokenTree` after `Lex`
-when working with a heterogeneous stream. Delimiter structs follow the same
-rule through `Delimiter![..]`.
-
-Cell framing is shared infrastructure rather than a parser side effect.
-Semicolons and complete physical lines confirm top-level boundaries; delimiter
-groups are framed recursively but their separators never become top-level
-boundaries. The result uses `CellTokenTree::Adj` instead of manufacturing empty
-punctuation inside the lexical stream.
+Both backends produce the same owned syntax types. Once parsing finishes,
+traversal and source emission use that tree independently of the backend.
 
 ```rust
-# use std::convert::Infallible;
-use m2_syn::nodes::{BOF, EOF, SourceFile};
-use m2_syn::{CellStream, Parser, Span, Tokenize, lex_str, parse_with};
+use m2_syn::{Lex, parse_native};
 
-struct EmptyParser;
-
-impl Parser for EmptyParser {
-    type Error = Infallible;
-
-    fn parse_cells(&mut self, _cells: CellStream) -> Result<SourceFile, Self::Error> {
-        Ok(SourceFile::new(
-            BOF::new("", Span::for_text("")),
-            Vec::new(),
-            EOF::new("", Span::for_text("")),
-        ))
-    }
-}
-
-let tokens = lex_str("").unwrap();
-let cells = tokens.to_cell_stream().unwrap();
-let file = parse_with(&mut EmptyParser, cells).unwrap();
-assert!(file.cells.is_empty());
+let file = parse_native("x + 1\ny + x * 2")?;
+assert_eq!(file.cells.len(), 2);
+let emitted = file.to_m2();
+assert_eq!(parse_native(&emitted)?.to_m2(), emitted);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`TreeSitterParser` is the built-in implementation and can be retained across
-calls. `parse_file` remains the convenience function that creates one for a
-single parse.
+With the default features, `parse_file` selects Tree-sitter instead. Retain a
+`TreeSitterParser` when you want to reuse that backend across calls.
 
-`parse_file` is the concrete Macaulay2 parser entry point:
+For applications that edit source, `ParsedFile` supplies `cst()` and `cst_mut()`
+to access the tree, `original_source()` to inspect the retained input, and
+`to_source()` to emit the current tree. Token, cell, and pretty-print projections
+are computed from the current tree, so they reflect subsequent edits.
+
+## Fragments and parser backends
+
+`Parse` belongs to the type being read. `parse2::<T>` requires the entire input
+to be consumed; `parse_fragment_str::<T>` first lexes source and then performs
+that same complete parse. `parse_quote_m2!` combines quoting with type-inferred
+fragment parsing.
+
+`Parser<T>` belongs to a backend. Its `parse_cells` method accepts a
+`CellStream` and returns `T`, which defaults to `nodes::SourceFile`:
 
 ```rust
-# fn main() -> Result<(), m2_syn::ParseError> {
-use m2_syn::{Lex, parse_file};
+use m2_syn::{NativeParser, Tokenize, lex_str, parse_with};
 
-let file = parse_file("x + 1\ny + x * 2")?;
-let normalized = file.to_m2();
-assert_eq!(parse_file(&normalized)?.to_m2(), normalized);
-# Ok(())
-# }
+let tokens = lex_str("f(x); y = 2")?;
+let cells = tokens.to_cell_stream()?;
+let file = parse_with(&mut NativeParser, cells)?;
+assert_eq!(file.cells.len(), 2);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`parse_tokens` connects generated or quoted M2 back to typed syntax:
+An external parser can implement `ExternalCstNode` and use `Migrate` for
+schema-compatible nodes. A backend whose tree has a different shape must lower
+those differences explicitly. Tree-sitter's adapter does this for assignments,
+control forms, packs, and delimiters; it does not route parsing through the
+native backend.
 
-```rust
-# fn main() -> Result<(), m2_syn::ParseError> {
-use m2_syn::{Lex, parse_tokens, quote_m2};
+## Incomplete input and recovery
 
-let quoted = quote_m2! { left + (right) };
-let file = parse_tokens(&quoted)?;
-assert_eq!(file.to_m2(), "left + (right)");
-# Ok(())
-# }
-```
+The strict entry points return an error when they cannot construct the requested
+syntax. Recovery is explicit: `parse_native_recovering` and, with Tree-sitter,
+`parse_file_recovering` return a `Recovered` value with syntax and diagnostics
+when recovery succeeds. Native recovery can supply missing closing delimiters
+at end of input; other lexical or grammatical failures can still be fatal.
 
-`ParsedFile` provides the convenient source-to-source interface over these
-lower-level pieces. It owns one mutable typed CST and computes every current
-output from that tree, so a token projection cannot silently become stale after
-an edit. The original source remains available separately as an immutable
-snapshot. `from_source` uses Tree-sitter; `from_source_native` selects the direct
-precedence parser.
+For interactive input, choose the parser that matches your editing model:
 
-```rust
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-use m2_syn::{ParsedFile, Symbol, visit_mut::VisitMut};
+| Parser | Use |
+| --- | --- |
+| `NativeCellParser` | Submit lines and collect completed cells |
+| `NativeRealtimeParser` | Retain a document and apply insertions or deletions |
+| `RealtimeParser` | Retain Tree-sitter parsing state; requires `tree-sitter` |
 
-struct Rename;
+`NativeRealtimeParser` exposes each cell's state and diagnostics. A confirmed
+newline or semicolon provides a restart boundary. An EOF-only boundary remains
+speculative, so appending text can reopen the final cell. Earlier edits reframe
+forwards until an existing boundary is restored, allowing the remaining suffix
+to be reused.
 
-impl VisitMut for Rename {
-    fn visit_symbol_mut(&mut self, symbol: &mut Symbol) {
-        if symbol.text() == "left" {
-            symbol.set_text("renamed");
-        }
-    }
-}
+Cell spans refer to their own immutable source snapshots. Use a retained cell's
+`document_range()` when you need its position in the current document.
 
-let file = ParsedFile::from_source("left + right")?.edit(|cst| {
-    Rename.visit_source_file_mut(cst);
-});
+## Inspecting a parse
 
-assert_eq!(file.original_source(), "left + right");
-assert_eq!(file.to_source(), "renamed + right");
+`ParsedFile::pretty_tokens()` prints the lexical structure, while `pretty_cst()`
+prints the typed tree. `print_pretty()` combines the original source and both
+views, with terminal-aware coloring. `PrettyReport` and `PrettyOptions` expose
+more control over ranges, comments, and styling.
 
-// Stable, uncolored projections are useful in tests and diagnostics.
-println!("{}", file.pretty_tokens());
-println!("{}", file.pretty_cst());
-
-// One terminal-aware report includes the retained input, recursively flattened
-// tokens, and the generated typed CST.
-file.print_pretty()?;
-# Ok(())
-# }
-```
-
-The CST view is generated from the same schema as node construction and
-traversal. Struct fields become labelled edges, category enums remain invisible
-implementation details, punctuated sequences expose both values and comma
-tokens, leaf source spellings precede their node types, and delimiters show
-separate opening and closing boundaries. The token
-view rotates primitive sequences into compact horizontal bands: centered token
-text occupies the first row and token type the second, with recursive group
-openings and closings represented as ordinary columns. End-of-cell markers are
-explicit, always end a band, and group delimiters provide the only soft wrapping
-boundaries. Trivia is hidden by default and coalesced when enabled. Source
-ranges can be disabled and ANSI styling can be selected explicitly through
-`PrettyReport`.
-
-Run the inspector with its built-in example or give it an M2 source file:
+The repository includes a command-line inspector:
 
 ```sh
 cargo run --example inspect
 cargo run --example inspect -- path/to/file.m2
 ```
-
-`ChildCursor` removes Tree-sitter extras, so comments do not come from the
-Tree-sitter CST. After lowering, the adapter lexes the same source, settles
-every comment onto the raw token it follows, and transfers that trivia to the
-typed terminal or delimiter spanning exactly the same bytes, which places
-comments as the native parser does.

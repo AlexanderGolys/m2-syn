@@ -1,16 +1,13 @@
 //! Integration tests for tree sitter reconstruction.
 
-use m2_syn::nodes::{
-    BinaryOperator, Expr, ExprAssign, ExprAssignSimple, ExprCollection, ExprControl, ExprLiteral,
-    ExprOp, ExprOpBin, ExprQuote, PackedContent,
-};
+use m2_syn::nodes::{AssignOperator, BinaryOperator, Elements, Expr, Literal, QuoteKeyword};
 use m2_syn::{DelimiterToken, Lex, Span, Spanned, parse_file, parse_file_recovering, parse_native};
-use m2_syn::{Tokenize, lex_str, parse_tokens};
+use m2_syn::{Tokenize, format_pretty_tree, lex_str, parse_tokens};
 
 fn expression(source: &str) -> Expr {
     let mut file = parse_file(source).unwrap();
     assert_eq!(file.cells.len(), 1);
-    let PackedContent::Expr(expression) = file.cells.pop().unwrap().content else {
+    let Elements::Single(expression) = file.cells.pop().unwrap().elems else {
         panic!("expected one expression");
     };
     *expression
@@ -18,7 +15,7 @@ fn expression(source: &str) -> Expr {
 
 fn native_expression(source: &str) -> Expr {
     let mut file = parse_native(source).unwrap();
-    let PackedContent::Expr(expression) = file.cells.pop().unwrap().content else {
+    let Elements::Single(expression) = file.cells.pop().unwrap().elems else {
         panic!("expected one native expression");
     };
     *expression
@@ -39,82 +36,73 @@ fn token_parsing_uses_the_supplied_transformed_stream() {
 #[test]
 fn tree_sitter_lowers_binary_nodes_directly() {
     let expression = expression("left + right");
-    let Expr::Op(ExprOp::Bin(ExprOpBin::Regular(expression))) = expression else {
+    let Expr::Binary(expression) = expression else {
         panic!("expected a binary expression");
     };
 
-    assert!(
-        matches!(expression.left_operand.as_ref(), Expr::Symbol(symbol) if symbol.text() == "left")
-    );
-    assert!(matches!(expression.operator, BinaryOperator::Add(_)));
-    assert!(
-        matches!(expression.right_operand.as_ref(), Expr::Symbol(symbol) if symbol.text() == "right")
-    );
+    assert!(matches!(expression.left.as_ref(), Expr::Symbol(symbol) if symbol.text() == "left"));
+    assert!(matches!(expression.op, BinaryOperator::Add(_)));
+    assert!(matches!(expression.right.as_ref(), Expr::Symbol(symbol) if symbol.text() == "right"));
 }
 
 #[test]
 fn implicit_application_has_its_own_empty_marker() {
     let expression = expression("f x");
-    let Expr::Op(ExprOp::Bin(ExprOpBin::Adj(expression))) = expression else {
+    let Expr::Binary(expression) = expression else {
         panic!("application must be an adjacency expression");
     };
 
-    assert_eq!(expression.operator.span().bounds(), Some((2, 2)));
-    assert_eq!(expression.operator.to_m2(), "");
+    assert_eq!(expression.op.span().bounds(), Some((2, 2)));
+    assert_eq!(expression.op.to_m2(), "");
 }
 
 #[test]
-fn adjacency_is_syntactic_and_never_migrated_from_trivia() {
+fn adjacency_is_syntactic_and_never_migrated_from_layout() {
     for source in ["f(x)", "f (x)"] {
-        let Expr::Op(ExprOp::Bin(ExprOpBin::Adj(application))) = expression(source) else {
+        let Expr::Binary(application) = expression(source) else {
             panic!("`{source}` must be an adjacency expression");
         };
-        assert!(application.operator.span().is_empty());
-        assert_eq!(application.operator.to_m2(), "");
+        assert!(application.op.span().is_empty());
+        assert_eq!(application.op.to_m2(), "");
     }
 
-    let Expr::Control(ExprControl::Return(returned)) = expression("return 1") else {
+    let Expr::Return(returned) = expression("return 1") else {
         panic!("return must own its operand directly");
     };
-    assert!(matches!(returned.value.as_deref(), Some(Expr::Literal(_))));
+    assert!(matches!(returned.expr.as_deref(), Some(Expr::Literal(_))));
 }
 
 #[test]
 fn tree_sitter_applies_exact_core_word_aliases_before_grammar_parsing() {
-    let Expr::Op(ExprOp::Prefix(qualified_not)) = expression("Core$not x") else {
+    let Expr::Prefix(qualified_not) = expression("Core$not x") else {
         panic!("Core$not must use the hardcoded `not` alias");
     };
-    assert_eq!(qualified_not.operator.spelling(), "not");
-    assert_eq!(qualified_not.operator.span().bounds(), Some((0, 8)));
+    assert_eq!(qualified_not.op.spelling(), "not");
+    assert_eq!(qualified_not.op.span().bounds(), Some((0, 8)));
 
     let conjunction = expression("x Core$and y");
-    let Expr::Op(ExprOp::Bin(ExprOpBin::Regular(conjunction))) = conjunction else {
+    let Expr::Binary(conjunction) = conjunction else {
         panic!("Core$and must use the hardcoded binary alias");
     };
-    assert_eq!(conjunction.operator.spelling(), "and");
-    assert_eq!(conjunction.operator.span().bounds(), Some((2, 10)));
+    assert_eq!(conjunction.op.spelling(), "and");
+    assert_eq!(conjunction.op.span().bounds(), Some((2, 10)));
 
     let recursive = expression("Core$Core$not x");
-    let Expr::Op(ExprOp::Bin(ExprOpBin::Adj(recursive))) = recursive else {
+    let Expr::Binary(recursive) = recursive else {
         panic!("a recursively qualified spelling must remain an ordinary symbol");
     };
-    assert!(
-        matches!(recursive.left_operand.as_ref(), Expr::Symbol(symbol)
+    assert!(matches!(recursive.left.as_ref(), Expr::Symbol(symbol)
         if symbol.text() == "Core$Core$not"
-            && symbol.package_qualifier.is_none()
-            && symbol.index_qualifier.is_none())
-    );
+            && symbol.package_qualifier().is_none()
+            && symbol.index_qualifier().is_none()));
 
-    let Expr::Quote(ExprQuote::Symbol(quoted)) = expression("symbol Core$not") else {
-        panic!("a quote specifier must suppress the alias behavior");
+    let Expr::Quote(quoted) = expression("symbol Core$not") else {
+        panic!("a quote keyword must suppress the alias behavior");
     };
+    assert!(matches!(quoted.keyword, QuoteKeyword::Symbol(_)));
     assert_eq!(quoted.symbol.text(), "Core$not");
     assert_eq!(
-        quoted
-            .symbol
-            .package_qualifier
-            .as_ref()
-            .and_then(Span::bounds),
+        quoted.symbol.package_qualifier().and_then(Span::bounds),
         Some((7, 11))
     );
 }
@@ -127,11 +115,11 @@ fn tree_sitter_symbols_derive_qualifier_metadata_from_one_identifier_node() {
     assert_eq!(symbol.text(), "Package$name$12");
     assert_eq!(symbol.span().bounds(), Some((0, 15)));
     assert_eq!(
-        symbol.package_qualifier.as_ref().and_then(Span::bounds),
+        symbol.package_qualifier().and_then(Span::bounds),
         Some((0, 7))
     );
     assert_eq!(
-        symbol.index_qualifier.as_ref().and_then(Span::bounds),
+        symbol.index_qualifier().and_then(Span::bounds),
         Some((13, 15))
     );
 
@@ -139,7 +127,7 @@ fn tree_sitter_symbols_derive_qualifier_metadata_from_one_identifier_node() {
         panic!("only Core owns the hardcoded keyword aliases");
     };
     assert_eq!(
-        non_core.package_qualifier.as_ref().and_then(Span::bounds),
+        non_core.package_qualifier().and_then(Span::bounds),
         Some((0, 3))
     );
 }
@@ -148,7 +136,7 @@ fn tree_sitter_symbols_derive_qualifier_metadata_from_one_identifier_node() {
 fn both_backends_keep_precision_and_exponent_in_one_float_literal() {
     for source in ["1p53", "1.25p53", "1.25p53e3", ".5p20"] {
         for parsed in [expression(source), native_expression(source)] {
-            let Expr::Literal(ExprLiteral::Float(literal)) = parsed else {
+            let Expr::Literal(Literal::Float(literal)) = parsed else {
                 panic!("`{source}` must be represented as a float literal");
             };
             assert_eq!(literal.text(), source);
@@ -157,15 +145,12 @@ fn both_backends_keep_precision_and_exponent_in_one_float_literal() {
     }
 
     for parsed in [expression("1e3p20"), native_expression("1e3p20")] {
-        let Expr::Op(ExprOp::Bin(ExprOpBin::Adj(application))) = parsed else {
+        let Expr::Binary(application) = parsed else {
             panic!("precision after an exponent must begin a following symbol");
         };
-        assert!(matches!(
-            application.left_operand.as_ref(),
-            Expr::Literal(_)
-        ));
+        assert!(matches!(application.left.as_ref(), Expr::Literal(_)));
         assert!(
-            matches!(application.right_operand.as_ref(), Expr::Symbol(symbol) if symbol.text() == "p20")
+            matches!(application.right.as_ref(), Expr::Symbol(symbol) if symbol.text() == "p20")
         );
     }
 }
@@ -182,23 +167,23 @@ fn tree_sitter_recovery_keeps_unclosed_collection_contents_and_source_spans() {
     assert_eq!(recovered.value.to_m2(), "[x, y");
 
     let mut cells = recovered.value.cells;
-    let PackedContent::Expr(expression) = cells.pop().unwrap().content else {
+    let Elements::Single(expression) = cells.pop().unwrap().elems else {
         panic!("the recovered cell must contain the array expression");
     };
-    let Expr::Collection(ExprCollection::Array(array)) = *expression else {
+    let Expr::Array(array) = *expression else {
         panic!("the recovered expression must retain its array node");
     };
-    let Some(PackedContent::Pack(elements)) = array.elements.as_ref() else {
+    let Some(Elements::Pack(elements)) = array.elems.as_ref() else {
         panic!("the recovered array must retain its comma pack");
     };
-    assert_eq!(elements.pack.len(), 2);
+    assert_eq!(elements.elems.len(), 2);
     assert_eq!(array.span().bounds(), Some((0, source.len())));
     assert!(array.delimiter.spans().close().is_none());
 }
 
 #[test]
 fn delimited_nodes_retain_both_boundary_spans() {
-    let Expr::Holder(group) = expression("(x)") else {
+    let Expr::Paren(group) = expression("(x)") else {
         panic!("the expression must retain its parenthesis node");
     };
 
@@ -221,7 +206,7 @@ fn complete_source_files_retain_cells_and_boundary_nodes() {
 }
 
 #[test]
-fn trivia_only_source_files_place_eof_at_the_physical_end() {
+fn comment_only_source_files_place_eof_at_the_physical_end() {
     let source = "-- comment";
     let source_file = parse_file(source).unwrap();
 
@@ -282,23 +267,24 @@ fn both_backends_locate_structural_boundaries_between_cell_streams() {
 #[test]
 fn nested_and_global_semicolons_have_distinct_owners() {
     let source_file = parse_file("{x; y}\nx;").unwrap();
-    let PackedContent::Expr(expression) = &source_file.cells[0].content else {
+    let Elements::Single(expression) = &source_file.cells[0].elems else {
         panic!("expected a list expression");
     };
-    let Expr::Collection(ExprCollection::List(list)) = expression.as_ref() else {
+    let Expr::List(list) = expression.as_ref() else {
         panic!("the first cell must contain a list");
     };
 
-    assert_eq!(list.statements.len(), 1);
-    assert!(source_file.cells[0].semicolon.is_none());
-    assert!(source_file.cells[1].semicolon.is_some());
+    assert_eq!(list.stmts.len(), 1);
+    assert!(source_file.cells[0].semi_token.is_none());
+    assert!(source_file.cells[1].semi_token.is_some());
 }
 
 #[test]
 fn assignments_use_the_specialized_cleaned_tree() {
-    let Expr::Assign(ExprAssign::Simple(ExprAssignSimple::Global(_))) = expression("x = 1") else {
-        panic!("expected a global binding");
+    let Expr::Assign(assignment) = expression("x = 1") else {
+        panic!("expected an assignment");
     };
+    assert!(matches!(assignment.op, AssignOperator::Global(_)));
 
     let Expr::Option(_) = expression("key => value") else {
         panic!("expected an option expression");
@@ -393,4 +379,28 @@ fn every_tree_sitter_expression_family_lowers_without_native_reparsing() {
             panic!("failed to reparse `{source}` emitted as `{emitted}`: {error}")
         });
     }
+}
+
+#[test]
+fn synonyms_parse_like_the_native_parser_in_their_own_spelling() {
+    for source in [
+        "f = x → x + 1",
+        "a≠b",
+        "a ∧ b ∨ c",
+        "≤ x",
+        "threadVariable x",
+        "Core$threadVariable x",
+    ] {
+        let tree = format_pretty_tree(&expression(source));
+        assert_eq!(
+            tree,
+            format_pretty_tree(&native_expression(source)),
+            "{source}"
+        );
+        assert_eq!(expression(source).to_m2(), source);
+    }
+    assert!(
+        parse_file("a∧b").is_err(),
+        "the grammar has no room to read `a and b`"
+    );
 }

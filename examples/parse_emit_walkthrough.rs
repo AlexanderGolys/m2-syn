@@ -23,7 +23,7 @@ impl Parse for Name {
             TokenTree::Ident(identifier) => Ok(Self(identifier)),
             token => Err(TokenParseError::UnexpectedToken {
                 expected: "identifier",
-                found: token.spelling().unwrap_or("group or trivia").to_owned(),
+                found: token.spelling().unwrap_or("group").to_owned(),
                 span,
             }),
         }

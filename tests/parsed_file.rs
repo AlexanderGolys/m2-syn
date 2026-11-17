@@ -52,10 +52,10 @@ fn combined_report_labels_source_tokens_and_the_complete_tree() {
     assert!(report.contains("╭─ TYPED CST"));
     assert!(!report.contains("Punctuated"));
     assert!(!report.contains("Delimited"));
-    assert!(report.contains("(  opening → Delimiter![()]"));
-    assert!(report.contains(")  closing → Delimiter![()]"));
+    assert!(report.contains("(  opening → Token![()]"));
+    assert!(report.contains(")  closing → Token![()]"));
     assert!(!report.contains("@detached"));
-    assert!(!report.contains("TRIVIA"));
+    assert!(!report.contains("COMMENT"));
     assert!(!report.contains('\u{1b}'));
     assert!(report.contains("╯\n\n╭─ TOKEN STREAM"));
     assert!(report.contains("╯\n\n╭─ TYPED CST"));
@@ -68,9 +68,9 @@ fn combined_report_labels_source_tokens_and_the_complete_tree() {
         .pretty_report()
         .ansi(true)
         .spans(false)
-        .trivia(true)
+        .comments(true)
         .to_string();
     assert!(colored.contains("\u{1b}["));
-    assert!(!colored.contains("TRIVIA"));
+    assert!(!colored.contains("COMMENT"));
     assert!(!colored.contains("@s"));
 }

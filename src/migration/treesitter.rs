@@ -13,14 +13,13 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::vec::IntoIter;
 
-use crate::native::{LambdaArguments, assignment_list, installation_value, lambda_arguments};
+use crate::native::{function_params, is_assignment_target};
 use crate::nodes::*;
-use crate::trivia_transfer::TriviaTransfer;
 use crate::{
-    CSTNodeClassLabel, CellStream, CellStreamError, CommentTrivia, DelimiterKind, DelimiterToken,
+    CSTNodeClassLabel, CellStream, CellStreamError, CommentKind, DelimiterKind, DelimiterToken,
     DoubleSpan, ExternalCstChild, ExternalCstNode, LexError, Migrate, MigrateError, Parser,
     Punctuated, Recovered, Source, SourceFile, Span, Spanned, TextEdit, TokenStream, TokenTree,
-    Tokenize, TriviaKind, lex_str, lex_str_recovering,
+    Tokenize, lex_str, lex_str_recovering,
 };
 
 #[derive(Debug)]
@@ -177,7 +176,7 @@ impl RealtimeParser {
             .apply(self.source.text())
             .ok_or(ParseError::InvalidEdit)?;
         let source = Source::with_file(self.source.file(), source_text);
-        let (view, aliases, diagnostics) = renamed_source_recovering(source.text())?;
+        let (view, respellings, diagnostics) = renamed_source_recovering(source.text())?;
         let parse_view = view.into_owned();
 
         let mut edited_tree = self.tree.clone();
@@ -193,7 +192,7 @@ impl RealtimeParser {
                     ..error.end_byte().min(source.text().len()),
             )));
         }
-        let syntax = Lowerer::new(Arc::clone(&source), source.text(), aliases)
+        let syntax = Lowerer::new(Arc::clone(&source), source.text(), respellings)
             .source_file(tree.root_node())?;
         let changed_ranges = edited_tree
             .changed_ranges(&tree)
@@ -260,7 +259,7 @@ fn parse_recovered_tree(
     old_tree: Option<&tree_sitter::Tree>,
 ) -> Result<ParsedTree, ParseError> {
     let source_text = source.text();
-    let (view, aliases, diagnostics) = renamed_source_recovering(source_text)?;
+    let (view, respellings, diagnostics) = renamed_source_recovering(source_text)?;
     let parse_view = view.into_owned();
     let tree = parser
         .parse(parse_view.as_bytes(), old_tree)
@@ -271,8 +270,8 @@ fn parse_recovered_tree(
             error.start_byte().min(source_text.len())..error.end_byte().min(source_text.len()),
         )));
     }
-    let syntax =
-        Lowerer::new(Arc::clone(&source), source_text, aliases).source_file(tree.root_node())?;
+    let syntax = Lowerer::new(Arc::clone(&source), source_text, respellings)
+        .source_file(tree.root_node())?;
     Ok(ParsedTree {
         parse_view,
         tree,
@@ -348,7 +347,7 @@ impl TreeSitterParser {
     /// Parses source in.
     fn parse_source_in(&mut self, source: Arc<Source>) -> Result<SourceFile, ParseError> {
         let source_text = source.text();
-        let (renamed, aliases) = renamed_source(source_text)?;
+        let (renamed, respellings) = renamed_source(source_text)?;
         let tree = self
             .parser
             .parse(renamed.as_bytes(), None)
@@ -359,7 +358,7 @@ impl TreeSitterParser {
                 error.start_byte()..error.end_byte(),
             )));
         }
-        Lowerer::new(Arc::clone(&source), source_text, aliases).source_file(tree.root_node())
+        Lowerer::new(Arc::clone(&source), source_text, respellings).source_file(tree.root_node())
     }
 
     /// Parses incomplete source while retaining syntax inside unclosed groups.
@@ -377,7 +376,7 @@ impl TreeSitterParser {
     ) -> Result<Recovered<SourceFile, LexError>, ParseError> {
         let source = Source::new(source);
         let source_text = source.text();
-        let (renamed, aliases, diagnostics) = renamed_source_recovering(source_text)?;
+        let (renamed, respellings, diagnostics) = renamed_source_recovering(source_text)?;
         let tree = self
             .parser
             .parse(renamed.as_bytes(), None)
@@ -388,7 +387,7 @@ impl TreeSitterParser {
                 error.start_byte().min(source_text.len())..error.end_byte().min(source_text.len()),
             )));
         }
-        let syntax = Lowerer::new(Arc::clone(&source), source_text, aliases)
+        let syntax = Lowerer::new(Arc::clone(&source), source_text, respellings)
             .source_file(tree.root_node())?;
         Ok(Recovered::new(syntax, diagnostics))
     }
@@ -458,25 +457,16 @@ struct Lowerer<'source> {
     source: &'source [u8],
     /// The source span.
     source_span: Span,
-    /// The aliases.
-    aliases: Vec<CoreAlias>,
-}
-
-/// Internal alternatives for IterationDomain.
-enum IterationDomain {
-    /// The Range alternative.
-    Range(Option<RangeBoundFrom>, Option<RangeBoundTo>),
-    /// The In alternative.
-    In(Token![in], Box<Expr>),
+    respellings: Vec<Respelling>,
 }
 
 impl<'source> Lowerer<'source> {
     /// Creates a new value.
-    fn new(source_owner: Arc<Source>, source: &'source str, aliases: Vec<CoreAlias>) -> Self {
+    fn new(source_owner: Arc<Source>, source: &'source str, respellings: Vec<Respelling>) -> Self {
         Self {
             source: source.as_bytes(),
             source_span: Span::ranged(source_owner, 0..source.len()),
-            aliases,
+            respellings,
         }
     }
 
@@ -493,52 +483,34 @@ impl<'source> Lowerer<'source> {
                 kind => return Err(self.unsupported(kind, child)),
             }
         }
-        let mut source_file = SourceFile::new(
-            BOF::new("", self.leading_span()),
+        Ok(SourceFile::new(
+            Token![BOF](self.source_span.at(0)),
             cells,
-            EOF::new("", self.trailing_span()),
-        );
-        TriviaTransfer::from_source(self.source_span.source())?.apply(&mut source_file);
-        Ok(source_file)
-    }
-
-    /// Spans the layout between the physical start and the first significant
-    /// byte, which the beginning-of-file marker owns.
-    fn leading_span(&self) -> Span {
-        let source = self.source_span.source();
-        Span::ranged(Arc::clone(source), source.leading_whitespace())
-    }
-
-    /// Spans the layout between the last significant byte and the physical end.
-    ///
-    /// The end-of-file marker owns this region so that input no cell covers is
-    /// still reconstructed from the typed graph.
-    fn trailing_span(&self) -> Span {
-        let source = self.source_span.source();
-        Span::ranged(Arc::clone(source), source.trailing_whitespace())
+            Token![EOF](self.source_span.at(self.source_span.source().text().len())),
+        ))
     }
 
     /// Handles cell.
     fn cell(&self, node: tree_sitter::Node<'_>, eoc_offset: usize) -> Result<Cell, ParseError> {
-        let (content, semicolon) = if node.kind() == "muted" {
+        let (elems, semicolon) = if node.kind() == "muted" {
             let semicolon = self.required_kind(node, ";")?;
             (
-                self.packed_content(self.children(node))?,
+                self.elements(self.children(node))?,
                 Some(self.migrate(semicolon)?),
             )
         } else {
             let child = self.only_semantic_child(node)?;
-            let content = if child.kind() == "naked_sequence" {
-                self.expr_pack(self.children(child))?.into()
+            let elems = if child.kind() == "naked_sequence" {
+                Elements::Pack(self.element_pack(self.children(child))?)
             } else {
-                self.expr(child)?.into()
+                Elements::Single(Box::new(self.expr(child)?))
             };
-            (content, None)
+            (elems, None)
         };
         Ok(Cell::new(
-            content,
+            elems,
             semicolon,
-            EOC::new("", self.source_span.at(eoc_offset)),
+            Token![EOC](self.source_span.at(eoc_offset)),
         ))
     }
 
@@ -552,8 +524,8 @@ impl<'source> Lowerer<'source> {
             .min(self.source.len())
     }
 
-    /// Handles expr pack.
-    fn expr_pack(&self, nodes: Vec<tree_sitter::Node<'_>>) -> Result<ExprPack, ParseError> {
+    /// Lowers a comma-separated pack of at least two elements.
+    fn element_pack(&self, nodes: Vec<tree_sitter::Node<'_>>) -> Result<ElementsPack, ParseError> {
         let pack_span = nodes
             .iter()
             .map(|node| self.span(*node))
@@ -567,9 +539,9 @@ impl<'source> Lowerer<'source> {
         for node in nodes.into_iter().filter(|node| !node.is_extra()) {
             match node.kind() {
                 "," => commas.push(self.migrate::<Token![,]>(node)?),
-                "empty_component" => values.push(Component::Empty(Empty::new("", self.span(node)))),
+                "empty_component" => values.push(Element::Empty(Empty::new("", self.span(node)))),
                 ";" | "(" | ")" | "[" | "]" | "{" | "}" | "<|" | "|>" | "muted" => {}
-                _ if node.is_named() => values.push(Component::Expr(Box::new(self.expr(node)?))),
+                _ if node.is_named() => values.push(Element::Expr(Box::new(self.expr(node)?))),
                 _ => {}
             }
         }
@@ -585,7 +557,7 @@ impl<'source> Lowerer<'source> {
         let rest = commas
             .into_iter()
             .zip(values)
-            .collect::<Vec<(Token![,], Component)>>();
+            .collect::<Vec<(Token![,], Element)>>();
         let mut rest = rest.into_iter();
         let Some((punctuation, second)) = rest.next() else {
             return Err(self.unsupported_span("expression pack without a comma", pack_span));
@@ -594,40 +566,33 @@ impl<'source> Lowerer<'source> {
         for (punctuation, value) in rest {
             pack.push(punctuation, value);
         }
-        Ok(ExprPack::new(pack))
+        Ok(ElementsPack::new(pack))
     }
 
-    /// Handles packed content.
-    fn packed_content(
-        &self,
-        nodes: Vec<tree_sitter::Node<'_>>,
-    ) -> Result<PackedContent, ParseError> {
+    /// Lowers a single expression or a comma-separated pack.
+    fn elements(&self, nodes: Vec<tree_sitter::Node<'_>>) -> Result<Elements, ParseError> {
         if nodes.iter().any(|node| node.kind() == ",") {
-            return self.expr_pack(nodes).map(Into::into);
+            return self.element_pack(nodes).map(Elements::Pack);
         }
         let mut expressions = nodes
             .into_iter()
             .filter(|node| !node.is_extra() && node.is_named() && node.kind() != "muted");
         let Some(expression) = expressions.next() else {
-            return Err(self.unsupported_span("empty packed content", self.source_span.clone()));
+            return Err(self.unsupported_span("empty elements", self.source_span.clone()));
         };
         if expressions.next().is_some() {
-            return Err(self.unsupported("unseparated packed content", expression));
+            return Err(self.unsupported("unseparated elements", expression));
         }
-        self.expr(expression).map(Into::into)
+        Ok(Elements::Single(Box::new(self.expr(expression)?)))
     }
 
     /// Handles expr.
     fn expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
         match node.kind() {
             "symbol" => Ok(self.migrate::<Symbol>(node)?.into()),
-            "integer_literal" if self.text(node).contains('p') => {
-                Ok(FloatLiteral::new(self.text(node), self.span(node)).into())
+            "integer_literal" | "float_literal" | "string_literal" | "raw_string_literal" => {
+                self.literal(node).map(Expr::Literal)
             }
-            "integer_literal" => Ok(self.migrate::<IntegerLiteral>(node)?.into()),
-            "float_literal" => Ok(self.migrate::<FloatLiteral>(node)?.into()),
-            "string_literal" => self.string_literal(node),
-            "raw_string_literal" => self.raw_string_literal(node),
             "array" | "list" | "angle_bar_list" | "sequence" | "parenthesized_expression" => {
                 self.collection(node)
             }
@@ -645,14 +610,16 @@ impl<'source> Lowerer<'source> {
             | "postfix_installation"
             | "structured_binding"
             | "local_structured_binding" => self.assignment(node),
-            "evaluated_assignment" => Ok(Expr!(Assign::Evaluated {
-                evaluated_domain: Box::new(self.expr(self.required_field(node, "left")?)?),
-                operator: self.migrate(self.required_field(node, "operator")?)?,
-                value: Box::new(self.expr(self.required_field(node, "right")?)?),
+            "evaluated_assignment" => Ok(Expr::from(ExprAssign {
+                left: Box::new(self.expr(self.required_field(node, "left")?)?),
+                op: AssignOperator::Evaluated(
+                    self.migrate(self.required_field(node, "operator")?)?,
+                ),
+                right: Box::new(self.expr(self.required_field(node, "right")?)?),
             })),
-            "option" => Ok(Expr!(Option {
+            "option" => Ok(Expr::from(ExprOption {
                 key: Box::new(self.expr(self.required_field(node, "left")?)?),
-                operator: self.migrate(self.required_field(node, "operator")?)?,
+                fat_arrow_token: self.migrate(self.required_field(node, "operator")?)?,
                 value: Box::new(self.expr(self.required_field(node, "right")?)?),
             })),
             "if_statement" => self.if_statement(node),
@@ -661,38 +628,38 @@ impl<'source> Lowerer<'source> {
             "try_statement" => self.try_statement(node),
             "quote_expression" => self.quote_expression(node),
             "new_statement" => self.new_statement(node),
-            "break_statement" => Ok(Expr!(Control::Break {
+            "break_statement" => Ok(Expr::from(ExprBreak {
                 break_token: self.migrate(self.required_kind(node, "break")?)?,
-                value: self
+                expr: self
                     .first_expression_child(node)
                     .map(|child| self.expr(child).map(Box::new))
                     .transpose()?,
             })),
-            "continue_statement" => Ok(Expr!(Control::Continue {
+            "continue_statement" => Ok(Expr::from(ExprContinue {
                 continue_token: self.migrate(self.required_kind(node, "continue")?)?,
-                value: self
+                expr: self
                     .first_expression_child(node)
                     .map(|child| self.expr(child).map(Box::new))
                     .transpose()?,
             })),
-            "return_statement" => Ok(Expr!(Control::Return {
+            "return_statement" => Ok(Expr::from(ExprReturn {
                 return_token: self.migrate(self.required_kind(node, "return")?)?,
-                value: self
+                expr: self
                     .first_expression_child(node)
                     .map(|child| self.expr(child).map(Box::new))
                     .transpose()?,
             })),
-            "catch_statement" => Ok(Expr!(Catch {
+            "catch_statement" => Ok(Expr::from(ExprCatch {
                 catch_token: self.migrate(self.required_kind(node, "catch")?)?,
-                value: Box::new(self.expr(self.required_expression_child(node)?)?),
+                expr: Box::new(self.expr(self.required_expression_child(node)?)?),
             })),
-            "throw_statement" => Ok(Expr!(Throw {
+            "throw_statement" => Ok(Expr::from(ExprThrow {
                 throw_token: self.migrate(self.required_kind(node, "throw")?)?,
-                value: Box::new(self.expr(self.required_expression_child(node)?)?),
+                expr: Box::new(self.expr(self.required_expression_child(node)?)?),
             })),
-            "trap_statement" => Ok(Expr!(Trap {
+            "trap_statement" => Ok(Expr::from(ExprTrap {
                 trap_token: self.migrate(self.required_kind(node, "trap")?)?,
-                value: Box::new(self.expr(self.required_expression_child(node)?)?),
+                expr: Box::new(self.expr(self.required_expression_child(node)?)?),
             })),
             "debug_clause" => self.debug_clause(node),
             kind => Err(self.unsupported(kind, node)),
@@ -706,7 +673,7 @@ impl<'source> Lowerer<'source> {
             .semantic_children(node)
             .into_iter()
             .filter(|child| child.kind() == "muted")
-            .map(|child| self.statement(child))
+            .map(|child| self.stmt(child))
             .collect::<Result<Vec<_>, _>>()?;
 
         if node.kind() == "parenthesized_expression" {
@@ -716,9 +683,9 @@ impl<'source> Lowerer<'source> {
                 .find(|child| child.kind() != "muted")
                 .map(|child| self.expr(child))
                 .transpose()?;
-            let mut holder = Holder::new(statements, value.map(Box::new));
-            holder.delimiter = <Delimiter![()] as DelimiterToken>::new(spans);
-            return Ok(holder.into());
+            let mut paren = ExprParen::new(statements, value.map(Box::new));
+            paren.delimiter = <Token![()] as DelimiterToken>::new(spans);
+            return Ok(paren.into());
         }
 
         let has_elements = self.children(node).into_iter().any(|child| {
@@ -728,74 +695,90 @@ impl<'source> Lowerer<'source> {
                     || (child.is_named() && child.kind() != "muted"))
         });
         let elements = has_elements
-            .then(|| self.packed_content(self.children(node)))
+            .then(|| self.elements(self.children(node)))
             .transpose()?;
         Ok(match node.kind() {
             "array" => {
-                let mut value = Array::new(statements, elements);
-                value.delimiter = <Delimiter![[]] as DelimiterToken>::new(spans);
+                let mut value = ExprArray::new(statements, elements);
+                value.delimiter = <Token![[]] as DelimiterToken>::new(spans);
                 value.into()
             }
             "list" => {
-                let mut value = List::new(statements, elements);
-                value.delimiter = <Delimiter![{}] as DelimiterToken>::new(spans);
+                let mut value = ExprList::new(statements, elements);
+                value.delimiter = <Token![{}] as DelimiterToken>::new(spans);
                 value.into()
             }
             "angle_bar_list" => {
-                let mut value = AngleBarList::new(statements, elements);
-                value.delimiter = <Delimiter![<| |>] as DelimiterToken>::new(spans);
+                let mut value = ExprAngleBar::new(statements, elements);
+                value.delimiter = <Token![<||>] as DelimiterToken>::new(spans);
                 value.into()
             }
             "sequence" => {
-                let mut value = Sequence::new(statements, elements);
-                value.delimiter = <Delimiter![()] as DelimiterToken>::new(spans);
+                let mut value = ExprSequence::new(statements, elements);
+                value.delimiter = <Token![()] as DelimiterToken>::new(spans);
                 value.into()
             }
             kind => return Err(self.unsupported(kind, node)),
         })
     }
 
-    /// Handles statement.
-    fn statement(&self, node: tree_sitter::Node<'_>) -> Result<Statement, ParseError> {
-        Ok(Statement::new(
-            self.packed_content(self.children(node))?,
+    /// Lowers elements terminated by `;`.
+    fn stmt(&self, node: tree_sitter::Node<'_>) -> Result<Stmt, ParseError> {
+        Ok(Stmt::new(
+            self.elements(self.children(node))?,
             self.migrate(self.required_kind(node, ";")?)?,
         ))
     }
 
     /// Handles string literal.
-    fn string_literal(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
+    /// A hexadecimal integer with a `p` exponent is a float.
+    fn literal(&self, node: tree_sitter::Node<'_>) -> Result<Literal, ParseError> {
+        Ok(match node.kind() {
+            "integer_literal" if self.text(node).contains('p') => {
+                FloatLiteral::new(self.text(node), self.span(node)).into()
+            }
+            "integer_literal" => self.migrate::<IntegerLiteral>(node)?.into(),
+            "float_literal" => self.migrate::<FloatLiteral>(node)?.into(),
+            "string_literal" => self.string_literal(node)?.into(),
+            _ => self.raw_string_literal(node)?.into(),
+        })
+    }
+
+    fn string_literal(&self, node: tree_sitter::Node<'_>) -> Result<StringLiteral, ParseError> {
         let elements = self
             .children(node)
             .into_iter()
             .filter(|child| child.kind() != "\"")
             .filter(|child| !child.is_extra())
             .map(|child| match child.kind() {
-                "escape_sequence" => self.migrate(child).map(StringElement::Escape),
-                "string_content" => self.migrate(child).map(StringElement::Content),
-                _ => Ok(StringElement::Content(StringContent::new(
+                "escape_sequence" => self.migrate(child).map(StringFragment::Escape),
+                "string_content" => self.migrate(child).map(StringFragment::Content),
+                _ => Ok(StringFragment::Content(StringContent::new(
                     self.text(child),
                     self.span(child),
                 ))),
             })
             .collect::<Result<Vec<_>, ParseError>>()?;
-        Ok(StringLiteral::new(elements, self.span(node)).into())
+        Ok(StringLiteral::new(elements, self.span(node)))
     }
 
     /// Handles raw string literal.
-    fn raw_string_literal(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
+    fn raw_string_literal(
+        &self,
+        node: tree_sitter::Node<'_>,
+    ) -> Result<RawStringLiteral, ParseError> {
         let elements = self
             .children(node)
             .into_iter()
             .filter(|child| child.kind() != "///")
             .filter(|child| !child.is_extra())
             .map(|child| match child.kind() {
-                "escape_sequence" => self.migrate(child).map(RawStringElement::Escape),
-                "raw_string_content" => self.migrate(child).map(RawStringElement::Content),
+                "escape_sequence" => self.migrate(child).map(RawStringFragment::Escape),
+                "raw_string_content" => self.migrate(child).map(RawStringFragment::Content),
                 kind => Err(self.unsupported(kind, child)),
             })
             .collect::<Result<Vec<_>, ParseError>>()?;
-        Ok(RawStringLiteral::new(elements, self.span(node)).into())
+        Ok(RawStringLiteral::new(elements, self.span(node)))
     }
 
     /// Handles binary expr.
@@ -807,148 +790,91 @@ impl<'source> Lowerer<'source> {
         )?;
         let operator = self.required_field(node, "operator")?;
         let right = self.expr(self.required_field(node, "right")?)?;
-        if operator.kind() == "SPACE" {
-            Ok(Expr!(Op::Bin::Adj {
-                left_operand: Box::new(left),
-                operator: Adj::new("", self.span(operator)),
-                right_operand: Box::new(right),
-            }))
-        } else {
-            match self.text(operator).as_ref() {
-                spelling if GENERATED_AUGMENTED_OPERATOR_SPELLINGS.contains(&spelling) => {
-                    Ok(Expr!(Assign::Augmented {
-                        target: Box::new(left),
-                        operator: self.migrate(operator)?,
-                        value: Box::new(right),
-                    }))
-                }
-                "." => Ok(Expr!(Op::Bin::Member::Dot {
-                    receiver: Box::new(left),
-                    operator: self.migrate(operator)?,
-                    member: Box::new(right),
-                })),
-                ".?" => Ok(Expr!(Op::Bin::Member::Optional {
-                    receiver: Box::new(left),
-                    operator: self.migrate(operator)?,
-                    member: Box::new(right),
-                })),
-                "#" => Ok(Expr!(Op::Bin::Index {
-                    receiver: Box::new(left),
-                    operator: self.migrate(operator)?,
-                    index: Box::new(right),
-                })),
-                _ => Ok(Expr!(Op::Bin::Regular {
-                    left_operand: Box::new(left),
-                    operator: self.migrate(operator)?,
-                    right_operand: Box::new(right),
-                })),
+        let (left, right) = (Box::new(left), Box::new(right));
+        Ok(match self.text(operator).as_ref() {
+            spelling if GENERATED_AUGMENTED_OPERATOR_SPELLINGS.contains(&spelling) => {
+                Expr::from(ExprAssign {
+                    left,
+                    op: AssignOperator::Augmented(self.migrate(operator)?),
+                    right,
+                })
             }
-        }
+            spelling @ ("." | ".?") => {
+                let op = if spelling == "." {
+                    FieldOperator::Dot(self.migrate(operator)?)
+                } else {
+                    FieldOperator::OptionalDot(self.migrate(operator)?)
+                };
+                let Expr::Symbol(member) = *right else {
+                    return Err(self.unsupported("member that is not a symbol", node));
+                };
+                Expr::from(ExprField {
+                    base: left,
+                    op,
+                    member,
+                })
+            }
+            _ => Expr::from(ExprBinary {
+                left,
+                op: self.migrate(operator)?,
+                right,
+            }),
+        })
     }
 
     /// Handles prefix expr.
     fn prefix_expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        Ok(Expr!(Op::Prefix {
-            operator: self.migrate(self.required_field(node, "operator")?)?,
-            operand: Box::new(self.expr(self.required_field(node, "operand")?)?),
+        Ok(Expr::from(ExprPrefix {
+            op: self.migrate(self.required_field(node, "operator")?)?,
+            expr: Box::new(self.expr(self.required_field(node, "operand")?)?),
         }))
     }
 
     /// Handles postfix expr.
     fn postfix_expr(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        Ok(Expr!(Op::Postfix {
-            operand: Box::new(self.expr(self.required_field(node, "operand")?)?),
-            operator: self.migrate(self.required_field(node, "operator")?)?,
+        Ok(Expr::from(ExprPostfix {
+            expr: Box::new(self.expr(self.required_field(node, "operand")?)?),
+            op: self.migrate(self.required_field(node, "operator")?)?,
         }))
     }
 
-    /// Handles lambda expression.
+    /// Lowers a function.
     fn lambda_expression(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        let argument_expr = self.expr(self.required_field(node, "parameters")?)?;
-        let arguments = lambda_arguments(argument_expr)
-            .ok_or_else(|| self.unsupported("lambda arguments", node))?;
-        let operator = self.migrate(self.required_field(node, "operator")?)?;
-        let body = Box::new(self.expr(self.required_field(node, "body")?)?);
-        Ok(match arguments {
-            LambdaArguments::Variadic(argument) => Expr!(Lambda::Variadic {
-                argument,
-                operator,
-                body,
-            }),
-            LambdaArguments::List(arguments) => Expr!(Lambda::List {
-                arguments: *arguments,
-                operator,
-                body,
-            }),
-        })
+        let params = function_params(self.expr(self.required_field(node, "parameters")?)?)
+            .ok_or_else(|| self.unsupported("function parameters", node))?;
+        Ok(Expr::from(ExprFunction {
+            params,
+            arrow_token: self.migrate(self.required_field(node, "operator")?)?,
+            body: Box::new(self.expr(self.required_field(node, "body")?)?),
+        }))
     }
 
-    /// Handles assignment.
+    /// Lowers an assignment or an installation.
     fn assignment(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        let right = self.expr(self.required_field(node, "right")?)?;
-        Ok(match node.kind() {
-            "assignment" => Expr!(Assign::Simple::Global {
-                variable: self.migrate(self.required_field(node, "left")?)?,
-                operator: self.migrate(self.required_field(node, "operator")?)?,
-                value: Box::new(right),
-            }),
-            "local_assignment" => Expr!(Assign::Simple::Local {
-                variable: self.migrate(self.required_field(node, "left")?)?,
-                operator: self.migrate(self.required_field(node, "operator")?)?,
-                value: Box::new(right),
-            }),
-            "binary_assignment" | "prefix_assignment" | "postfix_assignment" => {
-                let Expr::Op(left) = self.expr(self.required_field(node, "left")?)? else {
-                    return Err(self.unsupported("operator assignment target", node));
-                };
-                Expr!(Assign::Op {
-                    argument_expr: left,
-                    operator: self.migrate(self.required_field(node, "operator")?)?,
-                    value_expr: Box::new(right),
-                })
-            }
-            "binary_installation" | "prefix_installation" | "postfix_installation" => {
-                let Expr::Op(left) = self.expr(self.required_field(node, "left")?)? else {
-                    return Err(self.unsupported("operator installation target", node));
-                };
-                let (typical_value, function) = installation_value(right);
-                match left {
-                    ExprOp::Bin(ExprOpBin::Adj(application)) => Expr!(Assign::Install::Method {
-                        method: application.left_operand,
-                        operator: application.operator,
-                        signature: application.right_operand,
-                        assign_op: self.migrate(self.required_field(node, "operator")?)?,
-                        typical_value,
-                        function: Box::new(function),
-                    }),
-                    domain_expr => Expr!(Assign::Install::Op {
-                        domain_expr,
-                        assign_op: self.migrate(self.required_field(node, "operator")?)?,
-                        typical_value,
-                        function: Box::new(function),
-                    }),
-                }
-            }
-            "structured_binding" | "local_structured_binding" => {
-                let list_expr = self.expr(self.required_field(node, "binding_pack")?)?;
-                let argument_list = assignment_list(list_expr)
-                    .ok_or_else(|| self.unsupported("assignment argument list", node))?;
-                if node.kind() == "local_structured_binding" {
-                    Expr!(Assign::Parallel::Local {
-                        argument_list: Box::new(argument_list),
-                        operator: self.migrate(self.required_field(node, "operator")?)?,
-                        value: Box::new(right),
-                    })
-                } else {
-                    Expr!(Assign::Parallel::Global {
-                        argument_list: Box::new(argument_list),
-                        operator: self.migrate(self.required_field(node, "operator")?)?,
-                        value: Box::new(right),
-                    })
-                }
-            }
+        let left_field = match node.kind() {
+            "structured_binding" | "local_structured_binding" => "binding_pack",
+            _ => "left",
+        };
+        let left = self.expr(self.required_field(node, left_field)?)?;
+        let operator = self.required_field(node, "operator")?;
+        let op = match node.kind() {
+            "assignment" | "binary_assignment" | "prefix_assignment" | "postfix_assignment"
+            | "structured_binding" => AssignOperator::Global(self.migrate(operator)?),
+            "local_assignment"
+            | "binary_installation"
+            | "prefix_installation"
+            | "postfix_installation"
+            | "local_structured_binding" => AssignOperator::Local(self.migrate(operator)?),
             kind => return Err(self.unsupported(kind, node)),
-        })
+        };
+        if !is_assignment_target(&left, matches!(op, AssignOperator::Local(_))) {
+            return Err(self.unsupported("assignment target", node));
+        }
+        Ok(Expr::from(ExprAssign {
+            left: Box::new(left),
+            op,
+            right: Box::new(self.expr(self.required_field(node, "right")?)?),
+        }))
     }
 
     /// Handles then clause.
@@ -969,9 +895,9 @@ impl<'source> Lowerer<'source> {
 
     /// Handles if statement.
     fn if_statement(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        Ok(Expr!(If {
+        Ok(Expr::from(ExprIf {
             if_token: self.migrate(self.required_kind(node, "if")?)?,
-            condition: Box::new(self.expr(self.required_field(node, "condition")?)?),
+            cond: Box::new(self.expr(self.required_field(node, "condition")?)?),
             then_clause: self.then_clause(self.required_kind(node, "then_clause")?)?,
             else_clause: self
                 .optional_kind(node, "else_clause")
@@ -982,105 +908,85 @@ impl<'source> Lowerer<'source> {
 
     /// Handles loop body.
     fn loop_body(&self, node: tree_sitter::Node<'_>) -> Result<LoopBody, ParseError> {
-        let list_step = self
+        let list_clause = self
             .optional_kind(node, "list")
             .map(|token| {
-                Ok::<_, ParseError>(ListStep::new(
+                Ok::<_, ParseError>(ListClause::new(
                     self.migrate(token)?,
                     Box::new(self.expr(self.required_field(node, "listed_value")?)?),
                 ))
             })
             .transpose()?;
-        let do_step = self
+        let do_clause = self
             .optional_kind(node, "do")
             .map(|token| {
-                Ok::<_, ParseError>(DoStep::new(
+                Ok::<_, ParseError>(DoClause::new(
                     self.migrate(token)?,
                     Box::new(self.expr(self.required_field(node, "ignored_value")?)?),
                 ))
             })
             .transpose()?;
-        Ok(LoopBody::new(list_step, do_step))
+        Ok(LoopBody::new(list_clause, do_clause))
     }
 
-    /// Handles for loop.
+    /// Lowers a `for` loop.
     fn for_loop(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        let iteration_domain = self
+        let iter = self
             .optional_kind(node, "iteration_range")
-            .map(|range| self.iteration_domain(range))
+            .map(|range| self.for_iter(range))
             .transpose()?;
-        let when_condition = self
+        let when_clause = self
             .optional_kind(node, "when")
             .map(|token| {
-                Ok::<_, ParseError>(WhenCondition::new(
+                Ok::<_, ParseError>(WhenClause::new(
                     self.migrate(token)?,
                     Box::new(self.expr(self.required_field(node, "filter")?)?),
                 ))
             })
             .transpose()?;
-        let for_token = self.migrate(self.required_kind(node, "for")?)?;
-        let variable = self.migrate(self.required_field(node, "variable")?)?;
-        let body = self.loop_body(self.required_kind(node, "loop_body")?)?;
-        Ok(match iteration_domain {
-            None => Expr!(For::Bare {
-                for_token,
-                variable,
-                condition: when_condition,
-                body,
-            }),
-            Some(IterationDomain::Range(lower_bound, upper_bound)) => Expr!(For::Range {
-                for_token,
-                variable,
-                lower_bound,
-                upper_bound,
-                condition: when_condition,
-                body,
-            }),
-            Some(IterationDomain::In(in_token, collection)) => Expr!(For::In {
-                for_token,
-                variable,
-                in_token,
-                collection,
-                condition: when_condition,
-                body,
-            }),
-        })
+        Ok(Expr::from(ExprFor {
+            for_token: self.migrate(self.required_kind(node, "for")?)?,
+            var: self.migrate(self.required_field(node, "variable")?)?,
+            iter,
+            when_clause,
+            body: self.loop_body(self.required_kind(node, "loop_body")?)?,
+        }))
     }
 
-    /// Handles iteration domain.
-    fn iteration_domain(&self, node: tree_sitter::Node<'_>) -> Result<IterationDomain, ParseError> {
+    /// Lowers what a `for` loop iterates over.
+    fn for_iter(&self, node: tree_sitter::Node<'_>) -> Result<ForIter, ParseError> {
         if let Some(token) = self.optional_kind(node, "in") {
-            return Ok(IterationDomain::In(
+            return Ok(ForIter::In(InClause::new(
                 self.migrate(token)?,
                 Box::new(self.expr(self.required_field(node, "iterated_collection")?)?),
-            ));
+            )));
         }
-        let lower_bound = self
+        let from_clause = self
             .optional_kind(node, "from")
             .map(|token| {
-                Ok::<_, ParseError>(RangeBoundFrom::new(
+                Ok::<_, ParseError>(FromClause::new(
                     self.migrate(token)?,
                     Box::new(self.expr(self.required_field(node, "range_start")?)?),
                 ))
             })
             .transpose()?;
-        let upper_bound = self
+        let to_clause = self
             .optional_kind(node, "to")
             .map(|token| {
-                Ok::<_, ParseError>(RangeBoundTo::new(
+                Ok::<_, ParseError>(ToClause::new(
                     self.migrate(token)?,
                     Box::new(self.expr(self.required_field(node, "range_end")?)?),
                 ))
             })
             .transpose()?;
-        Ok(IterationDomain::Range(lower_bound, upper_bound))
+        Ok(ForIter::Range(ForRange::new(from_clause, to_clause)))
     }
 
     /// Handles while loop.
     fn while_loop(&self, node: tree_sitter::Node<'_>) -> Result<Expr, ParseError> {
-        Ok(Expr!(While {
+        Ok(Expr::from(ExprWhile {
             while_token: self.migrate(self.required_kind(node, "while")?)?,
-            condition: Box::new(self.expr(self.required_field(node, "condition")?)?),
+            cond: Box::new(self.expr(self.required_field(node, "condition")?)?),
             body: self.loop_body(self.required_kind(node, "loop_body")?)?,
         }))
     }
@@ -1090,10 +996,10 @@ impl<'source> Lowerer<'source> {
         let mut installation = None;
         let class =
             self.new_statement_element(self.required_field(node, "class")?, &mut installation)?;
-        let parent_class = self
+        let of_clause = self
             .optional_kind(node, "of")
             .map(|token| {
-                Ok::<_, ParseError>(OfClass::new(
+                Ok::<_, ParseError>(OfClause::new(
                     self.migrate(token)?,
                     Box::new(self.new_statement_element(
                         self.required_field(node, "parent")?,
@@ -1102,10 +1008,10 @@ impl<'source> Lowerer<'source> {
                 ))
             })
             .transpose()?;
-        let instance = self
+        let from_clause = self
             .optional_kind(node, "from")
             .map(|token| {
-                Ok::<_, ParseError>(FromInstance::new(
+                Ok::<_, ParseError>(FromClause::new(
                     self.migrate(token)?,
                     Box::new(self.new_statement_element(
                         self.required_field(node, "instance")?,
@@ -1114,24 +1020,19 @@ impl<'source> Lowerer<'source> {
                 ))
             })
             .transpose()?;
-        let statement = Expr!(New {
+        let new = Expr::from(ExprNew {
             new_token: self.migrate(self.required_kind(node, "new")?)?,
             class: Box::new(class),
-            parent_class,
-            instance,
+            of_clause,
+            from_clause,
         });
         Ok(match installation {
-            Some((operator, function)) => {
-                let Expr::New(new_statement) = statement else {
-                    unreachable!("the constructor selected the new-statement specialization")
-                };
-                Expr!(Assign::Install::New {
-                    new_statement,
-                    operator,
-                    function: Box::new(function),
-                })
-            }
-            None => statement,
+            Some((operator, function)) => Expr::from(ExprAssign {
+                left: Box::new(new),
+                op: AssignOperator::Local(operator),
+                right: Box::new(function),
+            }),
+            None => new,
         })
     }
 
@@ -1164,7 +1065,7 @@ impl<'source> Lowerer<'source> {
                     && child.kind() != "except_clause"
             })
             .ok_or_else(|| self.unsupported("try value", node))?;
-        let on_success = self
+        let then_clause = self
             .optional_kind(node, "then_clause")
             .map(|child| self.then_clause(child))
             .transpose()?;
@@ -1176,22 +1077,22 @@ impl<'source> Lowerer<'source> {
                 kind => Err(self.unsupported(kind, child)),
             })
             .transpose()?;
-        Ok(Expr!(Try {
+        Ok(Expr::from(ExprTry {
             try_token: self.migrate(self.required_kind(node, "try")?)?,
-            value: Box::new(self.expr(value)?),
-            on_success,
+            expr: Box::new(self.expr(value)?),
+            then_clause,
             fallback,
         }))
     }
 
     /// Handles except do.
     fn except_do(&self, node: tree_sitter::Node<'_>) -> Result<TryFallback, ParseError> {
-        Ok(TryFallback!(Except {
-            except_token: self.migrate(self.required_kind(node, "except")?)?,
-            exception: self.migrate(self.required_field(node, "exception")?)?,
-            do_token: self.migrate(self.required_kind(node, "do")?)?,
-            value: Box::new(self.expr(self.required_expression_child(node)?)?),
-        }))
+        Ok(TryFallback::Except(ExceptClause::new(
+            self.migrate(self.required_kind(node, "except")?)?,
+            self.migrate(self.required_field(node, "exception")?)?,
+            self.migrate(self.required_kind(node, "do")?)?,
+            Box::new(self.expr(self.required_expression_child(node)?)?),
+        )))
     }
 
     /// Handles quote expression.
@@ -1208,29 +1109,14 @@ impl<'source> Lowerer<'source> {
             .ok_or_else(|| self.unsupported("quote specifier", node))?;
         let quoted = self.required_field(node, "token")?;
         let symbol = Symbol::new(self.text(quoted), self.span(quoted));
-        Ok(match token.kind() {
-            "symbol" => Expr!(Quote::Symbol {
-                specifier: self.migrate(token)?,
-                symbol,
-            }),
-            "local" => Expr!(Quote::Local {
-                specifier: self.migrate(token)?,
-                symbol,
-            }),
-            "global" => Expr!(Quote::Global {
-                specifier: self.migrate(token)?,
-                symbol,
-            }),
-            "threadVariable" => Expr!(Quote::ThreadVariable {
-                specifier: self.migrate(token)?,
-                symbol,
-            }),
-            "threadLocal" => Expr!(Quote::ThreadLocal {
-                specifier: self.migrate(token)?,
-                symbol,
-            }),
+        let keyword = match token.kind() {
+            "symbol" => QuoteKeyword::Symbol(self.migrate(token)?),
+            "local" => QuoteKeyword::Local(self.migrate(token)?),
+            "global" => QuoteKeyword::Global(self.migrate(token)?),
+            "threadLocal" | "threadVariable" => QuoteKeyword::ThreadLocal(self.migrate(token)?),
             kind => return Err(self.unsupported(kind, token)),
-        })
+        };
+        Ok(Expr::from(ExprQuote { keyword, symbol }))
     }
 
     /// Handles debug clause.
@@ -1240,49 +1126,33 @@ impl<'source> Lowerer<'source> {
             .first_expression_child(node)
             .map(|child| self.expr(child))
             .transpose()?;
-        Ok(match keyword.kind() {
-            "elapsedTime" => Expr!(Profile::ElapsedTime {
-                modifier: self.migrate(keyword)?,
-                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
-            }),
-            "elapsedTiming" => Expr!(Profile::ElapsedTiming {
-                modifier: self.migrate(keyword)?,
-                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
-            }),
-            "profile" => Expr!(Profile::Profile {
-                modifier: self.migrate(keyword)?,
-                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
-            }),
-            "time" => Expr!(Profile::Time {
-                modifier: self.migrate(keyword)?,
-                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
-            }),
-            "timing" => Expr!(Profile::Timing {
-                modifier: self.migrate(keyword)?,
-                value: Box::new(value.ok_or_else(|| self.unsupported("profiling operand", node))?,),
-            }),
-            "TEST" => Expr!(Debug::Test {
-                keyword: self.migrate(keyword)?,
-                value: value.map(Box::new),
-            }),
-            "step" => Expr!(Debug::Step {
-                keyword: self.migrate(keyword)?,
-                value: value.map(Box::new),
-            }),
-            "finish" => Expr!(Debug::Finish {
-                keyword: self.migrate(keyword)?,
-                value: value.map(Box::new),
-            }),
-            "shield" => Expr!(Debug::Shield {
-                keyword: self.migrate(keyword)?,
-                value: value.map(Box::new),
-            }),
-            "breakpoint" => Expr!(Debug::Breakpoint {
-                keyword: self.migrate(keyword)?,
-                value: value.map(Box::new),
-            }),
+        let timing_keyword = match keyword.kind() {
+            "elapsedTime" => Some(TimingKeyword::ElapsedTime(self.migrate(keyword)?)),
+            "elapsedTiming" => Some(TimingKeyword::ElapsedTiming(self.migrate(keyword)?)),
+            "profile" => Some(TimingKeyword::Profile(self.migrate(keyword)?)),
+            "time" => Some(TimingKeyword::Time(self.migrate(keyword)?)),
+            "timing" => Some(TimingKeyword::Timing(self.migrate(keyword)?)),
+            _ => None,
+        };
+        if let Some(keyword) = timing_keyword {
+            let value = value.ok_or_else(|| self.unsupported("timing operand", node))?;
+            return Ok(Expr::from(ExprTiming {
+                keyword,
+                expr: Box::new(value),
+            }));
+        }
+        let keyword = match keyword.kind() {
+            "TEST" => DebugKeyword::Test(self.migrate(keyword)?),
+            "step" => DebugKeyword::Step(self.migrate(keyword)?),
+            "finish" => DebugKeyword::Finish(self.migrate(keyword)?),
+            "shield" => DebugKeyword::Shield(self.migrate(keyword)?),
+            "breakpoint" => DebugKeyword::Breakpoint(self.migrate(keyword)?),
             kind => return Err(self.unsupported(kind, keyword)),
-        })
+        };
+        Ok(Expr::from(ExprDebug {
+            keyword,
+            expr: value.map(Box::new),
+        }))
     }
 
     /// Handles migrate.
@@ -1420,9 +1290,9 @@ impl<'source> Lowerer<'source> {
     /// Returns the source span.
     fn span(&self, node: tree_sitter::Node<'_>) -> Span {
         let range = node.byte_range();
-        self.aliases
+        self.respellings
             .iter()
-            .find(|alias| alias.bare == range)
+            .find(|respelling| respelling.read == range)
             .map_or_else(
                 || {
                     self.source_span.subspan(
@@ -1430,7 +1300,10 @@ impl<'source> Lowerer<'source> {
                         node.end_byte().min(self.source.len()),
                     )
                 },
-                |alias| self.source_span.subspan(alias.full.start, alias.full.end),
+                |respelling| {
+                    self.source_span
+                        .subspan(respelling.written.start, respelling.written.end)
+                },
             )
     }
 
@@ -1449,42 +1322,78 @@ impl<'source> Lowerer<'source> {
 }
 
 #[derive(Clone)]
-/// Internal state for CoreAlias.
-struct CoreAlias {
-    /// The full.
-    full: Range<usize>,
-    /// The bare.
-    bare: Range<usize>,
+/// A token the grammar reads in its declared spelling, at the same offsets.
+///
+/// The declared spelling goes after one blank, and blanks pad the rest:
+/// `Core$if` is read as ` if    `, `≠` as ` !=`, and `threadVariable` as
+/// ` threadLocal  `.
+struct Respelling {
+    written: Range<usize>,
+    read: Range<usize>,
+    declared: &'static str,
+}
+
+impl Respelling {
+    /// Respells the token at `span`, unless a word would have no blank
+    /// between it and a word beside it: `a∧b` cannot be read as `aandb`.
+    fn new(source: &[u8], span: Span, declared: &'static str) -> Result<Self, ParseError> {
+        let (start, end) = span.bounds().expect("lexed tokens lie in the source");
+        let written = start..end;
+        let padding = written.len() - declared.len();
+        let read = written.start + padding.min(1)..written.start + padding.min(1) + declared.len();
+        let touches_word = |byte: Option<&u8>| {
+            byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || !byte.is_ascii())
+        };
+        let glued = declared.starts_with(|c: char| c.is_ascii_alphabetic())
+            && (read.start == written.start && touches_word(source[..written.start].last())
+                || read.end == written.end && touches_word(source.get(written.end)));
+        if glued {
+            return Err(ParseError::UnsupportedNode {
+                kind: format!("{} beside a word", span.text().unwrap_or(declared)),
+                span,
+            });
+        }
+        Ok(Self {
+            written,
+            read,
+            declared,
+        })
+    }
+
+    fn apply(&self, view: &mut [u8]) {
+        view[self.written.clone()].fill(b' ');
+        view[self.read.clone()].copy_from_slice(self.declared.as_bytes());
+    }
 }
 
 /// Handles renamed source.
-fn renamed_source(source: &str) -> Result<(Cow<'_, str>, Vec<CoreAlias>), LexError> {
+fn renamed_source(source: &str) -> Result<(Cow<'_, str>, Vec<Respelling>), ParseError> {
     let tokens = lex_str(source)?;
-    let mut aliases = Vec::new();
-    collect_core_aliases(&tokens, &mut aliases);
-    if aliases.is_empty() {
-        return Ok((Cow::Borrowed(source), aliases));
+    let mut respellings = Vec::new();
+    collect_respellings(&tokens, source.as_bytes(), &mut respellings)?;
+    if respellings.is_empty() {
+        return Ok((Cow::Borrowed(source), respellings));
     }
 
     let mut renamed = source.as_bytes().to_vec();
-    for alias in &aliases {
-        renamed[alias.full.start..alias.bare.start].fill(b' ');
-    }
+    respellings
+        .iter()
+        .for_each(|respelling| respelling.apply(&mut renamed));
     Ok((
-        Cow::Owned(String::from_utf8(renamed).expect("replacing ASCII bytes preserves UTF-8")),
-        aliases,
+        Cow::Owned(String::from_utf8(renamed).expect("respelling writes whole tokens in ASCII")),
+        respellings,
     ))
 }
 
 /// Internal alias for RecoveredSource.
-type RecoveredSource<'source> = (Cow<'source, str>, Vec<CoreAlias>, Vec<LexError>);
+type RecoveredSource<'source> = (Cow<'source, str>, Vec<Respelling>, Vec<LexError>);
 
 /// Handles renamed source recovering.
-fn renamed_source_recovering(source: &str) -> Result<RecoveredSource<'_>, LexError> {
+fn renamed_source_recovering(source: &str) -> Result<RecoveredSource<'_>, ParseError> {
     let recovered = lex_str_recovering(source)?;
     let (tokens, diagnostics) = recovered.into_parts();
-    let mut aliases = Vec::new();
-    collect_core_aliases(&tokens, &mut aliases);
+    let mut respellings = Vec::new();
+    collect_respellings(&tokens, source.as_bytes(), &mut respellings)?;
     let mut missing = Vec::new();
     collect_missing_closers(&tokens, &mut missing);
     let missing_literal = diagnostics
@@ -1495,14 +1404,14 @@ fn renamed_source_recovering(source: &str) -> Result<RecoveredSource<'_>, LexErr
             _ => None,
         });
 
-    if aliases.is_empty() && missing.is_empty() && missing_literal.is_none() {
-        return Ok((Cow::Borrowed(source), aliases, diagnostics));
+    if respellings.is_empty() && missing.is_empty() && missing_literal.is_none() {
+        return Ok((Cow::Borrowed(source), respellings, diagnostics));
     }
 
     let mut renamed = source.as_bytes().to_vec();
-    for alias in &aliases {
-        renamed[alias.full.start..alias.bare.start].fill(b' ');
-    }
+    respellings
+        .iter()
+        .for_each(|respelling| respelling.apply(&mut renamed));
     // A line comment runs to the end of its line, so appended closers must
     // start on a new one to remain syntax.
     if !missing.is_empty() && ends_in_line_comment(&tokens, source.len()) {
@@ -1516,19 +1425,19 @@ fn renamed_source_recovering(source: &str) -> Result<RecoveredSource<'_>, LexErr
     }
     Ok((
         Cow::Owned(String::from_utf8(renamed).expect("ASCII recovery preserves UTF-8")),
-        aliases,
+        respellings,
         diagnostics,
     ))
 }
 
 /// Reports whether the source ends inside a line comment.
 fn ends_in_line_comment(tokens: &TokenStream, source_len: usize) -> bool {
-    CommentTrivia::of(tokens)
-        .into_trivia()
-        .last()
-        .is_some_and(|comment| {
-            comment.kind() == TriviaKind::LineComment && comment.span().end() == Some(source_len)
-        })
+    tokens.source().is_some_and(|source| {
+        source
+            .comment_ranges()
+            .last()
+            .is_some_and(|(kind, range)| *kind == CommentKind::Line && range.end == source_len)
+    })
 }
 
 /// Collects missing closers.
@@ -1544,28 +1453,32 @@ fn collect_missing_closers(tokens: &TokenStream, missing: &mut Vec<DelimiterKind
     }
 }
 
-/// Collects core aliases.
-fn collect_core_aliases(tokens: &TokenStream, aliases: &mut Vec<CoreAlias>) {
+/// Collects the tokens the grammar reads in their declared spelling: the
+/// `Core$` aliases and M2's synonyms, which the grammar does not know.
+///
+/// The alias of a word that only continues a construct is a syntax error, as
+/// in M2; respelling it would make `if x Core$then y` parse.
+fn collect_respellings(
+    tokens: &TokenStream,
+    source: &[u8],
+    respellings: &mut Vec<Respelling>,
+) -> Result<(), ParseError> {
     for token in tokens.iter() {
-        match token {
-            TokenTree::Group(group) => collect_core_aliases(group.stream(), aliases),
-            TokenTree::Ident(identifier) => {
-                let spelling = identifier.text();
-                let bare = crate::lexer::canonical_word_spelling(spelling);
-                if bare == spelling {
-                    continue;
-                }
-                let Some((start, end)) = identifier.expect_span().bounds() else {
-                    continue;
-                };
-                aliases.push(CoreAlias {
-                    full: start..end,
-                    bare: end - bare.len()..end,
-                });
-            }
-            TokenTree::Literal(_) | TokenTree::Punct(_) => {}
+        if let TokenTree::Group(group) = token {
+            collect_respellings(group.stream(), source, respellings)?;
+            continue;
+        }
+        let Some(spelling) = token.spelling() else {
+            continue;
+        };
+        if crate::lexer::is_continuation_alias(spelling) {
+            return Err(ParseError::InvalidSyntax(token.expect_span()));
+        }
+        if let Some(declared) = crate::lexer::declared_spelling(spelling) {
+            respellings.push(Respelling::new(source, token.expect_span(), declared)?);
         }
     }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -1654,7 +1567,7 @@ mod tests {
         ]
         .map(|mut file| {
             assert_eq!(file.cells.len(), 1, "source: {source}");
-            let PackedContent::Expr(value) = file.cells.pop().unwrap().content else {
+            let Elements::Single(value) = file.cells.pop().unwrap().elems else {
                 panic!("expected one expression for {source}");
             };
             *value
@@ -1665,21 +1578,21 @@ mod tests {
     fn empty_parentheses_are_empty_sequences_in_both_backends() {
         for source in ["()", "( )", "(-* comment *-)", "(-- comment\n)"] {
             for expression in expressions(source) {
-                let Expr::Collection(ExprCollection::Sequence(sequence)) = expression else {
+                let Expr::Sequence(sequence) = expression else {
                     panic!("expected an empty sequence for {source}, found {expression:?}");
                 };
-                assert!(sequence.statements.is_empty(), "source: {source}");
-                assert!(sequence.elements.is_none(), "source: {source}");
+                assert!(sequence.stmts.is_empty(), "source: {source}");
+                assert!(sequence.elems.is_none(), "source: {source}");
                 assert_eq!(sequence.span().text(), Some(source));
             }
         }
     }
 
     #[test]
-    fn parenthesized_values_and_statements_remain_holders() {
+    fn parenthesized_values_and_statements_are_parenthesized_expressions() {
         for source in ["(x)", "(x;)", "(x; y)"] {
             for expression in expressions(source) {
-                assert!(matches!(expression, Expr::Holder(_)), "source: {source}");
+                assert!(matches!(expression, Expr::Paren(_)), "source: {source}");
             }
         }
     }

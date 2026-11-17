@@ -11,31 +11,57 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::mem::take;
 use std::sync::Arc;
 
+use crate::CommentKind;
+use crate::comment::CommentRange;
 use crate::{
-    Delimiter, DelimiterKind, DoubleSpan, GENERATED_OPERATOR_SPELLINGS,
-    GENERATED_POSTFIX_OPERATOR_SPELLINGS, GENERATED_PUNCTUATION_SPELLINGS,
-    GENERATED_WORD_TOKEN_SPELLINGS, IdentToken, LiteralKind, LiteralToken, Offset, Punct,
-    Recovered, Source, Span, Spanned, TokenGroup, TokenStream, TokenTree, Trivia, TriviaKind,
+    Delimiter, DelimiterKind, DoubleSpan, GENERATED_CONTINUATION_SPELLINGS,
+    GENERATED_OPERATOR_SPELLINGS, GENERATED_POSTFIX_OPERATOR_SPELLINGS,
+    GENERATED_PUNCTUATION_SPELLINGS, GENERATED_SYNONYMS, GENERATED_WORD_TOKEN_SPELLINGS,
+    IdentToken, LiteralKind, LiteralToken, Offset, Punct, Recovered, Source, Span, Spanned,
+    TokenGroup, TokenStream, TokenTree,
 };
 
 /// The MAX GROUP DEPTH constant.
 const MAX_GROUP_DEPTH: usize = 256;
 
-/// Collapses an explicitly `Core$`-qualified identifier back to its bare
-/// spelling when that spelling is one of the hardcoded word-token aliases.
-pub(crate) fn canonical_word_spelling(spelling: &str) -> &str {
-    let Some(word) = spelling.strip_prefix("Core$") else {
-        return spelling;
-    };
-    if GENERATED_WORD_TOKEN_SPELLINGS.contains(&word) {
-        word
-    } else {
-        spelling
-    }
+/// The declared spelling a written one stands for: `Core$if` is `if`, and
+/// M2's synonyms `→` and `Core$threadVariable` are `->` and `threadLocal`.
+///
+/// Only words have a `Core$` alias, since the operator-block characters of
+/// `Core$→` always split it. The alias keeps the word's precedence, but a
+/// construct continued by a word, like `then` in `if x then y`, matches only
+/// the exact spelling; see [`is_continuation_alias`].
+pub(crate) fn canonical_spelling(spelling: &str) -> &str {
+    declared_spelling(spelling).unwrap_or(spelling)
 }
 
-#[doc(hidden)]
-pub fn __qualified_identifier_spans(spelling: &str, span: &Span) -> (Option<Span>, Option<Span>) {
+/// The declared spelling a `Core$` alias or a synonym stands for, and
+/// nothing for a spelling that is already declared or not a token at all.
+pub(crate) fn declared_spelling(spelling: &str) -> Option<&'static str> {
+    let word = spelling.strip_prefix("Core$").and_then(|word| {
+        GENERATED_WORD_TOKEN_SPELLINGS
+            .iter()
+            .find(|declared| **declared == word)
+    });
+    let bare = word.map_or(spelling, |word| *word);
+    GENERATED_SYNONYMS
+        .iter()
+        .find(|(synonym, _)| *synonym == bare)
+        .map(|(_, declared)| *declared)
+        .or(word.copied())
+}
+
+/// Whether a spelling is the `Core$` alias of a word that only continues a
+/// construct, `Core$then`, which M2 accepts nowhere.
+pub(crate) fn is_continuation_alias(spelling: &str) -> bool {
+    spelling
+        .strip_prefix("Core$")
+        .is_some_and(|word| GENERATED_CONTINUATION_SPELLINGS.contains(&word))
+}
+
+/// The package and index qualifiers of an identifier spelling, without their
+/// `$`: `Core` and `1` in `Core$x$1`. Other `$` shapes have no qualifiers.
+pub(crate) fn qualifier_spans(spelling: &str, span: &Span) -> (Option<Span>, Option<Span>) {
     let components = spelling.match_indices('$').collect::<Vec<_>>();
     let subspan = |start: usize, end: usize| span.subspan(start, end);
     match components.as_slice() {
@@ -256,15 +282,6 @@ pub fn lex_str_recovering(source: &str) -> Result<Recovered<TokenStream, LexErro
     NativeLexer::new(Arc::<str>::from(source)).lex_recovering()
 }
 
-/// Lexes an existing snapshot while retaining unclosed groups and string
-/// literals, so every span of the result points into `source`.
-#[cfg(feature = "tree-sitter")]
-pub(crate) fn lex_source_recovering(
-    source: &Arc<Source>,
-) -> Result<Recovered<TokenStream, LexError>, LexError> {
-    NativeLexer::over(Arc::clone(source)).lex_recovering()
-}
-
 /// Lexes one statically spelled fragment emitted by [`crate::quote_m2!`].
 ///
 /// Procedural-macro input arrives as Rust token trees, so the macro first joins
@@ -299,6 +316,13 @@ where
     Ok(NativeLexer::new(Arc::<str>::from(source)))
 }
 
+/// The comments of `text`, from lexing it.
+pub(crate) fn comment_ranges(text: &str) -> Box<[CommentRange]> {
+    let mut lexer = NativeLexer::new(Arc::from(text));
+    let _ = lexer.lex_tokens();
+    take(&mut lexer.comments).into_boxed_slice()
+}
+
 /// Internal state for NativeLexer.
 struct NativeLexer {
     /// The source.
@@ -307,6 +331,8 @@ struct NativeLexer {
     source_span: Span,
     /// The offset.
     offset: Offset,
+    /// The comments lexed so far, in order.
+    comments: Vec<CommentRange>,
 }
 
 impl NativeLexer {
@@ -317,6 +343,7 @@ impl NativeLexer {
             source: Arc::<str>::from(source.text()),
             source_span: Span::ranged(Arc::clone(&source), 0..source.text().len()),
             offset: 0,
+            comments: Vec::new(),
         }
     }
 
@@ -327,6 +354,7 @@ impl NativeLexer {
             source,
             source_span,
             offset: 0,
+            comments: Vec::new(),
         }
     }
 
@@ -339,8 +367,16 @@ impl NativeLexer {
         }
     }
 
-    /// Lexes recovering.
+    /// Lexes recovering, leaving the comments found on the source either way.
     fn lex_recovering(mut self) -> Result<Recovered<TokenStream, LexError>, LexError> {
+        let lexed = self.lex_tokens();
+        self.source_span
+            .source()
+            .install_comments(take(&mut self.comments));
+        lexed
+    }
+
+    fn lex_tokens(&mut self) -> Result<Recovered<TokenStream, LexError>, LexError> {
         let mut output = TokenStream::new();
         let mut groups = Vec::<OpenGroup>::new();
         let mut diagnostics = Vec::new();
@@ -369,7 +405,7 @@ impl NativeLexer {
             } else if matches!(first, b' ' | b'\t') {
                 self.lex_whitespace(&mut output)?;
             } else if let Some(width) = self.math_operator_width() {
-                self.lex_math_operator(width, &mut output)?;
+                self.lex_math_character(width, &mut output)?;
                 quote_next = false;
             } else if is_identifier_start(first) {
                 let quoted = take(&mut quote_next);
@@ -706,11 +742,8 @@ impl NativeLexer {
                 Some(_) => bytes.push(self.next_or_error(LexErrorKind::InvalidCharacter, start)?),
             }
         }
-        let _ = bytes;
-        output.push_line_comment(Trivia::from_span(
-            TriviaKind::LineComment,
-            self.span_from(start),
-        ));
+        let _ = (bytes, output);
+        self.comments.push((CommentKind::Line, start..self.offset));
         Ok(())
     }
 
@@ -724,15 +757,13 @@ impl NativeLexer {
         let mut bytes = self.take_exact(opener_len, start)?;
         loop {
             if self.peek(0).is_none() {
+                self.comments.push((CommentKind::Block, start..self.offset));
                 return Err(self.error(LexErrorKind::UnterminatedBlockComment, start));
             }
             if self.peek(0) == Some(b'*') && self.byte_after_current() == Some(b'-') {
                 bytes.extend(self.take_exact(2, start)?);
-                let _ = bytes;
-                output.push_block_comment(Trivia::from_span(
-                    TriviaKind::BlockComment,
-                    self.span_from(start),
-                ));
+                let _ = (bytes, output);
+                self.comments.push((CommentKind::Block, start..self.offset));
                 return Ok(());
             }
             bytes.push(self.next_or_error(LexErrorKind::UnterminatedBlockComment, start)?);
@@ -766,18 +797,32 @@ impl NativeLexer {
             .and_then(|_| utf8_char_width(first))
     }
 
-    /// Lexes math operator.
-    fn lex_math_operator(
+    /// Lexes one character of M2's operator blocks, with an `=` right after
+    /// it: `⊠`, `⊠=`, `§`, `§=`.
+    ///
+    /// M2 makes each such character a token of its own, so `a§b` is
+    /// `a § b`. The token is an operator when its spelling is declared and
+    /// otherwise a symbol: `§`, `↑=`, and `≠=` are symbols.
+    fn lex_math_character(
         &mut self,
         width: usize,
         output: &mut TokenStream,
     ) -> Result<(), LexError> {
         let start = self.offset;
-        let mut bytes = self.take_exact(width, start)?;
+        self.take_exact(width, start)?;
         if self.peek(0) == Some(b'=') {
-            bytes.push(self.next_or_error(LexErrorKind::InvalidUtf8, start)?);
+            self.next_or_error(LexErrorKind::InvalidUtf8, start)?;
         }
-        self.emit_punctuation(bytes, start, output)
+        let span = self.span_from(start);
+        let declared = span
+            .text()
+            .is_some_and(|spelling| GENERATED_PUNCTUATION_SPELLINGS.contains(&spelling));
+        output.extend([if declared {
+            TokenTree::Punct(Punct::from_span(span))
+        } else {
+            TokenTree::Ident(IdentToken::from_span(span))
+        }]);
+        Ok(())
     }
 
     /// Lexes punctuation.
@@ -911,7 +956,7 @@ pub(crate) fn newline_ends_cell(stream: &TokenStream) -> bool {
             last_text = None;
             continue;
         }
-        let text = canonical_word_spelling(text);
+        let text = canonical_spelling(text);
         last_text = Some(text);
         if is_quote_specifier(text) {
             quote_next = true;
@@ -989,7 +1034,6 @@ fn keyword_requires_value(keyword: &str) -> bool {
             | "symbol"
             | "local"
             | "global"
-            | "threadVariable"
             | "threadLocal"
     )
 }
@@ -997,18 +1041,16 @@ fn keyword_requires_value(keyword: &str) -> bool {
 /// Whether the token just lexed quotes the one after it.
 fn last_token_quotes_next(stream: &TokenStream) -> bool {
     matches!(stream.last_innermost(), Some(TokenTree::Ident(token))
-        if is_quote_specifier(canonical_word_spelling(token.text())))
+        if is_quote_specifier(canonical_spelling(token.text())))
 }
 
 /// Returns whether the value is quote specifier.
 pub(crate) fn is_quote_specifier(keyword: &str) -> bool {
-    matches!(
-        keyword,
-        "symbol" | "local" | "global" | "threadVariable" | "threadLocal"
-    )
+    matches!(keyword, "symbol" | "local" | "global" | "threadLocal")
 }
 
-/// Handles punctuation would merge.
+/// Whether two atoms written without a gap would lex as one: `+` and `+`
+/// as `++`, or `§` and `=` as the symbol `§=`.
 pub(crate) fn punctuation_would_merge(left: &str, right: &str) -> bool {
     let mut combined = String::with_capacity(left.len() + right.len());
     combined.push_str(left);
@@ -1109,7 +1151,9 @@ fn is_identifier_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'$' | b'\'') || byte >= 128
 }
 
-/// Returns whether the value is math operator pair.
+/// Whether a UTF-8 lead byte and its successor begin a character of the
+/// blocks M2 reserves for operators, as M2's own lexer tests them:
+/// U+00A0–U+00BF, `×`, `÷`, U+2180–U+23FF, U+27C0–U+27FF, and U+2900–U+2BFF.
 fn is_math_operator_pair(first: u8, second: u8) -> bool {
     matches!(
         (first, second),
@@ -1119,7 +1163,7 @@ fn is_math_operator_pair(first: u8, second: u8) -> bool {
     )
 }
 
-/// Returns whether the value is math operator.
+/// Whether a spelling is exactly one character of M2's operator blocks.
 fn is_math_operator(spelling: &str) -> bool {
     let bytes = spelling.as_bytes();
     bytes
@@ -1149,6 +1193,27 @@ mod tests {
         let stream = lex_str(source).unwrap();
         assert_eq!(stream.to_source(), source);
         stream
+    }
+
+    #[test]
+    fn operator_block_characters_are_operators_only_when_declared() {
+        let lexed = |source: &str| {
+            tokens(source)
+                .iter()
+                .map(|token| match token {
+                    TokenTree::Ident(ident) => format!("symbol {}", ident.text()),
+                    TokenTree::Punct(punct) => format!("operator {}", punct.text()),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lexed("a§b"), ["symbol a", "symbol §", "symbol b"]);
+        assert_eq!(lexed("§§"), ["symbol §", "symbol §"]);
+        assert_eq!(
+            lexed("§= ≠= ⊠= ≤"),
+            ["symbol §=", "symbol ≠=", "operator ⊠=", "operator ≤"]
+        );
+        assert_eq!(lexed("a€b a😀"), ["symbol a€b", "symbol a😀"]);
     }
 
     fn span_at(start: usize, text: &str) -> Span {
@@ -1214,21 +1279,15 @@ mod tests {
     #[test]
     fn comment_openers_only_win_at_the_current_position() {
         let ordinary = tokens("|--1");
-        assert!(
-            ordinary.iter().all(|tree| {
-                tree.leading_trivia().is_empty() && tree.trailing_trivia().is_empty()
-            })
-        );
+        assert!(ordinary.source().unwrap().comment_ranges().is_empty());
 
         let source = "-- comment\n-* block *-";
         let comments = tokens(source);
         assert!(comments.is_empty());
-        assert!(matches!(
-            comments.suffix_trivia(),
-            [line, block]
-                if line.kind() == TriviaKind::LineComment
-                    && block.kind() == TriviaKind::BlockComment
-        ));
+        assert_eq!(
+            Source::new(source).comment_ranges(),
+            [(CommentKind::Line, 0..10), (CommentKind::Block, 11..22)]
+        );
     }
 
     #[test]
@@ -1309,11 +1368,11 @@ mod tests {
 
         let symbol = crate::Symbol::new(spelling, span_at(100, spelling));
         assert_eq!(
-            symbol.package_qualifier.as_ref().and_then(Span::bounds),
+            symbol.package_qualifier().and_then(Span::bounds),
             Some((100, 107))
         );
         assert_eq!(
-            symbol.index_qualifier.as_ref().and_then(Span::bounds),
+            symbol.index_qualifier().and_then(Span::bounds),
             Some((113, 115))
         );
         assert!(matches!(
@@ -1326,22 +1385,22 @@ mod tests {
 
         let package = crate::Symbol::new("Package$name", span_at(20, "Package$name"));
         assert_eq!(
-            package.package_qualifier.as_ref().and_then(Span::bounds),
+            package.package_qualifier().and_then(Span::bounds),
             Some((20, 27))
         );
-        assert_eq!(package.index_qualifier, None);
+        assert_eq!(package.index_qualifier(), None);
 
         let indexed = crate::Symbol::new("name$12", span_at(30, "name$12"));
-        assert_eq!(indexed.package_qualifier, None);
+        assert_eq!(indexed.package_qualifier(), None);
         assert_eq!(
-            indexed.index_qualifier.as_ref().and_then(Span::bounds),
+            indexed.index_qualifier().and_then(Span::bounds),
             Some((35, 37))
         );
 
         for unqualified in ["name", "A$B$C", "A$$B", "A$", "A$1B", "Core$Core$not"] {
             let symbol = crate::Symbol::new(unqualified, Span::for_text(unqualified));
-            assert_eq!(symbol.package_qualifier, None, "`{unqualified}`");
-            assert_eq!(symbol.index_qualifier, None, "`{unqualified}`");
+            assert_eq!(symbol.package_qualifier(), None, "`{unqualified}`");
+            assert_eq!(symbol.index_qualifier(), None, "`{unqualified}`");
         }
     }
 

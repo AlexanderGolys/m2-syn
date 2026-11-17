@@ -28,8 +28,8 @@ use crate::{ParseError, parse_file};
 /// [`Self::token_stream`] or [`Self::to_source`].
 ///
 /// The original string is retained as an immutable snapshot for diagnostics.
-/// Cell and source-file comment ownership is retained by the typed graph;
-/// source-backed layout is recovered from spans during emission.
+/// Comments and layout are recovered from the typed graph's spans during
+/// emission.
 #[derive(Debug)]
 pub struct ParsedFile {
     /// The original source.

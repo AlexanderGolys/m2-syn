@@ -1,104 +1,66 @@
-# Representation pipeline
+# Tokens and cells
 
-The frontend has a lexical representation, a framed cell representation, and
-one generated typed graph:
+The parsing pipeline separates lexical tokens, cell framing, and typed syntax.
+These representations serve different tasks:
 
-```text
-source --Lex--> TokenStream --Tokenize--> CellStream<CellTokenStream> --Parser--> typed CST
-   |                                                                            |
-   +------------------> Tree-sitter CST --------------------Migrate--------------+
-                                                                                |
-source <-----------------------Display/Lex---------------------------------------+
-```
-
-`TokenStream` contains only lexical token trees. `Tokenize` performs the first
-grammar-aware step: it confirms top-level cell boundaries and recursively adds
-`CellTokenTree::Adj` markers. Each resulting `CellTokenStream` is therefore a
-partially parsed cell, and `CellStream` records EOC and EOF structurally through
-the sequence rather than virtual tokens. Layout is the source gap between two
-neighbouring spans, so a file's two edges need owners: the BOF marker spans the
-layout before the first significant byte and the EOF marker the layout after
-the last one. Each is emitted only while it still physically borders the first
-or last cell, so joined or edited streams never reinstate stale text.
-Converting a cell back into a raw `TokenStream` removes adjacency recursively.
-
-`Parse` and `Lex` are the two directions at the typed boundary. For a
-typed value `c`, parsing its emission should recover `c`. Emitting a parsed raw
-stream may normalize insignificant layout:
+| Representation | Contains | Useful for |
+| --- | --- | --- |
+| `TokenStream` | Raw atoms and recursive groups | Quoting and lexical transformations |
+| `CellStream` | Framed cells with inferred adjacency | Parser backends and procedural macros |
+| `nodes::SourceFile` | Typed nodes, operators, and boundaries | Analysis, traversal, and rewriting |
 
 ```text
-Parse(Lex(c)) = c
-Lex(Parse(tokens)) = normalize(tokens)
+source -> lex_str -> TokenStream -> Tokenize -> CellStream -> Parser -> SourceFile
+                        ^                          ^                     |
+                        +----------- Lex ----------+---------------------+
+                                                   +---- Tokenize -------+
 ```
 
-The two parser backends differ only in how they reach the generated graph.
-`NativeParser` consumes framed cells and constructs it directly from the shared
-token cursor.
-`TreeSitterParser` lowers Tree-sitter's concrete grammar layout directly and
-uses `ExternalCstNode` plus generated `Migrate` for compatible leaves,
-operators, and tokens. It never routes the source through `NativeParser`.
-Those adapter traits are not an alternative graph or a traversal API; typed
-traversal is generated as `Visit`, `VisitMut`, and `Fold`.
+## Lexical tokens
 
-The ownership boundaries are intentionally narrow:
+`TokenTree` distinguishes identifiers, literals, punctuation, and delimiter
+groups. A group contains a recursive token stream and retains both boundary
+spans. Comments are found from those spans rather than stored. The lexer
+recognizes these pieces without constructing expression nodes.
 
-| Location | Owns |
-| --- | --- |
-| `lex/token_stream.rs` | raw atoms and recursive groups |
-| `lex/lexer.rs` | byte recognition and delimiter balancing |
-| `lex/cell_stream.rs` | framed cells, inferred adjacency, and cell boundaries |
-| `parser/parse.rs` | the shared token cursor and parser traits |
-| `parser/native.rs` | precedence and typed-node construction |
-| `migration/` | the external-CST reconstruction adapter |
-| `schema/nodes.rs` | the compact grammar and token parser metadata declaration |
-| `m2-syn-macros/src/` | generation of tokens, nodes, traversal, parsing, and emission |
+Typed literal tokens such as `Token![+]` refine the raw representation. They
+are not extra variants of `TokenTree`. `Token![...]` names every token type by
+its spelling, delimiter families included: `Token![else]`, `Token![()]`,
+`Token![<||>]`. The spelling can also be a string, which is how a spelling Rust
+cannot tokenize, such as `"⊢"`, is written. Whitespace never belongs to a
+spelling, so `Token![/ /]`, `Token!["/ /"]`, and `Token!["//"]` are one type,
+and nothing written, `Token![]`, is adjacency.
 
-```text
-syntax! {
-    // Structural precedences with no single owning token; every operator
-    // below carries its own precedence inline instead.
-    precedence: {
-        PREC_CONTROL = 12,
-    }
+## Cell framing
 
-    tokens {
-        // L/R is the binary associativity. A third slot overrides the
-        // prefix strength when it differs from the precedence.
-        [+] { bin, pref, aug } (50, L)
-        [=] { infix }          (14, R)
-        [if] [then] [else]     (PREC_CONTROL)
-        [,]
-    }
+`Tokenize` partitions lexical input into independently parseable cells.
+Semicolons and complete physical lines confirm top-level boundaries. A newline
+inside a delimiter group does not split the outer stream into separate cells.
 
-    #[operator(prefix)]
-    enum PrefixOperator {}
-    #[operator(binary)]
-    enum BinaryOperator {}
-    #[operator(postfix)]
-    enum PostfixOperator {}
+Framing also records application through `CellTokenTree::Adj`. For example,
+`f(x)` and `f (x)` both contain inferred adjacency, whereas `return 1` uses the
+return syntax. Groups are framed recursively. Converting a framed cell back to
+lexical tokens removes the inferred adjacency markers.
 
-    struct Symbol;
+End-of-cell and end-of-file are structural facts in a `CellStream`. In the typed
+tree, `Cell` retains its `Token![EOC]`, optional semicolon, and content;
+`SourceFile` retains the file's `Token![BOF]`, cells, and `Token![EOF]`. These
+markers are tokens that are never written: zero-width positions at the end of a
+cell and the physical start and end of the file.
 
-    struct BinaryExpression {
-        left: Expr,
-        operator: BinaryOperator,
-        right: Expr,
-    }
+## Parsing and emission
 
-    enum Expr {
-        BinaryExpression,
-        Symbol,
-    }
-}
-```
+`NativeParser` constructs typed syntax from the framed token cursor.
+`TreeSitterParser` lowers its grammar's concrete tree to the same types. The
+external CST is temporary and is not stored inside the owned result.
 
-The canonical declaration lives in `src/schema/nodes.rs`, where the `syntax!`
-procedural macro expands it into the token, node, traversal, and fold items,
-and into the `visit`, `visit_mut`, and `fold` modules re-exported at the crate
-root. The expansion is items only — no `macro_rules!` — so rust-analyzer
-resolves every generated name.
+`Lex` projects syntax back to tokens; `Tokenize` projects it to framed cells.
+Source-backed layout can be recovered from spans between neighboring tokens.
+Emission also inserts separation where token boundaries require it. Constructed
+or edited syntax may therefore have normalized layout rather than the input's
+exact whitespace.
 
-`Token!` and `Delimiter!` are ordinary source in `src/schema/macros.rs` instead of
-part of that expansion. Neither depends on the schema: `Token!` forwards the
-spelling to the `token!` procedural macro, and the delimiter families are a
-fixed set.
+Use `ParsedFile::original_source()` when you need the original bytes. Use
+`to_source()` when you need source representing the current tree. A useful
+round-trip check is to parse emitted source and verify that emitting it again
+produces the same result.

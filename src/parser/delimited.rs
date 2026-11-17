@@ -9,8 +9,8 @@ use crate::{PrettyNode, PrettyTree};
 /// Syntax contained by an arbitrary or statically known delimiter family.
 ///
 /// With its default `D = Delimiter`, `Delimited<S>` accepts any delimiter
-/// family. Supply a [`crate::Delimiter!`] type, for example
-/// `Delimited<S, Delimiter![()]>`, when the family is statically known. The
+/// family. Supply a delimiter atom, for example `Delimited<S, Token![()]>`,
+/// when the family is statically known. The
 /// delimiter retains both boundary spans, while `contents` owns the syntax
 /// between them.
 ///
@@ -35,15 +35,15 @@ pub struct Delimited<S, D = Delimiter> {
 
 /// Names or constructs parenthesized syntax.
 ///
-/// `paren!(T)` is `Delimited<T, Delimiter![()]>`. The constructor form is
+/// `paren!(T)` is `Delimited<T, Token![()]>`. The constructor form is
 /// `paren!(value, span)` where `span` describes the complete parenthesized value.
 #[macro_export]
 macro_rules! paren {
     ($contents:expr, $span:expr $(,)?) => {
-        $crate::Delimited::new($crate::Delimiter![()]($span), $contents)
+        $crate::Delimited::new($crate::Token![()]($span), $contents)
     };
     ($contents:ty) => {
-        $crate::Delimited<$contents, $crate::Delimiter![()]>
+        $crate::Delimited<$contents, $crate::Token![()]>
     };
 }
 
@@ -53,10 +53,10 @@ macro_rules! paren {
 #[macro_export]
 macro_rules! braces {
     ($contents:expr, $span:expr $(,)?) => {
-        $crate::Delimited::new($crate::Delimiter![{}]($span), $contents)
+        $crate::Delimited::new($crate::Token![{}]($span), $contents)
     };
     ($contents:ty) => {
-        $crate::Delimited<$contents, $crate::Delimiter![{}]>
+        $crate::Delimited<$contents, $crate::Token![{}]>
     };
 }
 
@@ -66,10 +66,10 @@ macro_rules! braces {
 #[macro_export]
 macro_rules! brackets {
     ($contents:expr, $span:expr $(,)?) => {
-        $crate::Delimited::new($crate::Delimiter![[]]($span), $contents)
+        $crate::Delimited::new($crate::Token![[]]($span), $contents)
     };
     ($contents:ty) => {
-        $crate::Delimited<$contents, $crate::Delimiter![[]]>
+        $crate::Delimited<$contents, $crate::Token![[]]>
     };
 }
 
@@ -80,10 +80,10 @@ macro_rules! brackets {
 #[macro_export]
 macro_rules! angle_bars {
     ($contents:expr, $span:expr $(,)?) => {
-        $crate::Delimited::new($crate::Delimiter![<| |>]($span), $contents)
+        $crate::Delimited::new($crate::Token![<||>]($span), $contents)
     };
     ($contents:ty) => {
-        $crate::Delimited<$contents, $crate::Delimiter![<| |>]>
+        $crate::Delimited<$contents, $crate::Token![<||>]>
     };
 }
 

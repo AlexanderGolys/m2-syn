@@ -1,63 +1,60 @@
-# Spans
+# Source locations
 
-A `Span` is a byte range and may retain a shared handle to the source buffer it
-indexes. Source-backed spans return their text directly; offset-only spans can
-still index an explicitly supplied `str` or `String`.
+A `Span` pairs a shared immutable `Source` with an optional half-open byte range.
+A located span can return its source text directly. An unlocated span retains
+its source identity without claiming a byte range.
 
 ```rust
-use m2_syn::Span;
+use m2_syn::{Source, Span};
 
-let source = "quotient ring";
-let ring = Span::source(source).subspan(9, 13);
+let source = Source::new("quotient ring");
+let ring = Span::ranged(source, 9..13);
 assert_eq!(ring.text(), Some("ring"));
-assert_eq!(&source[&ring], "ring");
+assert_eq!(ring.line_column_range().unwrap().start.column, 10);
 ```
 
-Tokens and textual leaves store only spans, never copied spellings. Composite
-nodes derive theirs by joining their components, so a node's span is exactly
-the extent of the syntax beneath it. Hand-built syntax may use
-`Span::detached()`, which names no location; constructors attach a source-backed
-fragment when variable text is supplied.
+`Source::new` creates an ordinary source snapshot. `Source::synthetic` creates
+one for constructed syntax, and `Span::for_text` conveniently covers an entire
+synthetic fragment. Use `Span::unlocated(source)` when the source is known but a
+location is not.
 
-## No line or column
+Typed leaves retain their spelling through spans. Composite nodes implement
+`Spanned` using their components. After a transformation, a tree may contain
+spans from the original source and from newly constructed fragments; it need
+not occupy one contiguous range in one buffer.
 
-A span stores one offset per boundary. Line and column are deliberately absent:
-they are facts about a particular buffer's *contents*, not about the position,
-so they belong to whoever holds the buffer and can be recovered from it on
-demand. `rustc` makes the same choice — its `Span` holds `lo` and `hi` byte
-positions, and `SourceMap` binary-searches a line table when a diagnostic needs
-to print `file:line:col`.
+## Byte offsets and displayed positions
 
-This also removes the need for sentinel endpoints. `(line, column)` has no
-greatest element, so "end of file" would have to be invented; a byte offset does
-not, and an unclosed group simply ends at `source.len()`, which the lexer has in
-hand the moment it reaches end of input.
+Ranges use UTF-8 byte offsets. `Source::line_column` and
+`Span::line_column_range` convert valid positions to one-based line and column
+values for diagnostics. Columns count Unicode scalar values, rather than bytes
+or terminal display cells. The source owns the line-start table and computes
+it when needed.
 
-## Edits
+A source snapshot remains immutable. The same offset in two different snapshots
+can refer to different text, so retain the source identity together with a range.
 
-A `TextEdit` acts on both halves of the indexing relation — on the buffer, and
-on the spans that index it — and the two actions agree:
+## Applying edits
+
+`TextEdit` represents an insertion or deletion. It can apply the change to a
+string and shift an existing span's boundaries:
 
 ```rust
 use m2_syn::{Span, TextEdit};
 
 let source = "quotient ring";
-let ring = Span::source(source).subspan(9, 13);
+let ring = Span::for_text(source).subspan(9, 13);
 let edit = TextEdit::insertion(0, "the ");
-
 let edited = edit.apply(source).unwrap();
-assert_eq!(&edited[ring.shifted(&edit)], &source[&ring]);
+let shifted = ring.shifted(&edit);
+assert_eq!(&edited[shifted.range().unwrap()], "ring");
 ```
 
-A span shifted past an edit keeps naming the syntax it named before. Text landing
-inside a span is carried into it, and a span the edit deletes outright collapses
-to a zero-width span where it used to be rather than detaching, because it still
-records where the syntax was.
+`shifted` adjusts offsets; it retains the original source snapshot. Index the
+edited buffer explicitly when using those adjusted offsets. Shifting spans
+alone does not reparse syntax or update the original source text.
 
-## What spans are not
-
-A span is not the identity of a semantic object, and it is not a stable handle
-across edits. Incremental dependency identity belongs in the semantic layer.
-Macro hygiene likewise is a separate axis — `rustc` keeps it in a `SyntaxContext`
-alongside the byte positions rather than inside them — and is not yet modelled
-here.
+An insertion shifts boundaries at or after its position. A deletion collapses
+covered boundaries onto its start. A completely deleted span becomes zero-width.
+Neither these rules nor a span's source location provide semantic identity
+across edits; applications must track that separately.

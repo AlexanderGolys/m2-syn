@@ -11,9 +11,7 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use crate::{
-    Delimiter, DelimiterKind, DoubleSpan, Punctuated, Spanned, Terminal, TokenTree, TrailingTrivia,
-};
+use crate::{Delimiter, DelimiterKind, DoubleSpan, Punctuated, Spanned, TokenTree};
 
 /// Internal alias for PunctuatedNodes.
 type PunctuatedNodes<N> = Punctuated<N, N>;
@@ -76,7 +74,7 @@ pub trait ExternalCstNode: Sized + Spanned {
 ///
 /// Parsing validates the raw category and spelling, then retains the raw atom
 /// so emission preserves its source text and span.
-pub trait Token: Terminal + Sized {
+pub trait Token: Spanned + Sized {
     /// Canonical spelling used in diagnostics and freshly constructed atoms.
     const SPELLING: &'static str;
 
@@ -85,16 +83,6 @@ pub trait Token: Terminal + Sized {
 
     /// Validates and retains a raw atom as this typed token.
     fn from_token_tree(token: TokenTree) -> Option<Self>;
-
-    /// Validates a raw atom and attaches the non-space trivia following it.
-    fn from_token_tree_with_trivia(
-        token: TokenTree,
-        trailing_trivia: TrailingTrivia,
-    ) -> Option<Self> {
-        let mut token = Self::from_token_tree(token)?;
-        *token.trailing_trivia_mut() = trailing_trivia;
-        Some(token)
-    }
 }
 
 /// Migrates one typed value from a parser backend's untyped CST node.

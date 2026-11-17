@@ -1,9 +1,9 @@
 //! Integration tests for syntax wrappers.
 
 use m2_syn::{
-    Body, Delimited, Delimiter, FragmentParseError, Lex, LiteralKind, LiteralToken, Parse,
-    ParseStream, Punctuated, Source, Span, Spanned, Terminated, TokenParseError, TokenStream,
-    TokenTree, lex_str, parse_fragment_str, parse_native, parse_quote_m2, parse2,
+    Body, Delimited, FragmentParseError, Lex, LiteralKind, LiteralToken, Parse, ParseStream,
+    Punctuated, Source, Span, Spanned, Terminated, Token, TokenParseError, TokenStream, TokenTree,
+    lex_str, parse_fragment_str, parse_native, parse_quote_m2, parse2,
 };
 
 fn assert_syntax<T: Parse + Lex>() {}
@@ -101,16 +101,16 @@ fn independently_emitted_expressions_compose_as_distinct_global_cells() {
 
 #[test]
 fn delimiter_atoms_themselves_parse_and_emit() {
-    assert_syntax::<m2_syn::Delimiter![()]>();
-    assert_syntax::<m2_syn::Delimiter![[]]>();
-    assert_syntax::<m2_syn::Delimiter![{}]>();
-    assert_syntax::<m2_syn::Delimiter![<| |>]>();
+    assert_syntax::<m2_syn::Token![()]>();
+    assert_syntax::<m2_syn::Token![[]]>();
+    assert_syntax::<m2_syn::Token![{}]>();
+    assert_syntax::<m2_syn::Token![<||>]>();
 
     let span = synthetic_span();
-    round_trip(m2_syn::Delimiter![()](&span), "()");
-    round_trip(m2_syn::Delimiter![[]](&span), "[]");
-    round_trip(m2_syn::Delimiter![{}](&span), "{}");
-    round_trip(m2_syn::Delimiter![<| |>](&span), "<||>");
+    round_trip(m2_syn::Token![()](&span), "()");
+    round_trip(m2_syn::Token![[]](&span), "[]");
+    round_trip(m2_syn::Token![{}](&span), "{}");
+    round_trip(m2_syn::Token![<||>](&span), "<||>");
 }
 
 #[test]
@@ -169,7 +169,7 @@ impl Lex for Value {
 
 #[test]
 fn generic_comma_sequences_do_not_invent_empty_elements() {
-    type Parenthesized = Delimited<Punctuated<Value>, Delimiter![()]>;
+    type Parenthesized = Delimited<Punctuated<Value>, Token![()]>;
 
     assert!(parse_fragment_str::<Parenthesized>("(,1)").is_err());
     assert!(parse_fragment_str::<Parenthesized>("(1,)").is_err());
@@ -177,7 +177,7 @@ fn generic_comma_sequences_do_not_invent_empty_elements() {
 
 #[test]
 fn consuming_value_iteration_discards_commas() {
-    type Parenthesized = Delimited<Punctuated<Value>, Delimiter![()]>;
+    type Parenthesized = Delimited<Punctuated<Value>, Token![()]>;
 
     let values = parse_valid_fragment::<Parenthesized>("(1,2)")
         .contents
@@ -191,7 +191,7 @@ fn consuming_value_iteration_discards_commas() {
 
 #[test]
 fn semicolons_require_a_nonempty_statement_on_their_left() {
-    type Parenthesized = Delimited<Body<Punctuated<Value>>, Delimiter![()]>;
+    type Parenthesized = Delimited<Body<Punctuated<Value>>, Token![()]>;
 
     for source in ["(;)", "(1;;2)"] {
         assert!(
@@ -213,7 +213,7 @@ fn semicolons_require_a_nonempty_statement_on_their_left() {
 
 #[test]
 fn delimited_bodies_parse_emit_and_reparse() {
-    type Parenthesized = Delimited<Body<Punctuated<Value>>, Delimiter![()]>;
+    type Parenthesized = Delimited<Body<Punctuated<Value>>, Token![()]>;
 
     let parsed: Parenthesized = parse_valid_fragment("(1,2;3,4)");
     let emitted = parsed.to_token_stream();

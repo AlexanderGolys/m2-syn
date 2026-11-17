@@ -11,9 +11,8 @@ use std::iter::FusedIterator;
 
 use crate::cell_stream::frame_recovering;
 use crate::{
-    Adj, CellStream, ExternalCstNode, IdentToken, LexError, LiteralToken, Migrate, MigrateError,
-    Punct, SourceFile, Span, Spanned, Terminal, Token, TokenGroup, TokenStream, TokenTree,
-    TrailingTrivia, lex_str,
+    CellStream, ExternalCstNode, IdentToken, LexError, LiteralToken, Migrate, MigrateError, Punct,
+    SourceFile, Span, Spanned, Token, TokenGroup, TokenStream, TokenTree, lex_str,
 };
 
 /// A parser backend that produces one typed syntax target.
@@ -63,7 +62,7 @@ impl<T: Parse> Parse for Box<T> {
 impl Parse for TokenTree {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
         input
-            .next_raw_token()
+            .next_token()
             .ok_or_else(|| TokenParseError::unexpected_end("a token tree", input.eof_span()))
     }
 }
@@ -87,25 +86,6 @@ parse_raw_variant!(TokenGroup, Group, "a delimited group");
 parse_raw_variant!(LiteralToken, Literal, "a literal");
 parse_raw_variant!(Punct, Punct, "punctuation");
 parse_raw_variant!(IdentToken, Ident, "an identifier");
-
-impl Parse for Adj {
-    fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
-        let Some(token) = input.next_significant() else {
-            return Err(TokenParseError::unexpected_end(
-                "adjacency",
-                input.eof_span(),
-            ));
-        };
-        match token.token {
-            TokenTree::Punct(punctuation) if punctuation.text().is_empty() => {
-                let mut adjacency = Self::new("", punctuation.expect_span());
-                *adjacency.trailing_trivia_mut() = token.trailing_trivia;
-                Ok(adjacency)
-            }
-            token => Err(TokenParseError::unexpected_token("adjacency", &token)),
-        }
-    }
-}
 
 impl Parse for TokenStream {
     fn parse(input: &mut ParseStream) -> Result<Self, TokenParseError> {
@@ -199,17 +179,15 @@ impl From<TokenParseError> for FragmentParseError {
     }
 }
 
-/// One non-trivia token together with facts about the trivia immediately
-/// before it. Parser backends share this view instead of maintaining their own
-/// token vectors, cursor positions, and newline scanners.
+/// One token together with whether a line break precedes it. Parser backends
+/// share this view instead of maintaining their own token vectors, cursor
+/// positions, and newline scanners.
 #[derive(Debug, Clone)]
 pub(crate) struct SignificantToken {
     /// The token.
     pub(crate) token: TokenTree,
     /// The crossed newline.
     pub(crate) crossed_newline: bool,
-    /// The trailing trivia.
-    pub(crate) trailing_trivia: TrailingTrivia,
 }
 
 #[derive(Debug, Clone)]
@@ -292,7 +270,7 @@ impl ParseStream {
 
     /// Handles lookahead.
     pub(crate) fn lookahead(&self) -> Lookahead {
-        let Some(mut token) = self.tokens().get(self.position).cloned() else {
+        let Some(token) = self.tokens().get(self.position).cloned() else {
             return Lookahead::End(self.eof_span.clone());
         };
         let crossed_newline = self.position.checked_sub(1).is_some_and(|left| {
@@ -300,11 +278,9 @@ impl ParseStream {
                 .get(left)
                 .is_some_and(|left| tokens_cross_line_break(left, &token))
         });
-        let trailing_trivia = std::mem::take(token.trailing_trivia_mut());
         Lookahead::Token(SignificantToken {
             token,
             crossed_newline,
-            trailing_trivia,
         })
     }
 
@@ -325,23 +301,13 @@ impl ParseStream {
         }
     }
 
-    /// Skips trivia.
-    pub(crate) fn skip_trivia(&mut self) {
-        // Comments are owned by tokens, so every stream element is significant.
-    }
-
     /// Handles end-of-file span.
     pub(crate) fn eof_span(&self) -> Span {
         self.eof_span.clone()
     }
 
-    /// Consumes and returns the next non-trivia token.
+    /// Consumes and returns the next token.
     pub fn next_token(&mut self) -> Option<TokenTree> {
-        self.next_raw_token()
-    }
-
-    /// Consumes the next token, including trivia.
-    pub fn next_raw_token(&mut self) -> Option<TokenTree> {
         self.next()
     }
 
@@ -359,7 +325,7 @@ impl ParseStream {
             ));
         };
         let error = TokenParseError::unexpected_token(T::SPELLING, &token.token);
-        T::from_token_tree_with_trivia(token.token, token.trailing_trivia).ok_or(error)
+        T::from_token_tree(token.token).ok_or(error)
     }
 
     /// Returns whether no significant token remains.

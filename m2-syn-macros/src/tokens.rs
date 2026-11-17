@@ -4,9 +4,10 @@ use proc_macro2::{Delimiter, Ident, Punct, Spacing, Span, TokenStream, TokenTree
 use quote::{format_ident, quote};
 use syn::parse::{Parse as SynParse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{Error, LitStr, Result, braced, bracketed, parse_str, token};
+use syn::{Error, LitStr, Result, Token, braced, bracketed, parse_str, token};
 
 use crate::roles::{ParseFlags, ParseInfo};
+use crate::syntax::Delimiter as DelimiterFamily;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum OperatorKind {
@@ -38,7 +39,10 @@ struct TokenDeclaration {
     /// `+=`. The form itself is synthesized in [`TokenDefinitions::new`],
     /// where `=`'s own precedence is known.
     augmented: bool,
-    trivia: bool,
+    implicit: bool,
+    marker: bool,
+    /// The spelling this one is another spelling of: `->` for `["→"] = [->]`.
+    synonym_of: Option<String>,
 }
 
 impl TokenDeclaration {
@@ -51,6 +55,26 @@ impl TokenDeclaration {
         }
         if patterns.is_empty() {
             return Err(input.error("an operator group cannot be empty"));
+        }
+        if input.peek(Token![=]) {
+            input.parse::<Token![=]>()?;
+            let content;
+            bracketed!(content in input);
+            let target = token_spelling(&content.parse()?)?;
+            return patterns
+                .into_iter()
+                .map(|pattern| {
+                    Ok(Self {
+                        spelling: token_spelling(&pattern)?,
+                        pattern,
+                        parse: None,
+                        augmented: false,
+                        implicit: false,
+                        marker: false,
+                        synonym_of: Some(target.clone()),
+                    })
+                })
+                .collect();
         }
         let flags = if input.peek(token::Brace) {
             let content;
@@ -68,7 +92,9 @@ impl TokenDeclaration {
                     pattern,
                     parse,
                     augmented: flags.augmented,
-                    trivia: flags.trivia,
+                    implicit: flags.implicit,
+                    marker: flags.marker,
+                    synonym_of: None,
                 })
             })
             .collect()
@@ -79,7 +105,11 @@ impl TokenDeclaration {
 enum RawTokenKind {
     Punct,
     Ident,
-    Whitespace,
+    /// A word that adjacency may also imply, spelled empty: `SPACE` in
+    /// `f SPACE x`, and nothing at all in `f x`.
+    Implicit,
+    /// A position that is never written: the end of a cell, `EOC`.
+    Marker,
 }
 
 #[derive(Clone)]
@@ -87,9 +117,18 @@ pub(crate) struct TokenDefinition {
     pub(crate) name: Ident,
     pub(crate) pattern: TokenStream,
     pub(crate) spelling: String,
+    /// Other spellings of the same token, as M2 has `→` for `->`.
+    synonyms: Vec<String>,
     parse: Option<ParseInfo>,
     raw_kind: RawTokenKind,
     augmented: bool,
+}
+
+impl TokenDefinition {
+    /// Every spelling of the token, its own first.
+    fn spellings(&self) -> impl Iterator<Item = &str> + Clone {
+        iter::once(self.spelling.as_str()).chain(self.synonyms.iter().map(String::as_str))
+    }
 }
 
 pub(crate) struct TokenDefinitions {
@@ -111,29 +150,6 @@ impl TokenDefinitions {
         })
     }
 
-    pub(crate) fn resolve(&self, pattern: &TokenStream) -> Result<Ident> {
-        let spelling = token_spelling(pattern)?;
-        self.definitions
-            .iter()
-            .find(|x| x.spelling == spelling)
-            .map(|x| x.name.clone())
-            .ok_or_else(|| Error::new_spanned(pattern, "token was not declared in a token stage"))
-    }
-
-    pub(crate) fn spelling(&self, name: &Ident) -> Option<&str> {
-        self.definitions
-            .iter()
-            .find(|x| x.name == *name)
-            .map(|x| x.spelling.as_str())
-    }
-
-    pub(crate) fn pattern(&self, name: &Ident) -> Option<&TokenStream> {
-        self.definitions
-            .iter()
-            .find(|x| x.name == *name)
-            .map(|x| &x.pattern)
-    }
-
     pub(crate) fn variant_name(&self, name: &Ident) -> Ident {
         let name = name.to_string();
         let friendly = name.strip_prefix('_').unwrap_or(&name);
@@ -146,7 +162,7 @@ impl TokenDefinitions {
             .definitions
             .iter()
             .filter(|x| x.parse.is_some_and(ParseInfo::is_any_operator))
-            .map(|x| x.spelling.as_str());
+            .flat_map(TokenDefinition::spellings);
         let postfix_operator_spellings = self
             .definitions
             .iter()
@@ -154,12 +170,12 @@ impl TokenDefinitions {
                 x.parse
                     .is_some_and(|rule| rule.is_operator(OperatorKind::Postfix))
             })
-            .map(|x| x.spelling.as_str());
+            .flat_map(TokenDefinition::spellings);
         let augmented_operator_spellings = self
             .definitions
             .iter()
             .filter(|x| x.augmented)
-            .map(|x| x.spelling.as_str());
+            .flat_map(TokenDefinition::spellings);
         let keyword_spellings = self
             .definitions
             .iter()
@@ -167,39 +183,87 @@ impl TokenDefinitions {
                 x.raw_kind == RawTokenKind::Ident
                     && !x.parse.is_some_and(ParseInfo::is_any_operator)
             })
-            .map(|x| x.spelling.as_str());
+            .flat_map(TokenDefinition::spellings)
+            .filter(|spelling| raw_token_kind(spelling) == RawTokenKind::Ident);
         let word_token_spellings = self
             .definitions
             .iter()
-            .filter(|x| x.raw_kind == RawTokenKind::Ident)
-            .map(|x| x.spelling.as_str());
+            .filter(|x| matches!(x.raw_kind, RawTokenKind::Ident | RawTokenKind::Implicit));
+        let continuation_spellings = word_token_spellings
+            .clone()
+            .filter(|x| x.parse.is_some_and(|parse| !parse.acts()))
+            .flat_map(TokenDefinition::spellings);
+        let word_token_spellings = word_token_spellings
+            .flat_map(TokenDefinition::spellings)
+            .filter(|spelling| raw_token_kind(spelling) == RawTokenKind::Ident);
+        let synonyms = self.definitions.iter().flat_map(|x| {
+            let spelling = &x.spelling;
+            x.synonyms
+                .iter()
+                .map(move |synonym| quote!((#synonym, #spelling)))
+        });
         let punctuation_spellings = self
             .definitions
             .iter()
-            .map(|x| x.spelling.as_str())
+            .flat_map(TokenDefinition::spellings)
             .filter(|s| !s.is_empty() && s.chars().all(|c| !c.is_ascii_alphanumeric() && c != ' '));
         let definitions = self.definitions.iter().map(|definition| {
             let name = &definition.name;
             let type_name = name;
             let spelling = &definition.spelling;
+            let spellings = definition.spellings();
+            let punct_spellings = spellings
+                .clone()
+                .filter(|spelling| raw_token_kind(spelling) == RawTokenKind::Punct);
+            let word_spellings = spellings
+                .clone()
+                .filter(|spelling| raw_token_kind(spelling) == RawTokenKind::Ident);
+            // Any spelling, a word also behind `Core$`.
+            let spelled_matches = quote! {
+                match token {
+                    ::m2_syn::TokenTree::Punct(token) => {
+                        [#(#punct_spellings),*].contains(&token.text())
+                    }
+                    ::m2_syn::TokenTree::Ident(token) => {
+                        let text = token.text();
+                        [#(#word_spellings),*].contains(&text.strip_prefix("Core$").unwrap_or(text))
+                    }
+                    _ => false,
+                }
+            };
             let (raw_new, raw_from_span, raw_matches) = match definition.raw_kind {
                 RawTokenKind::Punct => (
                     quote!(::m2_syn::TokenTree::Punct(::m2_syn::Punct::new(#spelling, span))),
                     quote!(::m2_syn::TokenTree::Punct(::m2_syn::Punct::from_span(span))),
-                    quote! {
-                        match token {
-                            ::m2_syn::TokenTree::Punct(token) => token.text() == #spelling,
-                            _ => false,
-                        }
-                    },
+                    spelled_matches,
                 ),
                 RawTokenKind::Ident => (
                     quote!(::m2_syn::TokenTree::Ident(::m2_syn::IdentToken::new(#spelling, span))),
                     quote!(::m2_syn::TokenTree::Ident(::m2_syn::IdentToken::from_span(
                         span
                     ))),
+                    spelled_matches,
+                ),
+                RawTokenKind::Marker => (
+                    quote!(::m2_syn::TokenTree::Punct(::m2_syn::Punct::from_span(span))),
+                    quote!(::m2_syn::TokenTree::Punct(::m2_syn::Punct::from_span(span))),
+                    quote! {
+                        let _ = token;
+                        false
+                    },
+                ),
+                RawTokenKind::Implicit => (
+                    quote!(::m2_syn::TokenTree::Punct(::m2_syn::Punct::new("", span))),
+                    quote! {
+                        if span.text().is_some_and(str::is_empty) {
+                            ::m2_syn::TokenTree::Punct(::m2_syn::Punct::from_span(span))
+                        } else {
+                            ::m2_syn::TokenTree::Ident(::m2_syn::IdentToken::from_span(span))
+                        }
+                    },
                     quote! {
                         match token {
+                            ::m2_syn::TokenTree::Punct(token) => token.text().is_empty(),
                             ::m2_syn::TokenTree::Ident(token) => {
                                 token.text() == #spelling
                                     || token.text().strip_prefix("Core$") == Some(#spelling)
@@ -208,27 +272,11 @@ impl TokenDefinitions {
                         }
                     },
                 ),
-                RawTokenKind::Whitespace => (
-                    quote!(::m2_syn::TokenTree::Trivia(::m2_syn::Trivia::new(
-                        ::m2_syn::TriviaKind::Whitespace,
-                        " ",
-                        span,
-                    ))),
-                    quote!(::m2_syn::TokenTree::Trivia(::m2_syn::Trivia::from_span(
-                        ::m2_syn::TriviaKind::Whitespace,
-                        span,
-                    ))),
-                    quote! {
-                        match token {
-                            ::m2_syn::TokenTree::Trivia(token) => {
-                                token.kind() == ::m2_syn::TriviaKind::Whitespace
-                                    && !token.contains_line_break()
-                            }
-                            ::m2_syn::TokenTree::Ident(token) => token.text() == #spelling,
-                            _ => false,
-                        }
-                    },
-                ),
+            };
+            let lex_body = if definition.raw_kind == RawTokenKind::Marker {
+                quote!(let _ = output;)
+            } else {
+                quote!(::m2_syn::Lex::to_tokens(&self.raw, output);)
             };
             let pretty_impl = quote! {
                 impl ::m2_syn::PrettyTree for #type_name {
@@ -238,7 +286,8 @@ impl TokenDefinitions {
                                 "Token![{}]",
                                 <Self as ::m2_syn::Token>::SPELLING,
                             ),
-                            <Self as ::m2_syn::Token>::SPELLING,
+                            // As written, with an implied token shown as `∅`.
+                            self.raw.spelling().filter(|text| !text.is_empty()).unwrap_or("∅"),
                             ::m2_syn::Spanned::expect_span(self),
                         )
                     }
@@ -251,7 +300,6 @@ impl TokenDefinitions {
                 #[doc = concat!("The typed `Token![", #spelling, "]` atom.")]
                 pub struct #type_name {
                     raw: qf!(Box<::m2_syn::TokenTree>),
-                    trailing_trivia: ::m2_syn::TrailingTrivia,
                 }
 
                 #[doc(hidden)]
@@ -260,7 +308,6 @@ impl TokenDefinitions {
                     let span = span.expect_span();
                     #type_name {
                         raw: <qf!(Box<_>)>::new(#raw_new),
-                        trailing_trivia: ::m2_syn::TrailingTrivia::default(),
                     }
                 }
 
@@ -274,26 +321,7 @@ impl TokenDefinitions {
                     fn from_token_tree(token: ::m2_syn::TokenTree) -> qf!(Option<Self>) {
                         Self::matches_token_tree(&token).then_some(Self {
                             raw: <qf!(Box<_>)>::new(token),
-                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
                         })
-                    }
-                }
-
-                impl ::m2_syn::Terminal for #type_name {
-                    fn leading_trivia(&self) -> &::m2_syn::LeadingTrivia {
-                        self.raw.leading_trivia()
-                    }
-
-                    fn leading_trivia_mut(&mut self) -> &mut ::m2_syn::LeadingTrivia {
-                        self.raw.leading_trivia_mut()
-                    }
-
-                    fn trailing_trivia(&self) -> &::m2_syn::TrailingTrivia {
-                        &self.trailing_trivia
-                    }
-
-                    fn trailing_trivia_mut(&mut self) -> &mut ::m2_syn::TrailingTrivia {
-                        &mut self.trailing_trivia
                     }
                 }
 
@@ -307,8 +335,7 @@ impl TokenDefinitions {
 
                 impl ::m2_syn::Lex for #type_name {
                     fn to_tokens(&self, output: &mut ::m2_syn::TokenStream) {
-                        ::m2_syn::Lex::to_tokens(&self.raw, output);
-                        ::m2_syn::Lex::to_tokens(&self.trailing_trivia, output);
+                        #lex_body
                     }
                 }
 
@@ -319,7 +346,9 @@ impl TokenDefinitions {
                     N: ::m2_syn::ExternalCstNode,
                 {
                     fn matches(node: &N) -> bool {
-                        node.identity().matches(#spelling, false)
+                        [#(#spellings),*]
+                            .into_iter()
+                            .any(|spelling| node.identity().matches(spelling, false))
                     }
 
                     fn migrate(node: N) -> Result<Self, ::m2_syn::MigrateError> {
@@ -333,7 +362,6 @@ impl TokenDefinitions {
                         let span = node.expect_span();
                         Ok(#type_name {
                             raw: <qf!(Box<_>)>::new(#raw_from_span),
-                            trailing_trivia: ::m2_syn::TrailingTrivia::default(),
                         })
                     }
                 }
@@ -370,8 +398,23 @@ impl TokenDefinitions {
                 #(#keyword_spellings),*
             ];
 
+            /// The words `Core$word` also spells. Punctuation has no such
+            /// alias: `Core$+` lexes as `Core$` followed by `+`.
             pub(crate) const GENERATED_WORD_TOKEN_SPELLINGS: &[&str] = &[
                 #(#word_token_spellings),*
+            ];
+
+            /// The words that only continue a construct, which M2 matches by
+            /// their exact spelling: `then` in `if x then y`. Their `Core$`
+            /// aliases are therefore syntax errors wherever they stand.
+            pub(crate) const GENERATED_CONTINUATION_SPELLINGS: &[&str] = &[
+                #(#continuation_spellings),*
+            ];
+
+            /// Every other spelling of a token, beside the token's own: M2's
+            /// `→` for `->` and `threadVariable` for `threadLocal`.
+            pub(crate) const GENERATED_SYNONYMS: &[(&str, &str)] = &[
+                #(#synonyms),*
             ];
 
             pub(crate) const GENERATED_PUNCTUATION_SPELLINGS: &[&str] = &[
@@ -416,10 +459,15 @@ impl TokenDefinitions {
             .and_then(|token| token.parse)
             .and_then(ParseInfo::augmented_form);
 
+        let (synonyms, tokens): (Vec<_>, Vec<_>) = tokens
+            .into_iter()
+            .partition(|token| token.synonym_of.is_some());
         for token in tokens {
             let name = token_name(&token.pattern)?;
-            let raw_kind = if token.trivia {
-                RawTokenKind::Whitespace
+            let raw_kind = if token.marker {
+                RawTokenKind::Marker
+            } else if token.implicit {
+                RawTokenKind::Implicit
             } else {
                 raw_token_kind(&token.spelling)
             };
@@ -431,6 +479,7 @@ impl TokenDefinitions {
                     spelling: token.spelling.clone(),
                     parse: token.parse,
                     raw_kind,
+                    synonyms: Vec::new(),
                     augmented: false,
                 },
             )?;
@@ -452,10 +501,25 @@ impl TokenDefinitions {
                         spelling: format!("{}=", token.spelling),
                         parse: Some(augmented),
                         raw_kind: RawTokenKind::Punct,
+                        synonyms: Vec::new(),
                         augmented: true,
                     },
                 )?;
             }
+        }
+
+        for synonym in synonyms {
+            let target = synonym.synonym_of.expect("partitioned on the target");
+            let definition = definitions
+                .iter_mut()
+                .find(|definition| definition.spelling == target)
+                .ok_or_else(|| {
+                    Error::new(
+                        synonym.pattern.span(),
+                        format!("`{target}` is not declared before its synonym"),
+                    )
+                })?;
+            definition.synonyms.push(synonym.spelling);
         }
 
         Ok(Self { definitions })
@@ -463,26 +527,10 @@ impl TokenDefinitions {
 }
 
 fn expand_delimiters() -> TokenStream {
-    let definitions = [
-        (
-            format_ident!("_ParenthesisDelimiter"),
-            quote!(DelimiterKind::Parenthesis),
-        ),
-        (
-            format_ident!("_BracketDelimiter"),
-            quote!(DelimiterKind::Bracket),
-        ),
-        (
-            format_ident!("_BraceDelimiter"),
-            quote!(DelimiterKind::Brace),
-        ),
-        (
-            format_ident!("_AngleBarDelimiter"),
-            quote!(DelimiterKind::AngleBar),
-        ),
-    ]
-    .into_iter()
-    .map(|(name, kind)| {
+    let definitions = DelimiterFamily::ALL.into_iter().map(|family| {
+        let name = family.type_name();
+        let kind = format_ident!("{}", family.name());
+        let kind = quote!(DelimiterKind::#kind);
         let pretty_impl = quote! {
             impl PrettyTree for #name {
                 fn pretty_tree(&self) -> PrettyNode {
@@ -495,8 +543,6 @@ fn expand_delimiters() -> TokenStream {
             #[doc = concat!("The typed `", stringify!(#name), "` delimiter atom.")]
             pub struct #name {
                 spans: DoubleSpan,
-                opening_trivia: TrailingTrivia,
-                closing_trivia: TrailingTrivia,
             }
 
             #[doc(hidden)]
@@ -510,11 +556,7 @@ fn expand_delimiters() -> TokenStream {
                 const KIND: DelimiterKind = #kind;
 
                 fn new(spans: DoubleSpan) -> Self {
-                    Self {
-                        spans,
-                        opening_trivia: TrailingTrivia::default(),
-                        closing_trivia: TrailingTrivia::default(),
-                    }
+                    Self { spans }
                 }
 
                 fn spans(&self) -> DoubleSpan {
@@ -525,37 +567,16 @@ fn expand_delimiters() -> TokenStream {
             impl DelimiterValue for #name {
                 fn from_delimiter(delimiter: Delimiter) -> Option<Self> {
                     (delimiter.kind == Self::KIND).then_some(Self {
-                        spans: delimiter.spans.clone(),
-                        opening_trivia: delimiter.opening_trivia().clone(),
-                        closing_trivia: delimiter.closing_trivia().clone(),
+                        spans: delimiter.spans,
                     })
                 }
 
                 fn delimiter(&self) -> Delimiter {
-                    let mut delimiter = Delimiter::new(Self::KIND, self.spans.clone());
-                    *delimiter.opening_trivia_mut() = self.opening_trivia.clone();
-                    *delimiter.closing_trivia_mut() = self.closing_trivia.clone();
-                    delimiter
+                    Delimiter::new(Self::KIND, self.spans.clone())
                 }
 
                 fn expected() -> &'static str {
                     Self::KIND.opening()
-                }
-
-                fn opening_trivia(&self) -> &TrailingTrivia {
-                    &self.opening_trivia
-                }
-
-                fn opening_trivia_mut(&mut self) -> &mut TrailingTrivia {
-                    &mut self.opening_trivia
-                }
-
-                fn closing_trivia(&self) -> &TrailingTrivia {
-                    &self.closing_trivia
-                }
-
-                fn closing_trivia_mut(&mut self) -> &mut TrailingTrivia {
-                    &mut self.closing_trivia
                 }
             }
 
@@ -582,7 +603,7 @@ fn expand_delimiters() -> TokenStream {
         mod __m2_syn_delimiters {
             use ::m2_syn::{
                 Delimiter, DelimiterKind, DelimiterToken, DelimiterValue, DoubleSpan, Parse,
-                ParseStream, Span, Spanned, Lex, TokenParseError, TokenStream, TrailingTrivia,
+                ParseStream, Span, Spanned, Lex, TokenParseError, TokenStream,
                 parse_delimiter,
             };
             use ::m2_syn::{PrettyNode, PrettyTree};
@@ -611,25 +632,11 @@ impl SynParse for TokenDefinitions {
 }
 
 fn parse_token_stage(input: ParseStream<'_>) -> Result<Vec<TokenDeclaration>> {
-    parse_stage_name(input, "tokens")?;
-    let content;
-    braced!(content in input);
     let mut declarations = Vec::new();
-    while !content.is_empty() {
-        declarations.extend(TokenDeclaration::parse(&content)?);
+    while !input.is_empty() {
+        declarations.extend(TokenDeclaration::parse(input)?);
     }
     Ok(declarations)
-}
-
-fn parse_stage_name(input: ParseStream<'_>, expected: &str) -> Result<()> {
-    let name: Ident = input.parse()?;
-    if name != expected {
-        return Err(Error::new(
-            name.span(),
-            format!("expected `{expected}` token stage"),
-        ));
-    }
-    Ok(())
 }
 
 fn insert_definition(
@@ -692,9 +699,7 @@ fn raw_token_kind(spelling: &str) -> RawTokenKind {
 
 fn token_name(pattern: &TokenStream) -> Result<String> {
     let spelling = token_spelling(pattern)?;
-    let base = if spelling.is_empty() {
-        "Adj".to_owned()
-    } else if spelling == "(*)" {
+    let base = if spelling == "(*)" {
         "Graded".to_owned()
     } else if spelling
         .chars()
@@ -713,22 +718,19 @@ fn token_name(pattern: &TokenStream) -> Result<String> {
 }
 
 /// The type a `Token![…]` invocation resolves to, derived from its spelling.
+/// A delimiter pair, `Token![()]`, names its delimiter atom, and nothing
+/// written, `Token![]` or `Token![" "]`, is adjacency: `f x` is `f SPACE x`.
 pub(crate) fn token_type_name(pattern: &TokenStream) -> Result<Ident> {
-    ident(&token_name(pattern)?, Span::call_site())
-}
-
-fn grouped_token_spelling(group: &proc_macro2::Group) -> Result<&'static str> {
-    if group.delimiter() != Delimiter::Parenthesis {
-        return Err(Error::new(group.span(), "groups are not valid tokens"));
+    let spelling = token_spelling(pattern)?;
+    if let Some(family) = DelimiterFamily::spelled(&spelling) {
+        return Ok(family.type_name());
     }
-    let mut inner = group.stream().into_iter();
-    match (inner.next(), inner.next()) {
-        (Some(TokenTree::Punct(punctuation)), None) if punctuation.as_char() == '*' => Ok("(*)"),
-        _ => Err(Error::new(
-            group.span(),
-            "only `(*)` is supported as a grouped token",
-        )),
-    }
+    let name = if spelling.is_empty() {
+        token_name(&quote!(SPACE))?
+    } else {
+        token_name(pattern)?
+    };
+    ident(&name, Span::call_site())
 }
 
 fn word_name(word: &str) -> String {
@@ -751,31 +753,36 @@ fn word_name(word: &str) -> String {
         .collect()
 }
 
-fn token_spelling(pattern: &TokenStream) -> Result<String> {
-    if pattern.is_empty() {
-        return Ok(String::new());
-    }
-
-    let mut spelling = String::new();
-    for tree in pattern.clone() {
-        match tree {
-            TokenTree::Group(group) => {
-                spelling.push_str(grouped_token_spelling(&group)?);
-            }
-            TokenTree::Ident(ident) => spelling.push_str(&ident.to_string()),
-            TokenTree::Literal(literal) => {
-                spelling.push_str(
-                    &parse_str::<LitStr>(&literal.to_string())
-                        .map_err(|_| {
-                            Error::new(literal.span(), "token literals must be string literals")
-                        })?
-                        .value(),
-                );
-            }
-            TokenTree::Punct(punctuation) => spelling.push(punctuation.as_char()),
-        }
-    }
-    Ok(spelling)
+/// The M2 spelling Rust tokens and string fragments write together:
+/// `"!" =`, `(*)`, and `"< | |>"` spell `!=`, `(*)`, and `<||>`. M2 spellings
+/// hold no whitespace, so whitespace anywhere only separates fragments.
+pub(crate) fn token_spelling(pattern: &TokenStream) -> Result<String> {
+    pattern
+        .clone()
+        .into_iter()
+        .map(|tree| {
+            Ok(match tree {
+                TokenTree::Group(group) => {
+                    let (open, close) = match group.delimiter() {
+                        Delimiter::Parenthesis => ("(", ")"),
+                        Delimiter::Bracket => ("[", "]"),
+                        Delimiter::Brace => ("{", "}"),
+                        Delimiter::None => ("", ""),
+                    };
+                    format!("{open}{}{close}", token_spelling(&group.stream())?)
+                }
+                TokenTree::Ident(ident) => ident.to_string(),
+                TokenTree::Literal(literal) => parse_str::<LitStr>(&literal.to_string())
+                    .map_err(|_| {
+                        Error::new(literal.span(), "token literals must be string literals")
+                    })?
+                    .value()
+                    .split_whitespace()
+                    .collect(),
+                TokenTree::Punct(punctuation) => punctuation.as_char().to_string(),
+            })
+        })
+        .collect()
 }
 
 fn augmented_pattern(pattern: &TokenStream) -> Result<TokenStream> {
@@ -861,18 +868,16 @@ mod tests {
 
     fn declarations() -> TokenDefinitions {
         parse2(quote! {
-            tokens {
                 [=] { infix } (14, R)
                 [+] { pref, bin, aug } (50, L)
                 [!] { post } (72)
                 [not] { pref } (34)
                 [(*)] { post } (64)
                 ["\\"] { bin, aug } (58, R)
-                [SPACE] { bin, trivia } (62, R)
+                [SPACE] { bin, implicit } (62, R)
                 [if] (62, 12)
                 [symbol] [threadLocal] [threadVariable] (62, 74)
                 [;] [,] ["``"]
-            }
         })
         .unwrap()
     }
@@ -997,7 +1002,7 @@ mod tests {
     #[test]
     fn string_fragments_name_characters_rust_cannot_tokenize() {
         let definitions = parse2::<TokenDefinitions>(quote! {
-            tokens { ["→"] }
+            ["→"]
         })
         .unwrap();
 
@@ -1026,7 +1031,7 @@ mod tests {
     #[test]
     fn precedence_triple_rejects_non_numeric_slots() {
         let error = parse2::<TokenDefinitions>(quote! {
-            tokens { [+] { bin } (PREC_ADDITION, R) }
+            [+] { bin } (PREC_ADDITION, R)
         })
         .err()
         .expect("a named precedence value must be rejected");
@@ -1041,7 +1046,7 @@ mod tests {
     #[test]
     fn operator_and_postfix_actions_cannot_combine() {
         let error = parse2::<TokenDefinitions>(quote! {
-            tokens { [+] { bin, post } (50, L) }
+            [+] { bin, post } (50, L)
         })
         .err()
         .expect("combining an operator and a postfix action must be rejected");

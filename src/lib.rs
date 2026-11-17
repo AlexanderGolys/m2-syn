@@ -3,7 +3,7 @@
 
 extern crate self as m2_syn;
 
-pub use m2_syn_macros::syntax;
+pub use m2_syn_macros::{Syntax, tokens, traversal};
 
 // Files are grouped by the stage they belong to — `lex/`, `parser/`,
 // `migration/`, `schema/` — while the module paths stay flat, so `#[path]` carries the
@@ -19,19 +19,20 @@ mod macros;
 mod body;
 #[path = "lex/cell_stream.rs"]
 mod cell_stream;
+#[path = "lex/comment.rs"]
+mod comment;
 #[path = "migration/cst.rs"]
 mod cst;
 #[path = "parser/delimited.rs"]
 mod delimited;
+mod expansion;
 #[path = "lex/lexer.rs"]
 pub mod lexer;
-/// Generated typed Macaulay2 syntax nodes and literal-token types.
-#[macro_use]
-#[path = "schema/nodes.rs"]
-pub mod nodes;
-mod expansion;
 #[path = "parser/native.rs"]
 pub mod native;
+/// Typed Macaulay2 syntax nodes and literal-token types.
+#[path = "schema/nodes.rs"]
+pub mod nodes;
 #[path = "parser/parse.rs"]
 pub mod parse;
 mod parsed_file;
@@ -46,15 +47,14 @@ mod span;
 #[path = "lex/token_stream.rs"]
 /// Internal support for token stream.
 mod token_stream;
+#[path = "schema/tokens.rs"]
+mod tokens;
+#[path = "schema/traversal.rs"]
+mod traversal;
 
 #[cfg(feature = "tree-sitter")]
 #[path = "migration/treesitter.rs"]
 pub mod treesitter;
-
-#[cfg(feature = "tree-sitter")]
-#[path = "migration/trivia_transfer.rs"]
-/// Internal support for carrying lexer trivia onto lowered syntax.
-mod trivia_transfer;
 
 #[cfg(feature = "tree-sitter")]
 pub use treesitter::{
@@ -71,6 +71,7 @@ pub use cell_stream::{
     CellStream, CellStreamError, CellTokenGroup, CellTokenStream, CellTokenTree, FramedCells,
     Tokenize, frame_recovering,
 };
+pub use comment::{Comment, CommentKind, Comments};
 pub use cst::{
     CSTNodeClassLabel, ChildCursor, ExternalCstChild, ExternalCstNode, Migrate, MigrateError, Token,
 };
@@ -78,14 +79,10 @@ pub use delimited::Delimited;
 pub use expansion::ProcMacro;
 pub use expansion::{LiteralReturnTypes, LiteralReturnTypesError};
 #[doc(hidden)]
-pub use lexer::{__qualified_identifier_spans, __quote_fragment};
+pub use lexer::__quote_fragment;
 pub use lexer::{LexError, LexErrorKind, lex, lex_recovering, lex_str, lex_str_recovering};
 #[doc(hidden)]
 pub use m2_syn_macros::__SyntaxWalk;
-#[doc(hidden)]
-pub use m2_syn_macros::__syntax_token_walk;
-#[doc(hidden)]
-pub use m2_syn_macros::__syntax_walk_function;
 #[doc(hidden)]
 pub use m2_syn_macros::token as __m2_syn_token;
 pub use m2_syn_macros::{Spanned, parse_quote_m2, quote_m2};
@@ -94,7 +91,6 @@ pub use native::{
     parse_native, parse_native_recovering,
 };
 pub(crate) use nodes::*;
-pub use nodes::{fold, visit, visit_mut};
 pub use parsed_file::ParsedFile;
 pub use pretty::{
     PrettyDetail, PrettyDetailRole, PrettyEdge, PrettyNode, PrettyNodeRole, PrettyOptions,
@@ -115,6 +111,6 @@ pub use token_stream::delim::{
     Delimiter, DelimiterKind, DelimiterToken, DelimiterValue, DoubleSpan,
 };
 pub use token_stream::{
-    CommentTrivia, IdentToken, LeadingTrivia, Lex, LiteralKind, LiteralToken, Punct, Terminal,
-    TokenGroup, TokenStream, TokenTree, TrailingTrivia, Trivia, TriviaKind,
+    IdentToken, Lex, LiteralKind, LiteralToken, Punct, TokenGroup, TokenStream, TokenTree,
 };
+pub use traversal::{fold, visit, visit_mut};
